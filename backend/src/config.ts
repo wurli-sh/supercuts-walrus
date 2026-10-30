@@ -24,6 +24,7 @@ const HEX_32 = /^(?:0x)?[0-9a-f]{64}$/i;
 const SUI_ID = /^0x[0-9a-f]{64}$/i;
 
 export function parseDeploymentConfig(value: Record<string, unknown>): DeploymentConfig {
+  if (value.network !== "testnet") fail("CONFIG_INVALID", "network must be the pinned testnet deployment");
   const string = (key: string): string => {
     const result = value[key];
     if (typeof result !== "string" || !result.trim()) fail("CONFIG_INVALID", `${key} is required`);
@@ -45,6 +46,12 @@ export function parseDeploymentConfig(value: Record<string, unknown>): Deploymen
   if (![config.coinTypeHash, config.deploymentDomain, config.initialRoot].every((hex) => HEX_32.test(hex))) fail("CONFIG_INVALID", "deployment hashes must be 32-byte hex values");
   if (!Number.isInteger(config.verifierVersion) || config.verifierVersion < 1) fail("CONFIG_INVALID", "verifierVersion must be a positive integer");
   if (config.deploymentCheckpoint < 0n) fail("CONFIG_INVALID", "deploymentCheckpoint cannot be negative");
+  for (const [name, endpoint] of Object.entries({ tatumGrpcEndpoint: config.tatumGrpcEndpoint, writeGrpcEndpoint: config.writeGrpcEndpoint, walrusPublisherUrl: config.walrusPublisherUrl, walrusAggregatorUrl: config.walrusAggregatorUrl, x402FacilitatorUrl: config.x402FacilitatorUrl })) {
+    let url: URL;
+    try { url = new URL(endpoint); } catch (error) { return fail("CONFIG_INVALID", `${name} must be an absolute URL`, error); }
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(url.hostname))) fail("CONFIG_INVALID", `${name} must use HTTPS except on loopback`);
+    if (url.username || url.password) fail("CONFIG_INVALID", `${name} cannot contain embedded credentials`);
+  }
   return config;
 }
 

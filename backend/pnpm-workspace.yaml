@@ -1,2 +1,5 @@
 allowBuilds:
+  blake-hash: true
   esbuild: true
+overrides:
+  ws: 8.21.0

@@ -8,13 +8,17 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "tsx --test test/**/*.test.ts"
+    "test": "tsx --test test/**/*.test.ts",
+    "test:e2e": "tsx --test test/phase2.e2e.test.ts",
+    "test:seal-live": "tsx scripts/seal-live-e2e.ts",
+    "test:x402-live": "tsx scripts/x402-live-e2e.ts"
   },
   "dependencies": {
     "@mysten-incubation/memwal": "0.1.11",
     "@mysten/seal": "1.5.2",
     "@mysten/sui": "2.38.0",
-    "@mysten/walrus": "1.2.37"
+    "@mysten/walrus": "1.2.37",
+    "circomlibjs": "0.1.7"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

@@ -9,6 +9,10 @@ export interface TransferCall {
 }
 const bytes = (value: Uint8Array) => Array.from(value);
 export function buildPrivateTransfer(call: TransferCall): Transaction {
+  if (!/^0x[0-9a-f]{64}$/i.test(call.packageId) || !/^0x[0-9a-f]{64}$/i.test(call.poolId) || !/^[^\s:]+(?:::[^\s:]+){2}(?:<.*>)?$/.test(call.coinType)) fail("POOL_ARGUMENT_INVALID", "package, pool, or coin type is invalid");
+  const u64Max = (1n << 64n) - 1n;
+  if (call.expiryMs < 0n || call.expiryMs > u64Max || call.newIndex < 0n || call.newIndex > u64Max) fail("POOL_ARGUMENT_INVALID", "expiry and new index must be u64 values");
+  if (!call.proof.length || call.proof.length > 4096) fail("POOL_ARGUMENT_INVALID", "proof length is invalid");
   for (const [name, value] of Object.entries({ dealCommitment: call.dealCommitment, dealNullifier: call.dealNullifier, inputNullifier: call.inputNullifier, paymentCommitment: call.paymentCommitment, changeCommitment: call.changeCommitment, newRoot: call.newRoot })) {
     if (value.length !== 32) fail("POOL_ARGUMENT_INVALID", `${name} must contain 32 bytes`);
   }

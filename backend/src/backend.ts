@@ -4,6 +4,7 @@ import { PoolEvent, PoolIndex, applyPoolEvent, assertPoolState, createPoolIndex 
 import { RelayAdmission, RelayPin, RelayRequest } from "./relayer.js";
 import { RoleStore } from "./store.js";
 import { MessageEnvelope, validateTranscript } from "./transcript.js";
+import { EvidenceReader, PrivateWallet, SettlementExpectation } from "./wallet.js";
 
 /**
  * Role-local façade. Network processes inject transport/proof adapters; this
@@ -12,43 +13,47 @@ import { MessageEnvelope, validateTranscript } from "./transcript.js";
 export class SupercutsBackend {
   readonly poolIndex: PoolIndex;
   readonly relay: RelayAdmission;
-  constructor(readonly config: DeploymentConfig, readonly store: RoleStore) {
+  readonly wallet: PrivateWallet;
+  private readonly pin: RelayPin;
+  constructor(config: DeploymentConfig, readonly store: RoleStore) {
     this.poolIndex = createPoolIndex(config.initialRoot.replace(/^0x/, ""), config.deploymentCheckpoint);
-    const pin: RelayPin = { packageId: config.packageId, poolId: config.poolId, coinType: config.coinType, verifierVersion: config.verifierVersion };
+    this.pin = { packageId: config.packageId, poolId: config.poolId, coinType: config.coinType, verifierVersion: config.verifierVersion };
     this.relay = new RelayAdmission(
       store,
-      pin,
+      this.pin,
       (address, bytes, signature) => isValidPersonalMessageSignature(bytes, signature, { address }),
       // The caller must inject the pinned Groth16 verifier before admitting a
       // live relay request. A missing verifier fails closed.
       async () => false,
     );
+    this.wallet = new PrivateWallet(store);
   }
   applyObservedEvents(events: PoolEvent[], poolState: { root: string; nextLeaf: bigint }): void {
+    const candidate: PoolIndex = {
+      root: this.poolIndex.root, nextLeaf: this.poolIndex.nextLeaf, checkpoint: this.poolIndex.checkpoint,
+      spent: new Set(this.poolIndex.spent), deals: new Set(this.poolIndex.deals), acceptedRoots: new Set(this.poolIndex.acceptedRoots),
+      ...(this.poolIndex.lastPosition ? { lastPosition: { ...this.poolIndex.lastPosition } } : {}),
+    };
     for (const event of [...events].sort((a, b) => {
       if (a.checkpoint !== b.checkpoint) return a.checkpoint < b.checkpoint ? -1 : 1;
       if (a.transactionIndex !== b.transactionIndex) return a.transactionIndex < b.transactionIndex ? -1 : 1;
       return a.eventIndex - b.eventIndex;
-    })) applyPoolEvent(this.poolIndex, event);
-    assertPoolState(this.poolIndex, poolState);
+    })) applyPoolEvent(candidate, event);
+    assertPoolState(candidate, poolState);
+    this.poolIndex.root = candidate.root; this.poolIndex.nextLeaf = candidate.nextLeaf; this.poolIndex.checkpoint = candidate.checkpoint;
+    this.poolIndex.spent = candidate.spent; this.poolIndex.deals = candidate.deals; this.poolIndex.acceptedRoots = candidate.acceptedRoots;
+    if (candidate.lastPosition) this.poolIndex.lastPosition = candidate.lastPosition;
   }
   async verifyTranscript(messages: MessageEnvelope[]): Promise<string> {
     return validateTranscript(messages, (address, bytes, signature) => isValidPersonalMessageSignature(bytes, signature, { address }));
   }
-  reserveInput(operationId: string, payloadHash: string, noteCommitment: string): void {
-    this.store.beginOperation(operationId, payloadHash);
-    this.store.reserveNote(noteCommitment, operationId);
+  preparePrivateTransfer(operationId: string, payloadHash: string, inputCommitment: string, expected: SettlementExpectation, proof: Uint8Array): void {
+    this.wallet.prepare(operationId, payloadHash, inputCommitment, expected, proof);
   }
-  persistProof(operationId: string, proof: Uint8Array): void {
-    this.store.putSecret(`proof:${operationId}`, proof);
-    this.store.transitionOperation(operationId, "proof_persisted");
-  }
-  markBroadcast(operationId: string, digest: string): void { this.store.transitionOperation(operationId, "broadcast", digest); }
-  markFinalized(operationId: string, digest: string): void { this.store.transitionOperation(operationId, "finalized", digest); }
-  markUnresolved(operationId: string): void { this.store.transitionOperation(operationId, "unresolved"); }
+  markBroadcast(operationId: string, digest: string): void { this.wallet.recordBroadcast(operationId, digest); }
+  reconcilePrivateTransfer(operationId: string, read: EvidenceReader) { return this.wallet.reconcile(operationId, read); }
   async admitRelay(request: RelayRequest, verifyProof: (statement: Uint8Array, proof: Uint8Array) => Promise<boolean>): Promise<void> {
-    const pin: RelayPin = { packageId: this.config.packageId, poolId: this.config.poolId, coinType: this.config.coinType, verifierVersion: this.config.verifierVersion };
-    const admission = new RelayAdmission(this.store, pin, (address, bytes, signature) => isValidPersonalMessageSignature(bytes, signature, { address }), verifyProof);
+    const admission = new RelayAdmission(this.store, this.pin, (address, bytes, signature) => isValidPersonalMessageSignature(bytes, signature, { address }), verifyProof);
     return admission.admit(request);
   }
 }
