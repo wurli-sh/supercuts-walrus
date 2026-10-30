@@ -29,7 +29,19 @@ backend logs and returned objects.
   a pinned proof/public-statement submission can be broadcast.
 - `ManualMemory` uses `MemWalManual`, so memory plaintext is embedded and
   encrypted on the client before the Walrus Memory relayer receives it.
+- `DurableTranscriptTransport` persists exact ciphertext before Walrus upload
+  and authenticates the complete transcript after restart.
+- `PrivateWallet` reconciles only finalized, pinned pool evidence and recovers
+  payment/change notes from matching openings.
+- `ExactResourceServer` adds a signed request binding and atomic payment-use
+  ledger around the standard x402 exact rail. `scripts/x402-live-e2e.ts` starts
+  with a live 402 challenge, settles the signed Sui transaction through the
+  protected resource, reconciles chain evidence, and checks both replay paths.
+- `SealClientDisclosureTransport` encrypts auditor-scoped disclosure packages;
+  `scripts/seal-live-e2e.ts` supplies the deployed account policy approval PTB,
+  verifies finalized chain evidence, and gates the designated auditor decrypt.
 
-Live role processes, Walrus transcript upload credentials, the selected x402
-facilitator, and Phase 2 report generation remain integration configuration;
-no test-only pool is represented as production-safe.
+The selected x402 facilitator remains deployment configuration. The Testnet
+Seal policy is pinned in `config/seal-policy.testnet.json`. No test-only pool is represented as production-safe. Run the
+repository-level `scripts/phase2-check.sh` and see `phase-2-report.md` for the
+live test evidence and explicit production boundary.

@@ -25,3 +25,15 @@ public-data inspection are recorded in `phase-1-report.md`. The generated
 circuit artifacts and deployed pools remain experimental and must not custody
 production assets.
 
+## Phase 2 backend gate
+
+```sh
+./scripts/phase2-check.sh
+```
+
+The **Phase 2 formal exit gate passes** for the pinned test-only deployment.
+Live transcript, Tatum, auditor-scoped Seal, application-bound x402, and ten-
+Mainnet-memory artifacts are recorded in `phase-2-report.md`. The generated
+proof system and deployed services remain experimental and are not a production
+safety claim.
+
