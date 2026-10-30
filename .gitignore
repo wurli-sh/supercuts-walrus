@@ -1,0 +1,12 @@
+/target/
+/circuits/node_modules/
+/circuits/build/
+/contracts/build/
+*.env
+*.key
+*.zkey
+*.ptau
+/reference-shii/
+/*.md
+!/README.md
+
