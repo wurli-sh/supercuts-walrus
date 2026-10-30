@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { MemWal } from "@mysten-incubation/memwal";
 import { MemWalManual } from "@mysten-incubation/memwal/manual";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -14,22 +15,43 @@ const env = Object.fromEntries(readFileSync(resolve(repository, ".env"), "utf8")
   }));
 const required = [
   "MEMWAL_KEY", "MEMWAL_ACCOUNT_ID", "SUI_PRIVATE_KEY", "OPENAI_API_KEY",
-  "WALRUS_MEMORY_PACKAGE_ID", "WALRUS_MEMORY_REGISTRY_ID",
 ];
 const missing = required.filter((name) => !env[name]);
 if (missing.length) throw new Error(`missing required Walrus manual-mode values: ${missing.join(", ")}`);
 
+const serverUrl = env.MEMWAL_SERVER_URL.replace(/\/$/, "");
+const deploymentResponse = await fetch(`${serverUrl}/config`);
+if (!deploymentResponse.ok) throw new Error(`could not load relayer deployment metadata: HTTP ${deploymentResponse.status}`);
+const deployment = await deploymentResponse.json();
+const packageId = env.WALRUS_MEMORY_PACKAGE_ID ?? deployment.packageId;
+const registryId = env.WALRUS_MEMORY_REGISTRY_ID ?? deployment.registryId;
+const network = env.WALRUS_MEMORY_NETWORK ?? deployment.network;
+
+// Confirm the account/delegate binding before calling an embedding endpoint or
+// constructing encrypted content. This fails closed on a stale account/key.
+const authClient = MemWal.create({
+  key: env.MEMWAL_KEY,
+  accountId: env.MEMWAL_ACCOUNT_ID,
+  serverUrl,
+  namespace: "supercuts-phase1",
+});
+try {
+  await authClient.resolveOwner();
+} finally {
+  authClient.destroy();
+}
+
 const client = MemWalManual.create({
   key: env.MEMWAL_KEY,
   accountId: env.MEMWAL_ACCOUNT_ID,
-  serverUrl: env.MEMWAL_SERVER_URL,
+  serverUrl,
   suiPrivateKey: env.SUI_PRIVATE_KEY,
   embeddingApiKey: env.OPENAI_API_KEY,
   embeddingApiBase: env.OPENAI_BASE_URL,
   embeddingModel: env.EMBEDDING_MODEL,
-  packageId: env.WALRUS_MEMORY_PACKAGE_ID,
-  registryId: env.WALRUS_MEMORY_REGISTRY_ID,
-  suiNetwork: env.WALRUS_MEMORY_NETWORK === "testnet" ? "testnet" : "mainnet",
+  packageId,
+  registryId,
+  suiNetwork: network === "testnet" ? "testnet" : "mainnet",
   namespace: "supercuts-phase1",
 });
 
