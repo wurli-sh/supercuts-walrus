@@ -1,0 +1,21 @@
+{
+  "network": "testnet",
+  "packageId": "0xcc689cc619cb2e7babeff498bf454e7b5fac9c118f4d8145485efcd8d85fbcce",
+  "packagePublishTransaction": "Ehpv7zZnxou3kxcYZDhDsZRueyiwWzT39SxsKefkZQG2",
+  "packagePublishCheckpoint": "400916719",
+  "module": "auditor",
+  "approveFunction": "seal_approve",
+  "threshold": 2,
+  "serverConfigs": [
+    {
+      "objectId": "0xb012378c9f3799fb5b1a7083da74a4069e3c3f1c93de0b27212a5799ce1e1e98",
+      "aggregatorUrl": "https://seal-aggregator-testnet.mystenlabs.com",
+      "weight": 1
+    },
+    {
+      "objectId": "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75",
+      "weight": 1
+    }
+  ],
+  "testOnly": true
+}

@@ -1,0 +1,9 @@
+[package]
+name = "supercuts_audit_policy"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+
+[addresses]
+supercuts_audit_policy = "0x0"

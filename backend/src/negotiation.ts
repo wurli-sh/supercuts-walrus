@@ -8,7 +8,6 @@ export interface BlobTransport {
   get(blobId: string): Promise<string>;
   resolve(id: string): Promise<string | undefined>;
 }
-
 export interface TranscriptManifestEntry extends Omit<MessageEnvelope, "ciphertext"> { blobId: string; }
 
 function sessionKey(key: Uint8Array): Buffer {
