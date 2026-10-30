@@ -13,6 +13,9 @@ const env = Object.fromEntries(readFileSync(resolve(repository, ".env"), "utf8")
     const index = line.indexOf("=");
     return [line.slice(0, index), line.slice(index + 1)];
   }));
+env.MEMWAL_KEY ??= env.MEMWAL_DELEGATE_KEY ?? env.WALRUS_MEMORY_DELEGATE_KEY;
+env.MEMWAL_ACCOUNT_ID ??= env.WALRUS_MEMORY_ACCOUNT_ID;
+env.MEMWAL_SERVER_URL ??= env.WALRUS_MEMORY_ENDPOINT;
 const required = [
   "MEMWAL_KEY", "MEMWAL_ACCOUNT_ID", "SUI_PRIVATE_KEY", "OPENAI_API_KEY",
 ];
@@ -56,7 +59,9 @@ const client = MemWalManual.create({
 });
 
 try {
-  const health = await client.health();
+  const healthResponse = await fetch(`${serverUrl}/health`);
+  if (!healthResponse.ok) throw new Error(`Walrus health check failed: HTTP ${healthResponse.status}`);
+  const health = await healthResponse.json();
   if (process.argv.includes("--write")) {
     const marker = `Supercuts Phase 1 Walrus manual-mode verification ${new Date().toISOString()}`;
     const stored = await client.rememberManual(marker);
