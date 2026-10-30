@@ -1,0 +1,21 @@
+{
+  "name": "supercuts-circuits",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "compile": "node scripts/build.mjs",
+    "fixtures:live": "node scripts/create-live-fixtures.mjs",
+    "fixtures:live:append": "node scripts/create-live-fixtures.mjs --append",
+    "prove:test-only": "node scripts/prove.mjs",
+    "prove:transaction": "node scripts/prove-transaction.mjs",
+    "setup:rapidsnark": "node scripts/setup-rapidsnark.mjs",
+    "submit:live": "node scripts/submit-live-demo.mjs",
+    "test": "node --test scripts/*.test.mjs"
+  },
+  "dependencies": {
+    "circomlib": "2.0.5",
+    "circomlibjs": "0.1.7",
+    "snarkjs": "0.7.6"
+  }
+}
+
