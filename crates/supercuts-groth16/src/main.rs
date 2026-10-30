@@ -45,7 +45,7 @@ fn main() -> Result<()> {
         };
         let pvk = prepare_verifying_key(&vk);
         if Groth16::<Bn254>::verify_proof(&pvk, &proof, &public_inputs)
-            .context("Arkworks proof verification failed")?
+            .map_err(|error| anyhow!("Arkworks proof verification failed: {error:?}"))?
         {
             valid.push((swapped, vk, proof));
         }
@@ -66,12 +66,17 @@ fn main() -> Result<()> {
     }
 
     let mut vk_bytes = Vec::new();
-    vk.serialize_compressed(&mut vk_bytes)?;
+    vk.serialize_compressed(&mut vk_bytes)
+        .map_err(|error| anyhow!("serialize verifying key: {error:?}"))?;
     let mut proof_bytes = Vec::new();
-    proof.serialize_compressed(&mut proof_bytes)?;
+    proof
+        .serialize_compressed(&mut proof_bytes)
+        .map_err(|error| anyhow!("serialize proof: {error:?}"))?;
     let mut public_bytes = Vec::new();
     for input in &public_inputs {
-        input.serialize_compressed(&mut public_bytes)?;
+        input
+            .serialize_compressed(&mut public_bytes)
+            .map_err(|error| anyhow!("serialize public input: {error:?}"))?;
     }
 
     let output_dir = PathBuf::from(&args[5]);

@@ -9,7 +9,7 @@ anyhow = "1"
 ark-bn254 = "0.5"
 ark-ec = "0.5"
 ark-ff = "0.5"
-ark-groth16 = "0.5"
+ark-groth16 = { version = "0.5", default-features = false }
 ark-serialize = "0.5"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }

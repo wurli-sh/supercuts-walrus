@@ -7,6 +7,7 @@
   "packagePublishTransaction": "6qDfLyy3HjB6moYb32JqSCH6KAeUSE78zThzSXDZmA4e",
   "poolId": "0x873e37b4745316f21a2780893f5fc36f87da559b08923fb4dad6237cd2e95d98",
   "poolCreateTransaction": "7D4q2VQDx35aAarLVzUgq7PrZ3y38ZCuEdfvpKb59ZV9",
+  "deploymentCheckpoint": "400806621",
   "deploymentDomain": "124998efcdbc869bb75638c05ab6b4b8f7cc8a1b7a278c9c50a755dd406385a0",
   "initialRoot": "2134e76ac5d21aab186c2be1dd8f84ee880a1e46eaf712f9d371b6df22191f3e",
   "verifierVersion": 1,
