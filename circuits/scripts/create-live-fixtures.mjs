@@ -7,8 +7,12 @@ import { buildEddsa } from "circomlibjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repository = resolve(root, "..");
 const append = process.argv.slice(2).includes("--append");
-const output = resolve(root, append ? "build/live-fixtures-append" : "build/live-fixtures");
-const config = JSON.parse(readFileSync(resolve(repository, "config/phase1.testnet.json")));
+const output = process.env.LIVE_FIXTURE_DIR
+  ? resolve(repository, process.env.LIVE_FIXTURE_DIR)
+  : resolve(root, append ? "build/live-fixtures-append" : "build/live-fixtures");
+const config = JSON.parse(readFileSync(process.env.PHASE1_CONFIG
+  ? resolve(repository, process.env.PHASE1_CONFIG)
+  : resolve(repository, "config/phase1.testnet.json")));
 const scalar = (bits = 248) => {
   const value = BigInt(`0x${randomBytes(Math.ceil(bits / 8)).toString("hex")}`) & ((1n << BigInt(bits)) - 1n);
   return value || 1n;

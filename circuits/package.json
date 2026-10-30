@@ -10,6 +10,11 @@
     "prove:transaction": "node scripts/prove-transaction.mjs",
     "setup:rapidsnark": "node scripts/setup-rapidsnark.mjs",
     "submit:live": "node scripts/submit-live-demo.mjs",
+    "embedding:adapter": "node scripts/embedding-1536-adapter.mjs",
+    "pool:adversarial-deploy": "node scripts/deploy-adversarial-pool.mjs",
+    "pool:adversarial-check": "node scripts/adversarial-live-check.mjs",
+    "pool:adversarial-withdraw": "node scripts/adversarial-withdraw-check.mjs",
+    "pool:revision-race": "node scripts/revision-race-check.mjs",
     "walrus:manual-check": "node scripts/walrus-manual-check.mjs",
     "test": "node --test scripts/*.test.mjs"
   },

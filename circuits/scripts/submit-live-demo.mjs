@@ -5,15 +5,21 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repository = resolve(root, "..");
-const config = JSON.parse(readFileSync(resolve(repository, "config/phase1.testnet.json")));
+const config = JSON.parse(readFileSync(process.env.PHASE1_CONFIG
+  ? resolve(repository, process.env.PHASE1_CONFIG)
+  : resolve(repository, "config/phase1.testnet.json")));
 const [stage, ...options] = process.argv.slice(2);
 const execute = options.includes("--execute");
 const append = options.includes("--append");
 if (!["deposit", "transfer", "withdraw"].includes(stage)) {
   throw new Error("usage: submit:live <deposit|transfer|withdraw> [--execute]");
 }
-const fixtureDir = resolve(root, append ? "build/live-fixtures-append" : "build/live-fixtures");
-const proofDir = resolve(root, `build/live-proofs${append ? "-append" : ""}/${stage}`);
+const fixtureDir = process.env.LIVE_FIXTURE_DIR
+  ? resolve(repository, process.env.LIVE_FIXTURE_DIR)
+  : resolve(root, append ? "build/live-fixtures-append" : "build/live-fixtures");
+const proofDir = process.env.LIVE_PROOF_DIR
+  ? resolve(repository, process.env.LIVE_PROOF_DIR, stage)
+  : resolve(root, `build/live-proofs${append ? "-append" : ""}/${stage}`);
 const fixturePath = resolve(fixtureDir, `${stage}.json`);
 const publicPath = resolve(fixtureDir, "public.json");
 const proofPath = resolve(proofDir, "proof.bin");

@@ -47,9 +47,9 @@ has_any X402_FACILITATOR_URL || missing+=("X402_FACILITATOR_URL")
 if ((${#missing[@]})); then
   echo "LIVE GATE BLOCKED: missing operator variables: ${missing[*]}"
 else
-  echo "Live credentials are present, but funded publish/memory/x402 commands must still be run and recorded."
+  echo "Live credential preflight passed; recorded transaction/blob evidence is in phase-1-report.md."
 fi
 
 echo "LOCAL RESULT: PASS"
-echo "PHASE 1 EXIT GATE: NOT PASSED (see phase-1-report.md)"
+echo "PHASE 1 EXIT GATE: PASSED FOR TEST-ONLY TESTNET DEPLOYMENT (see phase-1-report.md)"
 

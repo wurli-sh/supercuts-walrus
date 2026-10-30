@@ -1,5 +1,8 @@
 /target/
 /circuits/node_modules/
+/backend/node_modules/
+/backend/dist/
+/backend/.state/
 /circuits/build/
 /contracts/build/
 *.env
@@ -9,4 +12,4 @@
 /reference-shii/
 /*.md
 !/README.md
-
+!/backend/README.md

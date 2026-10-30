@@ -6,18 +6,23 @@ import { MemWalManual } from "@mysten-incubation/memwal/manual";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repository = resolve(root, "..");
-const env = Object.fromEntries(readFileSync(resolve(repository, ".env"), "utf8")
+const fileEnv = Object.fromEntries(readFileSync(resolve(repository, ".env"), "utf8")
   .split(/\r?\n/)
   .filter((line) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(line))
   .map((line) => {
     const index = line.indexOf("=");
     return [line.slice(0, index), line.slice(index + 1)];
   }));
+// Shell variables deliberately override .env so a local embedding adapter can
+// be used for one command without editing credential-bearing configuration.
+const env = { ...fileEnv, ...process.env };
 env.MEMWAL_KEY ??= env.MEMWAL_DELEGATE_KEY ?? env.WALRUS_MEMORY_DELEGATE_KEY;
 env.MEMWAL_ACCOUNT_ID ??= env.WALRUS_MEMORY_ACCOUNT_ID;
 env.MEMWAL_SERVER_URL ??= env.WALRUS_MEMORY_ENDPOINT;
+env.EMBEDDING_API_KEY ??= env.OPENAI_API_KEY;
+env.EMBEDDING_API_BASE ??= env.EMBEDDING_ENDPOINT ?? env.OPENAI_BASE_URL;
 const required = [
-  "MEMWAL_KEY", "MEMWAL_ACCOUNT_ID", "SUI_PRIVATE_KEY", "OPENAI_API_KEY",
+  "MEMWAL_KEY", "MEMWAL_ACCOUNT_ID", "SUI_PRIVATE_KEY", "EMBEDDING_API_KEY", "EMBEDDING_API_BASE",
 ];
 const missing = required.filter((name) => !env[name]);
 if (missing.length) throw new Error(`missing required Walrus manual-mode values: ${missing.join(", ")}`);
@@ -49,8 +54,8 @@ const client = MemWalManual.create({
   accountId: env.MEMWAL_ACCOUNT_ID,
   serverUrl,
   suiPrivateKey: env.SUI_PRIVATE_KEY,
-  embeddingApiKey: env.OPENAI_API_KEY,
-  embeddingApiBase: env.OPENAI_BASE_URL,
+  embeddingApiKey: env.EMBEDDING_API_KEY,
+  embeddingApiBase: env.EMBEDDING_API_BASE,
   embeddingModel: env.EMBEDDING_MODEL,
   packageId,
   registryId,

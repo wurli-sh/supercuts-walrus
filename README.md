@@ -18,10 +18,10 @@ cross-implementation vectors, complete two-public-input SHA-256 Circom
 settlement constraints, a Sui Move pool with pinned verifier storage and
 replay/custody guards, and a native BN254 serialization probe.
 
-It has **not passed the Phase 1 exit gate**. A test-only verifier-backed pool is
-deployed on Sui Testnet, but the funded deposit/transfer/withdrawal path and
-remaining live service evidence listed in
-[phase-1-report.md](phase-1-report.md) remain open. The generated circuit
-artifacts and deployed pool are experimental and must not custody production
-assets.
+The **Phase 1 exit gate has passed** for the pinned test-only Sui Testnet
+deployment. The funded proof-backed path, deployed adversarial/replay races,
+Tatum history coverage, Walrus Mainnet round trip, x402 Testnet settlement, and
+public-data inspection are recorded in `phase-1-report.md`. The generated
+circuit artifacts and deployed pools remain experimental and must not custody
+production assets.
 

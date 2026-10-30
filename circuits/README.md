@@ -51,3 +51,28 @@ SnarkJS, converts them to Sui's Arkworks canonical compressed format, and writes
 hashes to `build/proving-manifest.json`. The generated keys are explicitly
 unaudited and are suitable only for the funded Testnet demonstration.
 
+## Free local embeddings for Walrus Mainnet
+
+The Mainnet relayer requires a 1536-dimensional vector, while local
+`embeddinggemma` produces 768 values. Run the included OpenAI-compatible local
+adapter; it pads the final 768 values with zeroes. This preserves similarity
+scores when the same adapter serves both writes and recalls.
+
+```sh
+export EMBEDDING_UPSTREAM_BASE_URL=http://127.0.0.1:11434/v1
+export EMBEDDING_UPSTREAM_MODEL=embeddinggemma
+pnpm embedding:adapter
+```
+
+Then set these in the repository `.env` before running `pnpm walrus:manual-check`:
+
+```sh
+EMBEDDING_ENDPOINT=http://127.0.0.1:8787/v1
+EMBEDDING_API_KEY=local-placeholder
+EMBEDDING_MODEL=embeddinggemma-1536
+```
+
+The placeholder key is local-only and is required solely by the SDK's client
+configuration. Do not point the manual check at embeddinggemma directly: use
+the adapter for both `rememberManual` and `recallManual`.
+
