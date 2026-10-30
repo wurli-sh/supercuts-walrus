@@ -1,0 +1,40 @@
+# Supercuts TypeScript SDK
+
+`@supercuts/sdk` is a typed, role-scoped wrapper over the one-request Supercuts
+subprocess seam. Wallet keys, state keys, witnesses, and service credentials stay
+inside the Supercuts process; the SDK receives intents and verified receipts.
+
+Install the SDK with the exact matching backend version:
+
+```sh
+pnpm add @supercuts/sdk@0.1.0 @supercuts/backend@0.1.0
+```
+
+```ts
+import { BuyerClient, initializeProfile } from "@supercuts/sdk";
+
+await initializeProfile({ home: "/private/buyer" }, { role: "buyer", mock: true });
+const buyer = await BuyerClient.connect({
+  home: "/private/buyer",
+  approvalProvider: {
+    async approve(intent) {
+      // Show intent.summary and intent.parameters in trusted operator UI.
+      return { approved: true };
+    },
+  },
+});
+const receipt = await buyer.deposit(100n);
+```
+
+Mock receipts are always labeled as non-funded. The approval provider belongs in
+trusted host code, outside model-controlled tool arguments.
+
+For Testnet, initialize with `deploymentConfig`, owner-only `suiKeyFile` and
+`tatumKeyFile`, and the write/Tatum gRPC endpoints instead of `mock: true`.
+Live buyer methods include operation-bound deposit/withdrawal, accepted shielded
+agreement settlement, and `payX402Resource(operationId, resourceUrl)`. The x402
+method obtains amount, asset, and payee from the resource's 402 challenge; it
+does not accept caller-supplied payment requirements.
+
+Unsupported live role commands fail closed with `LIVE_COMMAND_UNAVAILABLE`.
+Mock and Testnet receipts remain distinct.

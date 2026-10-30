@@ -2,9 +2,12 @@
 /circuits/node_modules/
 /backend/node_modules/
 /backend/dist/
+/backend/packages/*/node_modules/
+/backend/packages/*/dist/
 /backend/.state/
 /circuits/build/
 /contracts/build/
+/seal-policy/build/
 *.env
 *.key
 *.zkey
