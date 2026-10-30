@@ -1,0 +1,10 @@
+[package]
+name = "supercuts_pool"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+
+[addresses]
+supercuts_pool = "0x0"
+
