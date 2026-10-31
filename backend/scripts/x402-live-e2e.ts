@@ -45,6 +45,7 @@ function errorCode(error: unknown): string | undefined {
 }
 
 const facilitator = env("X402_FACILITATOR_URL").replace(/\/$/, "");
+const facilitatorKey = env("FACILITATOR_SHARED_KEY");
 const facilitatorOrigin = new URL(facilitator).origin;
 const rpc = process.env.SUI_TESTNET_GRPC ?? "https://fullnode.testnet.sui.io:443";
 const suiClient = new SuiGrpcClient({ network: "testnet", baseUrl: rpc });
@@ -75,6 +76,8 @@ assert(Array.isArray(supported.kinds) && supported.kinds.some((entry) => {
   const kind = object(entry, "facilitator payment kind is invalid");
   return kind.x402Version === 2 && kind.scheme === requirements.scheme && kind.network === requirements.network;
 }), "facilitator does not advertise the challenged payment kind");
+const unauthorized = await fetch(`${facilitator}/verify`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(30_000) });
+assert.equal(unauthorized.status, 401, "facilitator verify endpoint must require the seller-only service key");
 
 const assetBalance = await suiClient.getBalance({ owner: payer, coinType: requirements.asset });
 const gasBalance = await suiClient.getBalance({ owner: payer });
@@ -132,7 +135,7 @@ try {
   };
   const facilitatorBody = { x402Version: 2, paymentPayload, paymentRequirements: requirements };
   const verified = await jsonFetch(`${facilitator}/verify`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(facilitatorBody),
+    method: "POST", headers: { "content-type": "application/json", "x-supercuts-facilitator-key": facilitatorKey }, body: JSON.stringify(facilitatorBody),
   });
   assert.equal(verified.response.status, 200, "facilitator verify request failed");
   assert.equal(object(verified.value, "facilitator verification response is invalid").isValid, true, "facilitator rejected payment before settlement");

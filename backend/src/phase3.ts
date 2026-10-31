@@ -5,6 +5,9 @@ import { loadStateKey } from "./config.js";
 import { fail, SupercutsError } from "./errors.js";
 import { RoleStore } from "./store.js";
 import { LiveRuntime, type LiveRuntimeProfile } from "./live-runtime.js";
+import { validateCapabilityManifest, type CapabilityManifest } from "./capability.js";
+import { ManualMemory, type ManualMemoryConfig } from "./memwal.js";
+import { WorkflowMemory } from "./workflow-memory.js";
 
 export type Role = "buyer" | "seller" | "auditor";
 export interface Profile {
@@ -91,11 +94,13 @@ export function initialize(home: string, args: Record<string, string | boolean>)
   const manifestHash = manifest.startsWith("mock:") ? hash(manifest) : hash(readFileSync(manifest));
   const endpoint = (name: string): string => { const value = required(args, name); return /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`; };
   const credential = (name: string): Buffer => { const path = resolve(required(args, name)); if ((statSync(path).mode & 0o077) !== 0) fail("CREDENTIAL_PERMISSIONS", `${name} must be owner-only`); const value = readFileSync(path); if (!value.length || value.length > 4096) fail("CREDENTIAL_INVALID", `${name} is empty or too large`); return Buffer.from(value.toString().trim()); };
-  const liveCredentials = deployment ? { sui: credential("sui-key-file"), tatum: credential("tatum-key-file") } : undefined;
+  const liveCredentials = deployment ? { sui: credential("sui-key-file"), tatum: credential("tatum-key-file"), ...(typeof args["memory-config-file"] === "string" ? { memory: credential("memory-config-file") } : {}) } : undefined;
   const artifactRoot = manifest.startsWith("mock:") ? "" : resolve(manifest, ".."); const repositoryRoot = artifactRoot ? resolve(artifactRoot, "../..") : "";
   const live = deployment ? {
     coinTypeHash: String(deployment.coinTypeHash), deploymentDomain: String(deployment.deploymentDomain), initialRoot: String(deployment.initialRoot), deploymentCheckpoint: String(deployment.deploymentCheckpoint),
     writeGrpcEndpoint: endpoint("write-grpc"), tatumGrpcEndpoint: endpoint("tatum-grpc"), artifactRoot,
+    ...(typeof args["walrus-publisher"] === "string" ? { walrusPublisherUrl: endpoint("walrus-publisher") } : {}),
+    ...(typeof args["walrus-aggregator"] === "string" ? { walrusAggregatorUrl: endpoint("walrus-aggregator") } : {}),
     snarkjsPath: typeof args["snarkjs"] === "string" ? resolve(args["snarkjs"]) : resolve(artifactRoot, "../node_modules/.bin/snarkjs"), converterPath: typeof args.converter === "string" ? resolve(args.converter) : resolve(repositoryRoot, "target/debug/supercuts-groth16"),
     ...(typeof args.rapidsnark === "string" ? { rapidsnarkPath: resolve(args.rapidsnark) } : {}),
     artifacts: Object.fromEntries(Object.entries(deployment.artifacts as Record<string, { zkeySha256: string; verifyingKeySha256: string }>).map(([name, item]) => [name, { zkeySha256: item.zkeySha256, verifyingKeySha256: item.verifyingKeySha256 }])) as LiveRuntimeProfile["live"]["artifacts"],
@@ -112,11 +117,19 @@ export function initialize(home: string, args: Record<string, string | boolean>)
     }, ...(live ? { live } : {}),
   };
   writeFileSync(join(home, "profile.json"), `${JSON.stringify(profile, null, 2)}\n`, { mode: 0o600 });
+  const mandate = {
+    version: "supercuts.mandate.v1", owner: "local-operator", role,
+    allowedCommands: [...ROLE_COMMANDS[role]], allowedCounterparties: profile.policy.allowedCounterparties,
+    allowedAssets: profile.policy.allowedAssets, perDealCeiling: profile.policy.maxAmount,
+    totalRunBudget: (BigInt(profile.policy.maxAmount) * 100n).toString(), requiredPrivacy: profile.policy.requiredPrivacy,
+    expiresAt: profile.policy.expiresAt,
+  };
+  writeFileSync(join(home, "mandate.json"), `${JSON.stringify(mandate, null, 2)}\n`, { mode: 0o600 });
   const stateKey = randomBytes(32); writeFileSync(join(home, "state.key"), stateKey, { mode: 0o600 });
   if (live) {
     const store = new RoleStore(join(home, "state.sqlite"), stateKey);
     try {
-      store.putSecretOnce("live:sui-private-key", liveCredentials!.sui); store.putSecretOnce("live:tatum-api-key", liveCredentials!.tatum); store.putSecretOnce("identity:babyjub-seed", randomBytes(32));
+      store.putSecretOnce("live:sui-private-key", liveCredentials!.sui); store.putSecretOnce("live:tatum-api-key", liveCredentials!.tatum); if (liveCredentials!.memory) store.putSecretOnce("live:memory-config", liveCredentials!.memory); store.putSecretOnce("identity:babyjub-seed", randomBytes(32));
       const pair = generateKeyPairSync("x25519"); store.putSecretOnce("identity:x25519-private", pair.privateKey.export({ type: "pkcs8", format: "der" })); store.putSecretOnce("identity:x25519-public", pair.publicKey.export({ type: "spki", format: "der" }));
     } finally { store.close(); }
   }
@@ -227,15 +240,100 @@ export class Phase3App {
     const runtime = await LiveRuntime.create(this.profile as LiveRuntimeProfile, this.store);
     if (command === "doctor") return output(command, await runtime.doctor());
     if (command === "status") return output(command, { role: this.profile.role, network: this.profile.network, mock: false, runtime: "testnet-live" });
+    if (command === "capability.publish") return output(command, await this.publishLiveCapability(args));
+    if (command === "capability.discover") return output(command, await this.discoverLiveCapabilities(args));
+    if (command === "offer.open") {
+      const sessionId = typeof args.session === "string" ? args.session : `session_${randomUUID()}`;
+      const offer = { sessionId, revision: 0, state: "open", buyer: this.profile.role, transcriptCommitment: hash(`open:${sessionId}`) }; record(this.store, "offer", sessionId, offer); return output(command, offer);
+    }
+    if (command === "offer.propose") return output(command, this.localOffer(command, args));
+    if (command === "offer.show") return output(command, get<Record<string, unknown>>(this.store, "offer", required(args, "session")) ?? fail("OFFER_NOT_FOUND", "offer session was not found"));
+    if (command === "pay.quote") {
+      const rail = required(args, "rail") as "shielded" | "x402"; if (!(rail === "shielded" || rail === "x402")) fail("RAIL_INVALID", "rail must be shielded or x402");
+      const checked = this.paymentPolicy(args, rail); return output(command, { rail, amount: checked.amount.toString(), counterparty: checked.counterparty, asset: checked.asset, policyDecision: "allowed", visibility: rail === "shielded" ? "amount-and-parties-hidden-in-pool" : "public-transfer" });
+    }
     if (command === "wallet.balance") return output(command, await runtime.balance());
     if (command === "wallet.recover") return output(command, await runtime.recover());
     if (command === "wallet.deposit") return output(command, await runtime.deposit(amount(args), required(args, "operation-id")));
     if (command === "wallet.withdraw") return output(command, await runtime.withdraw(required(args, "commitment"), required(args, "recipient"), required(args, "operation-id")));
-    if (command === "offer.accept") return output(command, runtime.acceptAgreement(required(args, "session"), required(args, "agreement")));
-    if (command === "offer.counter") return output(command, runtime.prepareSellerAgreement(required(args, "session"), required(args, "agreement")));
+    if (command === "offer.accept") return output(command, typeof args.agreement === "string" ? runtime.acceptAgreement(required(args, "session"), args.agreement) : this.localOffer(command, args));
+    if (command === "offer.counter") return output(command, typeof args.agreement === "string" ? runtime.prepareSellerAgreement(required(args, "session"), args.agreement) : this.localOffer(command, args));
     if (command === "pay.shielded") return output(command, await runtime.settleShielded(required(args, "session"), required(args, "operation-id")));
     if (command === "pay.x402") return output(command, await runtime.payX402Resource(required(args, "operation-id"), required(args, "resource-url")));
+    if (command === "memory.remember" || command === "memory.recall" || command === "memory.status") return output(command, await this.liveMemory(command, args));
+    if (command === "resource.serve") {
+      const requestId = required(args, "request-id"), body = required(args, "body"), resource = { requestId, responseHash: hash(Buffer.from(body, "base64")), body, deliveryStatus: "ready" }; record(this.store, "resource", requestId, resource); return output(command, { requestId, responseHash: resource.responseHash, deliveryStatus: resource.deliveryStatus });
+    }
+    if (command === "resource.fetch") {
+      const requestId = required(args, "request-id"), local = get<Record<string, unknown>>(this.store, "resource", requestId);
+      if (local) return output(command, { ...local, deliveryStatus: "delivered" });
+      const body = required(args, "response"); return output(command, { requestId, responseHash: hash(Buffer.from(body, "base64")), body, deliveryStatus: "delivered", observation: "artifact-delivered-separate-from-payment" });
+    }
     return fail("LIVE_COMMAND_UNAVAILABLE", `${command} is not connected to the Testnet runtime`);
+  }
+
+  private publishCapability(args: Record<string, string | boolean>, mock: boolean): Record<string, unknown> {
+    let manifest: CapabilityManifest | undefined;
+    if (typeof args.manifest === "string") {
+      try { manifest = JSON.parse(Buffer.from(args.manifest, "base64url").toString()) as CapabilityManifest; } catch (error) { return fail("CAPABILITY_INVALID", "manifest is not valid encoded JSON", error); }
+      validateCapabilityManifest(manifest);
+    }
+    if (manifest) {
+      record(this.store, "capability", manifest.capabilityId, manifest);
+      return { ...manifest, blobId: `${mock ? "mockwalrus" : "walrus"}_${manifest.manifestHash.slice(0, 40)}`, visibility: "public-capability" };
+    }
+    const capabilityId = typeof args["capability-id"] === "string" ? args["capability-id"] : `cap_${randomUUID()}`;
+    const item = { capabilityId, seller: required(args, "seller"), service: required(args, "service"), terms: required(args, "terms"), blobId: `${mock ? "mockwalrus" : "walrus"}_${hash(`${capabilityId}:${String(args.seller)}:${String(args.service)}`).slice(0, 40)}`, visibility: "public-capability" };
+    record(this.store, "capability", capabilityId, item); return item;
+  }
+  private async publishLiveCapability(args: Record<string, string | boolean>): Promise<Record<string, unknown>> {
+    const publisher = this.profile.live?.walrusPublisherUrl ?? fail("LIVE_WALRUS_CONFIG_MISSING", "live capability publication requires --walrus-publisher"), aggregator = this.profile.live?.walrusAggregatorUrl ?? fail("LIVE_WALRUS_CONFIG_MISSING", "live capability publication requires --walrus-aggregator");
+    const encoded = typeof args.manifest === "string" ? args.manifest : fail("CAPABILITY_INVALID", "live publication requires a supercuts.capability.v1 manifest");
+    let manifest: CapabilityManifest; try { manifest = JSON.parse(Buffer.from(encoded, "base64url").toString()) as CapabilityManifest; } catch (error) { return fail("CAPABILITY_INVALID", "manifest is not valid encoded JSON", error); }
+    validateCapabilityManifest(manifest); const body = Buffer.from(JSON.stringify(manifest));
+    const response = await fetch(`${publisher.replace(/\/$/, "")}/v1/blobs?epochs=5`, { method: "PUT", body, signal: AbortSignal.timeout(60_000) });
+    if (!response.ok) fail("WALRUS_PUBLISH_FAILED", `Walrus publisher returned ${response.status}`);
+    const result = await response.json() as { newlyCreated?: { blobObject?: { blobId?: string } }; alreadyCertified?: { blobId?: string }; alreadyRegistered?: { blobId?: string } }, blobId = result.newlyCreated?.blobObject?.blobId ?? result.alreadyCertified?.blobId ?? result.alreadyRegistered?.blobId ?? fail("WALRUS_PUBLISH_FAILED", "Walrus publisher omitted the blob ID");
+    const read = await fetch(`${aggregator.replace(/\/$/, "")}/v1/blobs/${encodeURIComponent(blobId)}`, { signal: AbortSignal.timeout(60_000) });
+    if (!read.ok || !Buffer.from(await read.arrayBuffer()).equals(body)) fail("WALRUS_BLOB_MISMATCH", "published capability did not round-trip through the Walrus aggregator");
+    record(this.store, "capability", manifest.capabilityId, { ...manifest, blobId }); return { ...manifest, blobId, visibility: "public-capability" };
+  }
+  private async discoverLiveCapabilities(args: Record<string, string | boolean>): Promise<Record<string, unknown>> {
+    if (typeof args["blob-ids"] !== "string") return this.discoverCapabilities(args, "configured-manifests");
+    const aggregator = this.profile.live?.walrusAggregatorUrl ?? fail("LIVE_WALRUS_CONFIG_MISSING", "live capability discovery requires --walrus-aggregator");
+    let ids: unknown; try { ids = JSON.parse(Buffer.from(args["blob-ids"], "base64url").toString()); } catch (error) { return fail("CAPABILITY_LIST_INVALID", "blob IDs are not valid encoded JSON", error); }
+    const blobIds = Array.isArray(ids) && ids.length && ids.every((id): id is string => typeof id === "string" && Boolean(id) && id.length <= 256) ? ids : fail("CAPABILITY_LIST_INVALID", "blob-ids must be a non-empty string array");
+    const manifests = await Promise.all(blobIds.map(async (blobId) => { const response = await fetch(`${aggregator.replace(/\/$/, "")}/v1/blobs/${encodeURIComponent(blobId)}`, { signal: AbortSignal.timeout(60_000) }); if (!response.ok) return fail("WALRUS_READ_FAILED", `Walrus aggregator returned ${response.status}`); const manifest = await response.json() as unknown; validateCapabilityManifest(manifest); return { ...manifest, blobId }; }));
+    return { capabilities: manifests, source: "walrus" };
+  }
+  private discoverCapabilities(args: Record<string, string | boolean>, source: string): Record<string, unknown> {
+    const configured = typeof args.capabilities === "string" ? JSON.parse(Buffer.from(args.capabilities, "base64url").toString()) as unknown : [];
+    const list = Array.isArray(configured) ? configured : fail("CAPABILITY_LIST_INVALID", "configured capabilities must be an array");
+    for (const item of list) if (item && typeof item === "object" && (item as Record<string, unknown>).protocol === "supercuts.capability.v1") validateCapabilityManifest(item);
+    return { capabilities: list, source };
+  }
+  private localOffer(command: string, args: Record<string, string | boolean>): Record<string, unknown> {
+    const sessionId = required(args, "session"), previous = get<Record<string, unknown>>(this.store, "offer", sessionId);
+    const revision = Number(typeof args.revision === "string" ? args.revision : Number(previous?.revision ?? 0) + 1);
+    if (!Number.isSafeInteger(revision) || revision < 1) fail("REVISION_INVALID", "revision must be a positive integer");
+    const state = command.split(".")[1]!, termsHash = hash(typeof args.terms === "string" ? args.terms : "accepted");
+    const offer = { sessionId, revision, state, termsHash, transcriptCommitment: hash(`${sessionId}:${revision}:${state}:${termsHash}`) }; record(this.store, "offer", sessionId, offer); return offer;
+  }
+  private async liveMemory(command: string, args: Record<string, string | boolean>): Promise<Record<string, unknown>> {
+    const encoded = this.store.getSecret("live:memory-config") ?? fail("LIVE_MEMORY_CONFIG_MISSING", "live Mainnet memory requires an owner-only --memory-config-file");
+    let config: ManualMemoryConfig; try { config = JSON.parse(encoded.toString()) as ManualMemoryConfig; } catch (error) { return fail("LIVE_MEMORY_CONFIG_INVALID", "encrypted memory config is invalid", error); }
+    const manual = new ManualMemory(this.store, config);
+    try {
+      if (command === "memory.remember") {
+        const operationId = required(args, "operation-id"), observation = required(args, "fact"), workflow = new WorkflowMemory(this.store, manual);
+        const blobId = await workflow.record({ kind: /privacy|sensitive|hide/i.test(observation) ? "privacy_choice" : "delivery_observation", subject: "procurement-demo", observation, operationId, createdAt: Date.now() });
+        return { operationId, namespace: config.namespace, blobId, status: "complete" };
+      }
+      if (command === "memory.recall") {
+        const recalled = await manual.recall(required(args, "query")); return { namespace: config.namespace, recalled: recalled[0]?.text ?? null, matches: recalled.map(({ blobId, distance }) => ({ blobId, distance })), effect: recalled.length ? "candidate-preference-adjusted" : "no-policy-change" };
+      }
+      const jobs = new WorkflowMemory(this.store, manual).completed(); return { namespace: config.namespace, completed: jobs.length, jobs: jobs.map((item) => ({ ...item, status: "complete" })) };
+    } finally { manual.destroy(); }
   }
   execute(command: string, args: Record<string, string | boolean>): CommandResult;
   execute(command: string, args: Record<string, string | boolean>): CommandResult | Promise<CommandResult> {
@@ -244,14 +342,10 @@ export class Phase3App {
     if (command === "doctor") return output(command, this.doctor());
     if (command === "status") return output(command, { role: this.profile.role, network: this.profile.network, operations: all(this.store, "payment").length, mock: this.profile.mock });
     if (command === "capability.publish") {
-      const capabilityId = typeof args["capability-id"] === "string" ? args["capability-id"] : `cap_${randomUUID()}`;
-      const item = { capabilityId, seller: required(args, "seller"), service: required(args, "service"), terms: required(args, "terms"), blobId: `${this.profile.mock ? "mockwalrus" : "walrus"}_${hash(`${capabilityId}:${String(args.seller)}:${String(args.service)}`).slice(0, 40)}`, visibility: "public-capability" };
-      record(this.store, "capability", capabilityId, item); return output(command, item);
+      return output(command, this.publishCapability(args, true));
     }
     if (command === "capability.discover") {
-      const configured = typeof args.capabilities === "string" ? JSON.parse(Buffer.from(args.capabilities, "base64url").toString()) as unknown : [];
-      if (!Array.isArray(configured)) fail("CAPABILITY_LIST_INVALID", "configured capabilities must be an array");
-      return output(command, { capabilities: configured, source: this.profile.mock ? "configured-mock" : "configured-walrus-blob-ids" });
+      return output(command, this.discoverCapabilities(args, "configured-mock"));
     }
     if (command === "wallet.deposit") {
       this.doctor();

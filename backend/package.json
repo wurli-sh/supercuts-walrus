@@ -5,7 +5,10 @@
   "type": "module",
   "bin": {
     "supercuts": "dist/cli.js",
+    "supercuts-demo": "dist/demo.js",
     "supercuts-mcp": "dist/mcp.js",
+    "supercuts-resource": "dist/resource-server.js",
+    "supercuts-facilitator": "dist/facilitator.js",
     "supercuts-seam": "dist/seam.js"
   },
   "files": ["dist", "README.md"],

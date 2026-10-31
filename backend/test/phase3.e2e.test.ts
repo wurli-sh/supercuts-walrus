@@ -79,9 +79,12 @@ test("phase 3 independent MCP processes expose role-scoped tools and backend pol
     { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
     { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
     { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "pay.x402", arguments: { "operation-id": "mcp-over", amount: "1000000001", counterparty: "seller-a", authorize: true } } },
+    { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "pay.x402", arguments: { "operation-id": "mcp-over", amount: "1000000001", counterparty: "seller-a" } } },
   ]);
   assert.ok(buyerReplies[1].result.tools.some((tool: any) => tool.name === "pay.shielded"));
-  assert.equal(buyerReplies[2].result.structuredContent.error.code, "POLICY_AMOUNT_EXCEEDED");
+  assert.equal(buyerReplies[1].result.tools.find((tool: any) => tool.name === "pay.x402").inputSchema.additionalProperties, false);
+  assert.equal(buyerReplies[2].result.structuredContent.error.code, "MCP_ARGUMENT_UNKNOWN");
+  assert.equal(buyerReplies[3].result.structuredContent.error.code, "MANDATE_DEAL_CEILING_EXCEEDED");
   const sellerReplies = await mcpExchange(homes.seller, [{ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }]);
   assert.ok(sellerReplies[0].result.tools.some((tool: any) => tool.name === "offer.counter"));
   assert.ok(!sellerReplies[0].result.tools.some((tool: any) => tool.name === "wallet.deposit"));

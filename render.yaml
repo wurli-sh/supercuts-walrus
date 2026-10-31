@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: supercuts-x402-facilitator-testnet
+    runtime: docker
+    region: singapore
+    plan: free
+    branch: main
+    repo: https://github.com/wurli-sh/supercuts-walrus
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SUI_TESTNET_GRPC
+        value: https://fullnode.testnet.sui.io:443
+      - key: FACILITATOR_SHARED_KEY
+        sync: false

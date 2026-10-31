@@ -10,6 +10,7 @@ import { Groth16Prover, type ProverConfig } from "./prover.js";
 import { buildDeposit, buildPrivateTransfer, buildWithdraw, writeClient } from "./sui.js";
 import { TatumLedger } from "./tatum.js";
 import type { RoleStore } from "./store.js";
+import { paymentBindingBytes, requirementsHash, type ExactRequirements } from "./x402.js";
 
 export interface LiveRuntimeProfile {
   role: "buyer" | "seller" | "auditor"; packageId: string; poolId: string; coinType: string; verifierVersion: number;
@@ -17,6 +18,7 @@ export interface LiveRuntimeProfile {
     coinTypeHash: string; deploymentDomain: string; initialRoot: string; deploymentCheckpoint: string;
     writeGrpcEndpoint: string; tatumGrpcEndpoint: string; artifactRoot: string; snarkjsPath: string; converterPath: string;
     rapidsnarkPath?: string; artifacts: ProverConfig["expected"];
+    walrusPublisherUrl?: string; walrusAggregatorUrl?: string;
   };
   policy: { maxAmount: string; allowedAssets: string[]; allowedCounterparties: string[]; requiredPrivacy: "any" | "shielded"; expiresAt: number };
 }
@@ -192,7 +194,7 @@ export class LiveRuntime {
     let challenge: Record<string, any>; try { challenge = JSON.parse(Buffer.from(encodedChallenge, "base64").toString()) as Record<string, any>; } catch (error) { return fail("X402_CHALLENGE_INVALID", "payment-required is not base64 JSON", error); }
     const accepted = Array.isArray(challenge.accepts) ? challenge.accepts[0] as Record<string, unknown> : undefined, resource = challenge.resource as Record<string, unknown> | undefined;
     if (challenge.x402Version !== 2 || !accepted || accepted.scheme !== "exact" || accepted.network !== "sui:testnet") fail("X402_CHALLENGE_INVALID", "resource does not offer x402 v2 exact payment on Sui Testnet");
-    const requirements = accepted ?? fail("X402_CHALLENGE_INVALID", "challenge has no accepted payment requirements");
+    const requirements = accepted as unknown as ExactRequirements ?? fail("X402_CHALLENGE_INVALID", "challenge has no accepted payment requirements");
     const paymentUrl = new URL(String(resource?.url ?? resourceUrl)); if (paymentUrl.origin !== requested.origin) fail("X402_CHALLENGE_INVALID", "challenge redirected payment to another origin");
     const payTo = String(requirements.payTo), asset = String(requirements.asset), amount = BigInt(String(requirements.amount));
     if (!/^0x[0-9a-f]{64}$/i.test(payTo) || !/^0x[0-9a-f]+::[A-Za-z0-9_]+::[A-Za-z0-9_]+$/.test(asset) || amount <= 0n) fail("X402_CHALLENGE_INVALID", "challenge payment requirements are malformed");
@@ -203,15 +205,19 @@ export class LiveRuntime {
     if (!this.profile.policy.allowedCounterparties.includes(payTo)) fail("POLICY_COUNTERPARTY_FORBIDDEN", "challenged payee is not allowed");
     const tx = new (await import("@mysten/sui/transactions")).Transaction(); tx.transferObjects([tx.coin({ balance: amount, type: asset })], payTo);
     const intentHash = hash(JSON.stringify({ domain: "supercuts-x402-v2", operationId, resourceUrl, payTo, asset, amount: amount.toString() })), signed = await this.signed(operationId, intentHash, tx);
+    const extra = requirements.extra as Record<string, unknown> | undefined, requestId = String(extra?.requestId ?? operationId), challengeOperationId = String(extra?.operationId ?? operationId), nonce = String(extra?.nonce ?? "");
+    if (challengeOperationId !== operationId || !nonce || String(extra?.requirementsHash ?? "") !== requirementsHash({ ...requirements, extra: { requestId, operationId: challengeOperationId, nonce } })) fail("X402_CHALLENGE_INVALID", "challenge does not bind this operation and request");
+    const unsignedBinding = { requestId, nonce, requirementsHash: requirementsHash({ ...requirements, extra: { requestId, operationId: challengeOperationId, nonce } }), transactionDigest: signed.digest, payer: this.signer.toSuiAddress() };
+    const payerSignature = (await this.signer.signPersonalMessage(paymentBindingBytes(unsignedBinding))).signature;
     const paymentPayload = { x402Version: 2, resource, accepted: requirements, payload: { signature: signed.signature, transaction: Buffer.from(signed.transaction).toString("base64") } };
-    const paid = await fetch(paymentUrl, { redirect: "error", headers: { "payment-signature": Buffer.from(JSON.stringify(paymentPayload)).toString("base64") }, signal: AbortSignal.timeout(60_000) });
+    const paid = await fetch(paymentUrl, { redirect: "error", headers: { "payment-signature": Buffer.from(JSON.stringify(paymentPayload)).toString("base64"), "x-supercuts-binding": Buffer.from(JSON.stringify({ ...unsignedBinding, payerSignature })).toString("base64") }, signal: AbortSignal.timeout(60_000) });
     const response = Buffer.from(await paid.arrayBuffer()); if (!paid.ok) fail("X402_DELIVERY_FAILED", `paid resource returned ${paid.status}`);
     const settlementHeader = paid.headers.get("payment-response") ?? fail("X402_SETTLEMENT_INVALID", "payment-response header is missing");
     let settlement: Record<string, unknown>; try { settlement = JSON.parse(Buffer.from(settlementHeader, "base64").toString()) as Record<string, unknown>; } catch (error) { return fail("X402_SETTLEMENT_INVALID", "payment-response is not base64 JSON", error); }
     if (settlement.success !== true || settlement.transaction !== signed.digest || settlement.network !== "sui:testnet") fail("X402_SETTLEMENT_INVALID", "resource reported a different or unsuccessful settlement");
     const finalized = await this.client.waitForTransaction({ digest: signed.digest, timeout: 60_000, include: { effects: true } }), finalTx = finalized.Transaction ?? finalized.FailedTransaction;
     if (!finalTx?.status.success || !finalTx.checkpoint) fail("TRANSACTION_FINALITY_FAILED", "x402 payment was not finalized successfully"); await this.tatum.getTransaction(signed.digest);
-    const receipt = { operationId, status: "finalized", rail: "x402", amount: amount.toString(), counterparty: payTo, asset, requestId: operationId, transactionDigest: signed.digest, policyDecision: "allowed", tatumVerified: true, visibility: "public-transfer", finalized: true, checkpoint: finalTx.checkpoint, responseSha256: hash(response) };
+    const receipt = { operationId, status: "finalized", rail: "x402", amount: amount.toString(), counterparty: payTo, asset, requestId, transactionDigest: signed.digest, policyDecision: "allowed", tatumVerified: true, visibility: "public-transfer", finalized: true, checkpoint: finalTx.checkpoint, responseSha256: hash(response) };
     this.store.db.prepare("INSERT INTO live_x402_deliveries(operation_id,resource_url,receipt,response,updated_at) VALUES(?,?,?,?,?)").run(operationId, resourceUrl, JSON.stringify(receipt), response, Date.now());
     this.store.db.prepare("UPDATE live_signed_transactions SET status='finalized',updated_at=? WHERE operation_id=?").run(Date.now(), operationId); return { ...receipt, response: response.toString("base64") };
   }

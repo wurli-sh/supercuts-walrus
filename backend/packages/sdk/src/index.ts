@@ -12,6 +12,17 @@ export type SessionId = string & { readonly __brand: "SessionId" };
 export type TransactionDigest = string & { readonly __brand: "TransactionDigest" };
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
+export interface CapabilityManifest {
+  protocol: "supercuts.capability.v1"; capabilityId: string; sellerId: string; capability: string; description: string;
+  inputSchema: Readonly<Record<string, unknown>>; outputSchema: Readonly<Record<string, unknown>>; supportedRails: Rail[];
+  priceBand: { minimum: string; maximum: string }; asset: string; endpoint: string; expiresAt: number; manifestHash: string;
+}
+export interface ProcurementTask { taskId: string; request: string; privacy: "public" | "confidential"; maximumAmount: bigint; asset: string; requiredCapability: string; }
+export interface SettlementIntent { operationId: OperationId; dealId: string; rail: Rail; amount: bigint; asset: string; counterparty: string; requestId: string; }
+export interface DeliveryReceipt { requestId: string; operationId: OperationId; artifactSha256: string; deliveredAt: number; observation: "artifact-delivered"; }
+export interface MemoryFact { kind: "task" | "capability_choice" | "offer" | "agreed_cost" | "seller_responsiveness" | "settlement_rail" | "delivery_hash" | "latency" | "retry_behavior" | "outcome" | "privacy_policy"; subject: string; observation: string; operationId: OperationId; createdAt: number; }
+export interface DemoEvent { schema: "supercuts.demo.v1"; sequence: number; runId: string; timestamp: string; actor: string; stage: string; status: string; mode: "live" | "recorded-funded-run"; publicDetails: Readonly<Record<string, unknown>>; evidenceHashes: string[]; explorerLinks: string[]; }
+
 export interface AuthorizationIntent {
   challengeId: string; intentHash: string; role: Role; command: string;
   summary: string; parameters: Record<string, string | boolean>; expiresAt: number;
@@ -26,6 +37,7 @@ export interface MockInitializeOptions {
 export interface LiveInitializeOptions {
   role: Role; mock?: false; deploymentConfig: string; suiKeyFile: string; tatumKeyFile: string;
   writeGrpc: string; tatumGrpc: string; snarkjsPath?: string; converterPath?: string; rapidsnarkPath?: string;
+  memoryConfigFile?: string; walrusPublisher?: string; walrusAggregator?: string;
   maxAmount?: bigint; allowedCounterparties?: string[]; requireShielded?: boolean;
 }
 export type InitializeOptions = MockInitializeOptions | LiveInitializeOptions;
@@ -113,6 +125,8 @@ const payment = (value: any): PaymentReceipt => ({ ...value, amount: BigInt(valu
 export class BuyerClient extends RoleClient {
   static async connect(config: SupercutsSdkConfig): Promise<BuyerClient> { const client = new BuyerClient(config); await client.ensureCompatible(); const report = await client.doctor(); if (report.role !== "buyer") throw new SupercutsSdkError("SDK_ROLE_MISMATCH", `expected buyer profile, found ${report.role}`, false); return client; }
   async discoverSellers(capabilities: Capability[]): Promise<Capability[]> { const value = await this.read<{ capabilities: Capability[] }>("capability.discover", { capabilities }); return value.capabilities; }
+  async discoverCapabilities(manifests: CapabilityManifest[]): Promise<CapabilityManifest[]> { const value = await this.read<{ capabilities: CapabilityManifest[] }>("capability.discover", { capabilities: manifests }); return value.capabilities; }
+  async discoverCapabilityBlobs(blobIds: string[]): Promise<Array<CapabilityManifest & { blobId: string }>> { const value = await this.read<{ capabilities: Array<CapabilityManifest & { blobId: string }> }>("capability.discover", { "blob-ids": blobIds }); return value.capabilities; }
   async deposit(amount: bigint, id: OperationId = operationId(randomUUID())): Promise<TransactionReceipt> { const value = await this.mutate<any>("wallet.deposit", { amount: amount.toString(), "operation-id": id }); return { ...value, amount: BigInt(value.amount) }; }
   async balance(): Promise<WalletBalance> { const value = await this.read<any>("wallet.balance"); return { ...value, available: BigInt(value.available) }; }
   async recover(): Promise<{ recovered: number; source: string }> { return this.mutate("wallet.recover", {}); }
@@ -139,6 +153,7 @@ export class BuyerClient extends RoleClient {
 export class SellerClient extends RoleClient {
   static async connect(config: SupercutsSdkConfig): Promise<SellerClient> { const client = new SellerClient(config); await client.ensureCompatible(); const report = await client.doctor(); if (report.role !== "seller") throw new SupercutsSdkError("SDK_ROLE_MISMATCH", `expected seller profile, found ${report.role}`, false); return client; }
   async publishCapability(input: { capabilityId?: string; seller: string; service: string; terms: string }): Promise<Capability> { return this.mutate("capability.publish", { ...(input.capabilityId ? { "capability-id": input.capabilityId } : {}), seller: input.seller, service: input.service, terms: input.terms }); }
+  async publishManifest(manifest: CapabilityManifest, id: OperationId = operationId(randomUUID())): Promise<CapabilityManifest & { blobId: string; visibility: "public-capability" }> { return this.mutate("capability.publish", { manifest, "operation-id": id }); }
   async counter(session: SessionId, revision: number, terms: Readonly<Record<string, JsonValue>>): Promise<OfferState> { return this.mutate("offer.counter", { session, revision, terms: JSON.stringify(terms) }); }
   async prepareCryptographicAgreement(session: SessionId, draft: Readonly<Record<string, JsonValue>>): Promise<{ sessionId: string; revision: string; state: "counter"; dealCommitment: string; agreement: string }> { return this.mutate("offer.counter", { session, agreement: Buffer.from(JSON.stringify(draft)).toString("base64url") }); }
   async showOffer(session: SessionId): Promise<OfferState> { return this.read("offer.show", { session }); }
@@ -162,6 +177,6 @@ export async function initializeProfile(config: Omit<SupercutsSdkConfig, "approv
   const seam = new Seam(config);
   const version = await seam.call<{ protocol: number; packageVersion: string }>("version", undefined, false);
   if (version.protocol !== SEAM_PROTOCOL || version.packageVersion !== SDK_VERSION) throw new SeamUnavailable("installed Supercuts backend is incompatible with this SDK");
-  const live = options.mock === true ? {} : { "deployment-config": options.deploymentConfig, "sui-key-file": options.suiKeyFile, "tatum-key-file": options.tatumKeyFile, "write-grpc": options.writeGrpc, "tatum-grpc": options.tatumGrpc, ...(options.snarkjsPath ? { snarkjs: options.snarkjsPath } : {}), ...(options.converterPath ? { converter: options.converterPath } : {}), ...(options.rapidsnarkPath ? { rapidsnark: options.rapidsnarkPath } : {}) };
+  const live = options.mock === true ? {} : { "deployment-config": options.deploymentConfig, "sui-key-file": options.suiKeyFile, "tatum-key-file": options.tatumKeyFile, "write-grpc": options.writeGrpc, "tatum-grpc": options.tatumGrpc, ...(options.snarkjsPath ? { snarkjs: options.snarkjsPath } : {}), ...(options.converterPath ? { converter: options.converterPath } : {}), ...(options.rapidsnarkPath ? { rapidsnark: options.rapidsnarkPath } : {}), ...(options.memoryConfigFile ? { "memory-config-file": options.memoryConfigFile } : {}), ...(options.walrusPublisher ? { "walrus-publisher": options.walrusPublisher } : {}), ...(options.walrusAggregator ? { "walrus-aggregator": options.walrusAggregator } : {}) };
   return seam.call("initialize", { role: options.role, ...(options.mock ? { mock: true } : live), ...(options.mock && options.artifactManifest ? { "artifact-manifest": options.artifactManifest } : {}), ...(options.maxAmount !== undefined ? { "max-amount": options.maxAmount.toString() } : {}), ...(options.allowedCounterparties ? { "allow-counterparty": options.allowedCounterparties.join(",") } : {}), ...(options.requireShielded ? { "require-shielded": true } : {}) });
 }
