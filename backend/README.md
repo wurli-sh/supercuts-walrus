@@ -99,7 +99,10 @@ public. Shielded settlement avoids a direct public payment revealing the deal
 amount or counterparty; funding, deposits, withdrawals, gas, and pool activity
 remain visible.
 
-For a Claude-agent recording, provide `live --claude-key-file <owner-only-file>`.
+For a Claude-agent recording, export `CLAUDE_API_KEY` or provide
+`live --claude-key-file <owner-only-file>`; a repository `.env` file is not
+loaded automatically. Validate the credential against Anthropic before starting
+a funded take.
 The live path calls Claude for bounded buyer and seller decisions and records
 only the model, action, and token counts. The backend still enforces capability,
 amount, rail, and agreement bindings. Validate that recording with

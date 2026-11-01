@@ -73,9 +73,10 @@ function check(): Record<string, unknown> {
 async function live(): Promise<Record<string, unknown>> {
   const root = stateDir(), workflow = JSON.parse(readFileSync(resolve(value("workflow")), "utf8")) as { publicResourceUrl: string; publicOperationId: string; shieldedSession: string; buyerDepositAmount: string; memories: string[]; capabilities: CapabilityManifest[]; publicTask: string; confidentialTask: string; buyerOpeningAmount: string; buyerMaximum: string }, eventPath = typeof args.events === "string" ? resolve(args.events) : join(root, "events.jsonl"), log = new DemoEventLog(eventPath, randomUUID(), "live"), roleHomes = homes(root); let buyer = new Phase3App(roleHomes.buyer); const publicSeller = new Phase3App(roleHomes.publicSeller), confidentialSeller = new Phase3App(roleHomes.confidentialSeller);
   if (buyer.profile.mock) fail("LIVE_PROFILE_REQUIRED", "supercuts-demo live refuses mock profiles");
-  const claudeKeyPath = resolve(value("claude-key-file"));
-  if ((statSync(claudeKeyPath).mode & 0o077) !== 0) fail("CREDENTIAL_PERMISSIONS", "Claude key file must be owner-only");
-  const claudeKey = readFileSync(claudeKeyPath, "utf8").trim();
+  const claudeKeyPath = typeof args["claude-key-file"] === "string" ? resolve(args["claude-key-file"]) : undefined;
+  if (claudeKeyPath && (statSync(claudeKeyPath).mode & 0o077) !== 0) fail("CREDENTIAL_PERMISSIONS", "Claude key file must be owner-only");
+  const claudeKey = (claudeKeyPath ? readFileSync(claudeKeyPath, "utf8") : process.env.CLAUDE_API_KEY ?? "").trim();
+  if (!claudeKey) fail("CLAUDE_CREDENTIAL_MISSING", "export CLAUDE_API_KEY or provide --claude-key-file");
   const claude = (actor: "buyer" | "public-seller" | "confidential-seller") => new BoundedClaude({ apiKey: claudeKey, onDecision: (entry) => log.append({ actor, stage: "agent-decision", status: "complete", publicDetails: { model: entry.model, action: entry.action, inputTokens: entry.usage.inputTokens, outputTokens: entry.usage.outputTokens }, evidenceHashes: [], explorerLinks: [] }) });
   const mutate = async (app: Phase3App, name: string, parameters: Record<string, string | boolean>) => { const intent = app.preview(name, parameters), approval = app.approve(intent.challengeId); return (await app.execute(name, { ...parameters, "approval-token": approval.token })).data; };
   try {
