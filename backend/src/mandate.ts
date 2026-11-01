@@ -15,6 +15,10 @@ export interface AgentMandate {
   totalRunBudget: string;
   requiredPrivacy: "any" | "shielded";
   expiresAt: number;
+  requireSettlementPlan?: boolean;
+  allowedCapabilityIds?: string[];
+  allowedCapabilityClasses?: string[];
+  allowedRails?: Array<"x402" | "shielded">;
 }
 
 export interface ToolSchema {
@@ -39,15 +43,16 @@ const definitions: Record<string, ReturnType<typeof object>> = {
   "offer.open": object({ session: string("Optional stable negotiation session ID.") }, [], true, "Open a durable negotiation session."),
   "offer.propose": object({ session: string("Negotiation session ID."), revision: string("Positive revision.", { pattern: "^[1-9][0-9]*$" }), terms: string("Plain-language or canonical JSON terms.") }, ["session", "revision", "terms"], true, "Submit an offer revision."),
   "offer.counter": object({ session: string("Negotiation session ID."), revision: string("Positive revision.", { pattern: "^[1-9][0-9]*$" }), terms: string("Plain-language or canonical JSON terms."), agreement: string("Backend-only encoded agreement draft.") }, ["session"], true, "Counter an offer under deterministic price policy."),
-  "offer.accept": object({ session: string("Negotiation session ID."), revision: string("Positive revision.", { pattern: "^[1-9][0-9]*$" }), terms: string("Accepted terms."), agreement: string("Backend-only encoded signed agreement.") }, ["session"], true, "Accept policy-approved final terms."),
+  "offer.accept": object({ session: string("Negotiation session ID."), revision: string("Positive revision.", { pattern: "^[1-9][0-9]*$" }), terms: string("Accepted terms."), agreement: string("Backend-only encoded signed agreement."), "plan-hash": string("Shielded settlement plan hash.", { pattern: "^[0-9a-f]{64}$" }) }, ["session"], true, "Accept policy-approved final terms and optionally bind it to a shielded plan."),
   "offer.show": object({ session: string("Negotiation session ID.") }, ["session"], false, "Read the latest durable offer revision."),
   "pay.quote": object({ rail: string("Requested settlement rail.", { enum: ["x402", "shielded"] }), amount: string("Unsigned base-unit amount.", { pattern: "^[1-9][0-9]*$" }), counterparty: string("Mandate-approved payee."), asset: string("Sui coin type.") }, ["rail", "amount", "counterparty"], false, "Evaluate payment policy without signing."),
-  "pay.shielded": object({ session: string("Accepted agreement session."), amount: string("Unsigned base-unit amount.", { pattern: "^[1-9][0-9]*$" }), counterparty: string("Mandate-approved seller."), asset: string("Sui coin type."), "request-id": string("Bound delivery request ID."), "broadcast-only": boolean("Stop after broadcast for recovery testing.") }, [], true, "Settle one accepted agreement through the experimental shielded pool."),
-  "pay.x402": object({ "resource-url": string("Seller-owned protected resource URL."), amount: string("Unsigned base-unit amount.", { pattern: "^[1-9][0-9]*$" }), counterparty: string("Mandate-approved public payee."), asset: string("Sui coin type."), "request-id": string("Bound delivery request ID."), "broadcast-only": boolean("Stop after broadcast for recovery testing.") }, [], true, "Complete a standard x402 v2 exact Sui payment challenge."),
+  "pay.shielded": object({ session: string("Accepted agreement session."), amount: string("Unsigned base-unit amount.", { pattern: "^[1-9][0-9]*$" }), counterparty: string("Mandate-approved seller."), asset: string("Sui coin type."), "request-id": string("Bound delivery request ID."), "broadcast-only": boolean("Stop after broadcast for recovery testing."), "plan-hash": string("Approved settlement plan hash.", { pattern: "^[0-9a-f]{64}$" }) }, [], true, "Settle one accepted agreement through the experimental shielded pool."),
+  "pay.x402": object({ "resource-url": string("Seller-owned protected resource URL."), amount: string("Unsigned base-unit amount.", { pattern: "^[1-9][0-9]*$" }), counterparty: string("Mandate-approved public payee."), asset: string("Sui coin type."), "request-id": string("Bound delivery request ID."), "broadcast-only": boolean("Stop after broadcast for recovery testing."), "plan-hash": string("Approved settlement plan hash.", { pattern: "^[0-9a-f]{64}$" }) }, [], true, "Complete a standard x402 v2 exact Sui payment challenge."),
   "pay.status": object({ "operation-id": string("Payment operation identity."), reconcile: boolean("Reconcile an ambiguous broadcast.") }, ["operation-id"], false, "Read or reconcile a previously journaled payment."),
   "resource.serve": object({ "request-id": string("Unique request identity."), body: string("Base64-encoded artifact bytes.") }, ["request-id", "body"], true, "Bind one generated artifact to one request."),
   "resource.fetch": object({ "request-id": string("Bound request identity."), "operation-id": string("Finalized payment operation."), response: string("Base64-encoded paid response.") }, ["request-id", "operation-id", "response"], false, "Record delivery separately from payment evidence."),
-  "memory.remember": object({ fact: string("Sanitized durable fact, never a secret or full transcript.", { maxLength: 4096 }) }, ["fact"], true, "Write one meaningful Mainnet Walrus memory fact."),
+  "settlement.plan": object({ manifest: { type: "object", description: "Primary supercuts.capability.v1 manifest." }, alternatives: { type: "array", description: "Optional alternative manifests.", items: { type: "object" } }, "requested-amount": string("Desired opening amount in base units.", { pattern: "^(?:0|[1-9][0-9]*)$" }), "privacy-hint": string("Agent hint that may only increase privacy.", { enum: ["any", "shielded"] }) }, ["manifest"], true, "Create and persist a deterministic mandate- and memory-bound settlement plan."),
+  "memory.remember": object({ fact: string("Legacy advisory fact, never a secret or full transcript.", { maxLength: 4096 }), memory: { type: "object", description: "Typed settlement memory; provenance is assigned as agent_observation." } }, [], true, "Write one advisory Mainnet Walrus memory without granting authority."),
   "memory.recall": object({ query: string("Policy or experience query.", { maxLength: 1024 }) }, ["query"], false, "Recall relevant prior experience and privacy rules."),
   "memory.status": object({}, [], false, "List completed memory blob identities."),
   disclose: object({ "deal-id": string("Deal scope."), auditor: string("Designated auditor identity."), "payment-digest": string("Finalized payment digest."), "transcript-root": string("Authenticated agreement transcript root.") }, ["deal-id", "auditor", "payment-digest", "transcript-root"], true, "Create a deal- and auditor-scoped disclosure package."),
@@ -80,6 +85,9 @@ export function loadMandate(home: string): AgentMandate {
   if ((statSync(path).mode & 0o077) !== 0) fail("MANDATE_PERMISSIONS", "mandate.json must be owner-only");
   let mandate: AgentMandate; try { mandate = JSON.parse(readFileSync(path, "utf8")) as AgentMandate; } catch (error) { return fail("MANDATE_INVALID", "mandate.json is not valid JSON", error); }
   if (mandate.version !== "supercuts.mandate.v1" || !mandate.owner || !Array.isArray(mandate.allowedCommands) || !Array.isArray(mandate.allowedCounterparties) || !Array.isArray(mandate.allowedAssets) || !/^(?:0|[1-9][0-9]*)$/.test(mandate.perDealCeiling) || !/^(?:0|[1-9][0-9]*)$/.test(mandate.totalRunBudget) || !Number.isSafeInteger(mandate.expiresAt)) fail("MANDATE_INVALID", "mandate.json has an invalid shape");
+  if (mandate.requireSettlementPlan !== undefined && typeof mandate.requireSettlementPlan !== "boolean") fail("MANDATE_INVALID", "requireSettlementPlan must be boolean");
+  for (const list of [mandate.allowedCapabilityIds, mandate.allowedCapabilityClasses, mandate.allowedRails]) if (list !== undefined && (!Array.isArray(list) || list.some((item) => typeof item !== "string" || !item))) fail("MANDATE_INVALID", "mandate allowlists must contain non-empty strings");
+  if (mandate.allowedRails?.some((rail) => rail !== "x402" && rail !== "shielded")) fail("MANDATE_INVALID", "mandate contains an unsupported rail");
   return mandate;
 }
 
@@ -97,25 +105,29 @@ export async function executeMandated(app: Phase3App, mandate: AgentMandate, com
   const args: Record<string, string | boolean> = {};
   for (const [key, value] of Object.entries(raw)) args[key] = typeof value === "boolean" ? value : typeof value === "string" ? value : Buffer.from(JSON.stringify(value)).toString("base64url");
   if (!spec.mutating) return (await app.execute(command, args)).data;
-  const operationId = String(raw["operation-id"]), amount = typeof raw.amount === "string" ? BigInt(raw.amount) : 0n;
+  const operationId = String(raw["operation-id"]), journalOperationId = command === "settlement.plan" ? `settlement.plan:${operationId}` : operationId, amount = typeof raw.amount === "string" ? BigInt(raw.amount) : 0n;
   if (amount > BigInt(mandate.perDealCeiling)) fail("MANDATE_DEAL_CEILING_EXCEEDED", "operation exceeds the owner mandate per-deal ceiling");
   if (typeof raw.counterparty === "string" && !mandate.allowedCounterparties.includes(raw.counterparty)) fail("MANDATE_COUNTERPARTY_FORBIDDEN", "counterparty is outside the owner mandate");
   if (typeof raw.asset === "string" && !mandate.allowedAssets.includes(raw.asset)) fail("MANDATE_ASSET_FORBIDDEN", "asset is outside the owner mandate");
   if (mandate.requiredPrivacy === "shielded" && command === "pay.x402") fail("MANDATE_PRIVACY_REQUIRED", "owner mandate requires shielded settlement");
+  const rail = command === "pay.x402" ? "x402" : command === "pay.shielded" ? "shielded" : undefined;
+  if (rail && mandate.allowedRails && !mandate.allowedRails.includes(rail)) fail("MANDATE_RAIL_FORBIDDEN", "settlement rail is outside the owner mandate");
+  if (rail && mandate.requireSettlementPlan && typeof raw["plan-hash"] !== "string") fail("SETTLEMENT_PLAN_REQUIRED", "owner mandate requires an approved settlement plan");
   const intentHash = createHash("sha256").update(canonical({ command, raw })).digest("hex");
   app.store.db.exec("CREATE TABLE IF NOT EXISTS mandate_operations(operation_id TEXT PRIMARY KEY,intent_hash TEXT NOT NULL,amount TEXT NOT NULL,created_at INTEGER NOT NULL)");
   app.store.db.exec("BEGIN IMMEDIATE");
   try {
-    const existing = app.store.db.prepare("SELECT intent_hash FROM mandate_operations WHERE operation_id=?").get(operationId) as { intent_hash: string } | undefined;
+    const existing = app.store.db.prepare("SELECT intent_hash FROM mandate_operations WHERE operation_id=?").get(journalOperationId) as { intent_hash: string } | undefined;
     if (existing && existing.intent_hash !== intentHash) fail("OPERATION_ID_CONFLICT", "operation ID already identifies another mandated mutation");
     const spent = (app.store.db.prepare("SELECT amount FROM mandate_operations").all() as Array<{ amount: string }>).reduce((sum, row) => sum + BigInt(row.amount), 0n);
     if (!existing && spent + amount > BigInt(mandate.totalRunBudget)) fail("MANDATE_RUN_BUDGET_EXCEEDED", "operation exceeds the owner mandate total run budget");
-    if (!existing) app.store.db.prepare("INSERT INTO mandate_operations(operation_id,intent_hash,amount,created_at) VALUES(?,?,?,?)").run(operationId, intentHash, amount.toString(), Date.now());
+    if (!existing) app.store.db.prepare("INSERT INTO mandate_operations(operation_id,intent_hash,amount,created_at) VALUES(?,?,?,?)").run(journalOperationId, intentHash, amount.toString(), Date.now());
     app.store.db.exec("COMMIT");
   } catch (error) { app.store.db.exec("ROLLBACK"); throw error; }
   // Keep the reservation on every failure: a thrown transport error can occur
   // after signing or broadcast, so releasing budget here could authorize a
   // second payment. Exact retries reconcile this same operation identity.
-  const preview = app.preview(command, args), approval = app.approve(preview.challengeId);
-  return (await app.execute(command, { ...args, "approval-token": approval.token })).data;
+  const executionArgs = command === "settlement.plan" ? { ...args, "mandate-json": Buffer.from(JSON.stringify(mandate)).toString("base64url") } : args;
+  const preview = app.preview(command, executionArgs), approval = app.approve(preview.challengeId);
+  return (await app.execute(command, { ...executionArgs, "approval-token": approval.token })).data;
 }

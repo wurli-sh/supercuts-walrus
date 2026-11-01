@@ -10,6 +10,7 @@ export * from "./backend.js";
 export * from "./errors.js";
 export * from "./indexer.js";
 export * from "./memory.js";
+export * from "./settlement.js";
 export * from "./live-index.js";
 export * from "./live-runtime.js";
 export * from "./protocol-engine.js";

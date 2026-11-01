@@ -82,6 +82,8 @@ test("phase 3 independent MCP processes expose role-scoped tools and backend pol
     { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "pay.x402", arguments: { "operation-id": "mcp-over", amount: "1000000001", counterparty: "seller-a" } } },
   ]);
   assert.ok(buyerReplies[1].result.tools.some((tool: any) => tool.name === "pay.shielded"));
+  assert.ok(buyerReplies[1].result.tools.some((tool: any) => tool.name === "settlement.plan"));
+  assert.ok(!buyerReplies[1].result.tools.some((tool: any) => tool.name === "settlement.approve-review"));
   assert.equal(buyerReplies[1].result.tools.find((tool: any) => tool.name === "pay.x402").inputSchema.additionalProperties, false);
   assert.equal(buyerReplies[2].result.structuredContent.error.code, "MCP_ARGUMENT_UNKNOWN");
   assert.equal(buyerReplies[3].result.structuredContent.error.code, "MANDATE_DEAL_CEILING_EXCEEDED");

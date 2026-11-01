@@ -7,7 +7,7 @@ const home = homePath({});
 const app = new Phase3App(home);
 const mandate = loadMandate(home);
 const tools: Record<string, string> = {
-  buyer: "status,doctor,capability.discover,wallet.deposit,wallet.balance,wallet.recover,wallet.withdraw,offer.open,offer.propose,offer.accept,offer.show,pay.quote,pay.shielded,pay.x402,pay.status,resource.fetch,memory.remember,memory.recall,memory.status,disclose",
+  buyer: "status,doctor,capability.discover,settlement.plan,wallet.deposit,wallet.balance,wallet.recover,wallet.withdraw,offer.open,offer.propose,offer.accept,offer.show,pay.quote,pay.shielded,pay.x402,pay.status,resource.fetch,memory.remember,memory.recall,memory.status,disclose",
   seller: "status,doctor,capability.publish,wallet.balance,wallet.recover,wallet.withdraw,offer.counter,offer.show,pay.status,resource.serve,resource.fetch,memory.remember,memory.recall,memory.status",
   auditor: "status,doctor,audit.verify",
 };

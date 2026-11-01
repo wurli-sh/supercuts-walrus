@@ -8,13 +8,14 @@ import { LiveRuntime, type LiveRuntimeProfile } from "./live-runtime.js";
 import { validateCapabilityManifest, type CapabilityManifest } from "./capability.js";
 import { ManualMemory, type ManualMemoryConfig } from "./memwal.js";
 import { WorkflowMemory } from "./workflow-memory.js";
+import { canonicalJson, createSettlementPlan, settlementMandateHash, settlementPlanHash, validateSettlementMemory, validateSettlementPlan, type PlanningMandate, type RecalledSettlementMemory, type SettlementMemoryV1, type SettlementPlanV1 } from "./settlement.js";
 
 export type Role = "buyer" | "seller" | "auditor";
 export interface Profile {
   version: 1 | 2; role: Role; network: "testnet"; mock: boolean;
   packageId: string; poolId: string; coinType: string; verifierVersion: number;
   artifactManifest: string; artifactManifestSha256: string;
-  policy: { maxAmount: string; allowedAssets: string[]; allowedCounterparties: string[]; requiredPrivacy: "any" | "shielded"; expiresAt: number };
+  policy: { maxAmount: string; allowedAssets: string[]; allowedCounterparties: string[]; requiredPrivacy: "any" | "shielded"; expiresAt: number; maxMemoryDistance?: number };
   live?: LiveRuntimeProfile["live"];
 }
 export interface CommandResult { schemaVersion: "supercuts.v1"; ok: true; command: string; data: Record<string, unknown>; }
@@ -27,9 +28,9 @@ export interface ApprovalToken { token: string; expiresAt: number; intentHash: s
 const PACKAGE = "0xf887433ddfd1068f6df3020cd757939b99ceb418f0d8b9924092b01c7aee846e";
 const POOL = "0x873e37b4745316f21a2780893f5fc36f87da559b08923fb4dad6237cd2e95d98";
 const COIN = "0x2::sui::SUI";
-const WRITE = new Set(["wallet.deposit", "wallet.recover", "wallet.withdraw", "offer.open", "offer.propose", "offer.counter", "offer.accept", "pay.shielded", "pay.x402", "resource.serve", "memory.remember", "disclose", "capability.publish"]);
+const WRITE = new Set(["wallet.deposit", "wallet.recover", "wallet.withdraw", "offer.open", "offer.propose", "offer.counter", "offer.accept", "pay.shielded", "pay.x402", "resource.serve", "memory.remember", "disclose", "capability.publish", "settlement.plan", "settlement.approve-review", "memory.policy"]);
 const ROLE_COMMANDS: Record<Role, ReadonlySet<string>> = {
-  buyer: new Set(["status", "doctor", "capability.discover", "wallet.deposit", "wallet.balance", "wallet.recover", "wallet.withdraw", "offer.open", "offer.propose", "offer.accept", "offer.show", "pay.quote", "pay.shielded", "pay.x402", "pay.status", "resource.fetch", "memory.remember", "memory.recall", "memory.status", "disclose"]),
+  buyer: new Set(["status", "doctor", "capability.discover", "settlement.plan", "settlement.approve-review", "memory.policy", "wallet.deposit", "wallet.balance", "wallet.recover", "wallet.withdraw", "offer.open", "offer.propose", "offer.accept", "offer.show", "pay.quote", "pay.shielded", "pay.x402", "pay.status", "resource.fetch", "memory.remember", "memory.recall", "memory.status", "disclose"]),
   seller: new Set(["status", "doctor", "capability.publish", "wallet.balance", "wallet.recover", "wallet.withdraw", "offer.counter", "offer.show", "pay.status", "resource.serve", "resource.fetch", "memory.remember", "memory.recall", "memory.status"]),
   auditor: new Set(["status", "doctor", "audit.verify"]),
 };
@@ -95,6 +96,11 @@ export function initialize(home: string, args: Record<string, string | boolean>)
   const endpoint = (name: string): string => { const value = required(args, name); return /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`; };
   const credential = (name: string): Buffer => { const path = resolve(required(args, name)); if ((statSync(path).mode & 0o077) !== 0) fail("CREDENTIAL_PERMISSIONS", `${name} must be owner-only`); const value = readFileSync(path); if (!value.length || value.length > 4096) fail("CREDENTIAL_INVALID", `${name} is empty or too large`); return Buffer.from(value.toString().trim()); };
   const liveCredentials = deployment ? { sui: credential("sui-key-file"), tatum: credential("tatum-key-file"), ...(typeof args["memory-config-file"] === "string" ? { memory: credential("memory-config-file") } : {}) } : undefined;
+  if (liveCredentials?.memory) {
+    let memoryConfig: ManualMemoryConfig; try { memoryConfig = JSON.parse(liveCredentials.memory.toString()) as ManualMemoryConfig; } catch (error) { return fail("LIVE_MEMORY_CONFIG_INVALID", "memory config is not valid JSON", error); }
+    let embedding: URL; try { embedding = new URL(memoryConfig.embeddingApiBase); } catch (error) { return fail("LIVE_MEMORY_CONFIG_INVALID", "embeddingApiBase is invalid", error); }
+    if (!["localhost", "127.0.0.1", "::1"].includes(embedding.hostname)) fail("LIVE_MEMORY_EMBEDDING_UNTRUSTED", "live memory embeddings must use the loopback 1536-dimension adapter");
+  }
   const artifactRoot = manifest.startsWith("mock:") ? "" : resolve(manifest, ".."); const repositoryRoot = artifactRoot ? resolve(artifactRoot, "../..") : "";
   const live = deployment ? {
     coinTypeHash: String(deployment.coinTypeHash), deploymentDomain: String(deployment.deploymentDomain), initialRoot: String(deployment.initialRoot), deploymentCheckpoint: String(deployment.deploymentCheckpoint),
@@ -114,12 +120,13 @@ export function initialize(home: string, args: Record<string, string | boolean>)
       allowedCounterparties: typeof args["allow-counterparty"] === "string" ? args["allow-counterparty"].split(",") : ["seller-a", "seller-b"],
       requiredPrivacy: args["require-shielded"] === true ? "shielded" : "any",
       expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
+      maxMemoryDistance: (() => { const value = typeof args["max-memory-distance"] === "string" ? Number(args["max-memory-distance"]) : 0.35; if (!Number.isFinite(value) || value < 0 || value > 1) return fail("POLICY_MEMORY_DISTANCE_INVALID", "max-memory-distance must be in [0,1]"); return value; })(),
     }, ...(live ? { live } : {}),
   };
   writeFileSync(join(home, "profile.json"), `${JSON.stringify(profile, null, 2)}\n`, { mode: 0o600 });
   const mandate = {
     version: "supercuts.mandate.v1", owner: "local-operator", role,
-    allowedCommands: [...ROLE_COMMANDS[role]], allowedCounterparties: profile.policy.allowedCounterparties,
+    allowedCommands: [...ROLE_COMMANDS[role]].filter((name) => name !== "settlement.approve-review" && name !== "memory.policy"), allowedCounterparties: profile.policy.allowedCounterparties,
     allowedAssets: profile.policy.allowedAssets, perDealCeiling: profile.policy.maxAmount,
     totalRunBudget: (BigInt(profile.policy.maxAmount) * 100n).toString(), requiredPrivacy: profile.policy.requiredPrivacy,
     expiresAt: profile.policy.expiresAt,
@@ -186,8 +193,9 @@ export class Phase3App {
   }
   private validateApproval(command: string, args: Record<string, string | boolean>): void {
     const normalized = this.normalizedIntent(command, args), operationId = typeof args["operation-id"] === "string" ? args["operation-id"] : undefined;
-    if (operationId) {
-      const durable = this.store.db.prepare("SELECT intent_hash FROM authorized_operations WHERE operation_id=?").get(operationId) as { intent_hash: string } | undefined;
+    const authorizationOperationId = operationId && (command === "settlement.plan" || command === "settlement.approve-review") ? `${command}:${operationId}` : operationId;
+    if (authorizationOperationId) {
+      const durable = this.store.db.prepare("SELECT intent_hash FROM authorized_operations WHERE operation_id=?").get(authorizationOperationId) as { intent_hash: string } | undefined;
       if (durable) {
         if (durable.intent_hash !== normalized.intentHash) fail("OPERATION_ID_CONFLICT", "operation ID already identifies another authorized intent");
         return;
@@ -211,7 +219,7 @@ export class Phase3App {
       if (row.used && !operationId) fail("AUTHORIZATION_REPLAY", "approval token was already consumed");
       if (Date.now() > row.expires_at) fail("AUTHORIZATION_EXPIRED", "approval token has expired");
       this.store.db.prepare("UPDATE authorization_intents SET used=1 WHERE challenge_id=?").run(token.challengeId);
-      if (operationId) this.store.db.prepare("INSERT INTO authorized_operations(operation_id,intent_hash,created_at) VALUES(?,?,?)").run(operationId, normalized.intentHash, Date.now());
+      if (authorizationOperationId) this.store.db.prepare("INSERT INTO authorized_operations(operation_id,intent_hash,created_at) VALUES(?,?,?)").run(authorizationOperationId, normalized.intentHash, Date.now());
       this.store.db.exec("COMMIT");
     } catch (error) { this.store.db.exec("ROLLBACK"); throw error; }
   }
@@ -235,8 +243,143 @@ export class Phase3App {
     return { role: this.profile.role, network: this.profile.network, packageId: this.profile.packageId, poolId: this.profile.poolId, asset: this.profile.coinType, verifierVersion: this.profile.verifierVersion, artifactManifestSha256: actual, keyPermissions: "owner-only", rpc: "mock-not-funded", healthy: true };
   }
 
+  private planningMandate(args: Record<string, string | boolean>): PlanningMandate {
+    let raw: unknown;
+    if (typeof args["mandate-json"] === "string") {
+      try { raw = JSON.parse(Buffer.from(args["mandate-json"], "base64url").toString()); } catch (error) { return fail("MANDATE_INVALID", "encoded planning mandate is invalid", error); }
+    } else {
+      try { raw = JSON.parse(readFileSync(join(this.home, "mandate.json"), "utf8")); } catch (error) { return fail("MANDATE_INVALID", "owner mandate could not be loaded", error); }
+    }
+    const mandate = raw as PlanningMandate;
+    if (!mandate || mandate.version !== "supercuts.mandate.v1" || !Array.isArray(mandate.allowedCounterparties) || !Array.isArray(mandate.allowedAssets) || !/^(?:0|[1-9][0-9]*)$/.test(mandate.perDealCeiling) || !Number.isSafeInteger(mandate.expiresAt)) fail("MANDATE_INVALID", "planning mandate has an invalid shape");
+    return mandate;
+  }
+
+  private storedPlan(planHash: string): SettlementPlanV1 {
+    const row = this.store.db.prepare("SELECT plan_json FROM settlement_plans WHERE plan_hash=?").get(planHash) as { plan_json: string } | undefined;
+    if (!row) return fail("SETTLEMENT_PLAN_NOT_FOUND", "settlement plan hash was not found in this role home");
+    let plan: unknown; try { plan = JSON.parse(row.plan_json); } catch (error) { return fail("SETTLEMENT_PLAN_CORRUPT", "stored settlement plan is invalid JSON", error); }
+    validateSettlementPlan(plan); if (plan.planHash !== planHash) fail("SETTLEMENT_PLAN_HASH_MISMATCH", "requested hash does not resolve to the identical stored plan"); return plan;
+  }
+
+  private persistPlan(plan: SettlementPlanV1): SettlementPlanV1 {
+    validateSettlementPlan(plan); const serialized = canonicalJson(plan);
+    const existing = this.store.db.prepare("SELECT plan_hash,plan_json FROM settlement_plans WHERE operation_id=?").get(plan.operationId) as { plan_hash: string; plan_json: string } | undefined;
+    if (existing) { if (existing.plan_hash !== plan.planHash || existing.plan_json !== serialized) fail("OPERATION_ID_CONFLICT", "planning operation already identifies another immutable plan"); return this.storedPlan(existing.plan_hash); }
+    this.store.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.store.db.prepare("INSERT INTO settlement_plans(plan_hash,operation_id,plan_json,status,expires_at,created_at) VALUES(?,?,?,?,?,?)").run(plan.planHash, plan.operationId, serialized, plan.status, plan.expiresAt, plan.createdAt);
+      this.store.db.prepare("INSERT INTO settlement_decision_traces(plan_hash,mandate_hash,manifest_hash,risk_level,reason_codes,citations,created_at) VALUES(?,?,?,?,?,?,?)").run(plan.planHash, plan.mandateHash, plan.manifestHash, plan.riskLevel, JSON.stringify(plan.reasonCodes), JSON.stringify(plan.citations.map(({ blobId, distance }) => ({ blobId, distance }))), plan.createdAt);
+      this.store.db.exec("COMMIT");
+    } catch (error) { this.store.db.exec("ROLLBACK"); throw error; }
+    return plan;
+  }
+
+  private recalledMockMemories(): RecalledSettlementMemory[] {
+    return [...all<Record<string, unknown>>(this.store, "memory"), ...all<Record<string, unknown>>(this.store, "verified-memory")].map((item) => {
+      if (item.memory && typeof item.memory === "object") return { blobId: String(item.blobId), distance: 0, memory: item.memory as SettlementMemoryV1 };
+      return { blobId: String(item.blobId), distance: 0, legacy: true };
+    });
+  }
+
+  private async planSettlement(args: Record<string, string | boolean>): Promise<Record<string, unknown>> {
+    let primary: CapabilityManifest, alternatives: CapabilityManifest[] = [];
+    const parseArgument = (value: string): unknown => { try { return JSON.parse(Buffer.from(value, "base64url").toString()); } catch { return JSON.parse(value); } };
+    try { primary = parseArgument(required(args, "manifest")) as CapabilityManifest; } catch (error) { return fail("CAPABILITY_INVALID", "primary manifest is not JSON", error); }
+    validateCapabilityManifest(primary);
+    if (typeof args.alternatives === "string") { try { alternatives = parseArgument(args.alternatives) as CapabilityManifest[]; } catch (error) { return fail("CAPABILITY_LIST_INVALID", "alternative manifests are not JSON", error); } }
+    if (!Array.isArray(alternatives)) fail("CAPABILITY_LIST_INVALID", "alternatives must be an array"); for (const item of alternatives) validateCapabilityManifest(item);
+    let recalled = this.recalledMockMemories();
+    if (!this.profile.mock && this.store.getSecret("live:memory-config")) {
+      const encoded = this.store.getSecret("live:memory-config")!; let config: ManualMemoryConfig; try { config = JSON.parse(encoded.toString()) as ManualMemoryConfig; } catch (error) { return fail("LIVE_MEMORY_CONFIG_INVALID", "encrypted memory config is invalid", error); }
+      const manual = new ManualMemory(this.store, config);
+      try { recalled = (await manual.recall(`${primary.capabilityId} ${primary.capability} ${primary.sellerId}`, 20)).map((item) => { let memory: SettlementMemoryV1 | undefined; try { const value = JSON.parse(item.text) as unknown; validateSettlementMemory(value); memory = value; } catch { /* malformed or legacy memory remains advisory */ } return { blobId: item.blobId, distance: item.distance, ...(memory ? { memory } : { legacy: true }) }; }); } finally { manual.destroy(); }
+    }
+    const plan = createSettlementPlan({ operationId: required(args, "operation-id"), mandate: this.planningMandate(args), manifests: [primary, ...alternatives], ...(typeof args["requested-amount"] === "string" ? { requestedAmount: args["requested-amount"] } : {}), ...(args["privacy-hint"] === "shielded" ? { privacyHint: "shielded" as const } : {}), recalled, maxMemoryDistance: this.profile.policy.maxMemoryDistance ?? 0.35 });
+    return this.persistPlan(plan) as unknown as Record<string, unknown>;
+  }
+
+  private typedMemory(args: Record<string, string | boolean>, provenance: "agent_observation" | "owner_policy" | "verified_outcome"): SettlementMemoryV1 {
+    const encoded = required(args, "memory"); let supplied: Record<string, unknown>;
+    try { supplied = JSON.parse(Buffer.from(encoded, "base64url").toString()) as Record<string, unknown>; }
+    catch { try { supplied = JSON.parse(encoded) as Record<string, unknown>; } catch (error) { return fail("SETTLEMENT_MEMORY_INVALID", "typed memory is not JSON", error); } }
+    const memory = { ...supplied, version: "supercuts.settlement-memory.v1", provenance } as unknown; validateSettlementMemory(memory, provenance); return memory;
+  }
+
+  private async rememberTyped(args: Record<string, string | boolean>, provenance: "agent_observation" | "owner_policy" | "verified_outcome"): Promise<Record<string, unknown>> {
+    const operationId = required(args, "operation-id"), memory = this.typedMemory(args, provenance);
+    if (this.profile.mock) {
+      const blobId = `mockwalrus_${hash(canonicalJson({ operationId, memory })).slice(0, 40)}`, item = { operationId, namespace: `supercuts:${this.profile.role}`, blobId, memory, status: "complete" };
+      const existing = get<Record<string, unknown>>(this.store, "memory", operationId); if (existing && canonicalJson(existing.memory) !== canonicalJson(memory)) fail("MEMORY_OPERATION_CONFLICT", "memory operation ID identifies another envelope");
+      record(this.store, "memory", operationId, item); return { operationId, namespace: item.namespace, blobId, status: "complete", kind: memory.kind, provenance };
+    }
+    const encoded = this.store.getSecret("live:memory-config") ?? fail("LIVE_MEMORY_CONFIG_MISSING", "live Mainnet memory requires an owner-only --memory-config-file"); let config: ManualMemoryConfig;
+    try { config = JSON.parse(encoded.toString()) as ManualMemoryConfig; } catch (error) { return fail("LIVE_MEMORY_CONFIG_INVALID", "encrypted memory config is invalid", error); }
+    const manual = new ManualMemory(this.store, config);
+    try {
+      const factHash = hash(canonicalJson(memory)), existing = this.store.db.prepare("SELECT fact_hash,blob_id,status FROM memory_jobs WHERE operation_id=?").get(operationId) as { fact_hash: string; blob_id: string | null; status: string } | undefined;
+      if (existing) { if (existing.fact_hash !== factHash) fail("MEMORY_OPERATION_CONFLICT", "memory operation ID identifies another envelope"); if (existing.status === "complete" && existing.blob_id) return { operationId, namespace: config.namespace, blobId: existing.blob_id, status: "complete", kind: memory.kind, provenance }; return fail("MEMORY_JOB_PENDING", "memory job is not complete"); }
+      this.store.db.prepare("INSERT INTO memory_jobs(operation_id,kind,fact_hash,blob_id,status,created_at) VALUES(?,?,?,NULL,'pending',?)").run(operationId, memory.kind, factHash, Date.now());
+      try { const blobId = await manual.remember(memory); this.store.db.prepare("UPDATE memory_jobs SET blob_id=?,status='complete' WHERE operation_id=?").run(blobId, operationId); return { operationId, namespace: config.namespace, blobId, status: "complete", kind: memory.kind, provenance }; }
+      catch (error) { this.store.db.prepare("UPDATE memory_jobs SET status='unresolved' WHERE operation_id=?").run(operationId); throw error; }
+    } finally { manual.destroy(); }
+  }
+
+  private enqueueVerifiedOutcome(event: string, operationId: string, evidence: Record<string, unknown>, planHash?: string, fallback?: { counterparty?: string; asset?: string }): void {
+    const plan = planHash ? this.storedPlan(planHash) : undefined, jobId = `verified:${event}:${operationId}`, evidenceHash = hash(canonicalJson(evidence));
+    const memory: SettlementMemoryV1 = { version: "supercuts.settlement-memory.v1", kind: "outcome", provenance: "verified_outcome", scope: { ...(plan ? { capabilityId: plan.capabilityId, capabilityClass: plan.capabilityClass, counterparty: plan.sellerId, network: plan.network, asset: plan.asset } : { ...(fallback?.counterparty ? { counterparty: fallback.counterparty } : {}), ...(fallback?.asset ? { asset: fallback.asset } : {}), network: "sui:testnet" as const }) }, createdAt: Date.now(), evidenceHash, signal: { outcome: String(evidence.status ?? "") === "unresolved" ? "unresolved" : String(evidence.status ?? "") === "failed" ? "failed" : "succeeded" } };
+    validateSettlementMemory(memory, "verified_outcome"); const factHash = hash(canonicalJson(memory));
+    if (this.profile.mock) { const blobId = `mockwalrus_${factHash.slice(0, 40)}`; record(this.store, "verified-memory", jobId, { operationId: jobId, namespace: `supercuts:${this.profile.role}`, blobId, memory, status: "complete" }); return; }
+    this.store.putSecretOnce(`memory-outbox:${jobId}`, Buffer.from(canonicalJson(memory)));
+    this.store.db.prepare("INSERT OR IGNORE INTO memory_jobs(operation_id,kind,fact_hash,blob_id,status,created_at) VALUES(?,?,?,NULL,'pending',?)").run(jobId, memory.kind, factHash, Date.now());
+  }
+
+  private approveReview(args: Record<string, string | boolean>): Record<string, unknown> {
+    const original = this.storedPlan(required(args, "plan-hash")); if (original.status !== "review_required") fail("SETTLEMENT_REVIEW_NOT_REQUIRED", "only a review-required plan can be approved");
+    if (Date.now() >= original.expiresAt) fail("SETTLEMENT_PLAN_EXPIRED", "review-required plan has expired");
+    const operationId = required(args, "operation-id"), createdAt = Date.now();
+    const copy: Omit<SettlementPlanV1, "planHash"> = { ...original, operationId, status: "approved", riskLevel: "medium", createdAt, expiresAt: Math.min(createdAt + 300_000, original.expiresAt), reasonCodes: [...new Set([...original.reasonCodes, "OWNER_REVIEW_APPROVED" as const])], approvedFromPlanHash: original.planHash };
+    delete (copy as Partial<SettlementPlanV1>).planHash; return this.persistPlan({ ...copy, planHash: settlementPlanHash(copy) }) as unknown as Record<string, unknown>;
+  }
+
+  private bindAcceptedAgreement(args: Record<string, string | boolean>, accepted: Record<string, unknown>): void {
+    if (typeof args["plan-hash"] !== "string") return;
+    const plan = this.storedPlan(args["plan-hash"]), mandate = this.planningMandate(args), session = String(accepted.sessionId), amount = String(accepted.paymentAmount), counterparty = String(accepted.counterparty);
+    if (plan.status !== "approved" || plan.rail !== "shielded" || Date.now() >= plan.expiresAt || plan.mandateHash !== settlementMandateHash(mandate)) fail("SETTLEMENT_PLAN_BINDING_MISMATCH", "accepted agreement is not authorized by an active shielded plan");
+    if (counterparty !== plan.sellerId || BigInt(amount) < BigInt(plan.manifestMinimum) || BigInt(amount) > BigInt(plan.maximumAmount) || accepted.capabilityId !== undefined && accepted.capabilityId !== plan.capabilityId || accepted.manifestHash !== undefined && accepted.manifestHash !== plan.manifestHash) fail("SETTLEMENT_PLAN_BINDING_MISMATCH", "accepted agreement differs from the planned capability, seller, or amount bounds");
+    const bindingHash = hash(canonicalJson({ domain: "supercuts-settlement-agreement-v1", session, planHash: plan.planHash, amount, counterparty, capabilityId: accepted.capabilityId ?? plan.capabilityId, manifestHash: accepted.manifestHash ?? plan.manifestHash }));
+    const existing = this.store.db.prepare("SELECT plan_hash,binding_hash FROM settlement_agreement_bindings WHERE session_id=? OR plan_hash=?").get(session, plan.planHash) as { plan_hash: string; binding_hash: string } | undefined;
+    if (existing && (existing.plan_hash !== plan.planHash || existing.binding_hash !== bindingHash)) fail("SETTLEMENT_PLAN_BINDING_MISMATCH", "session or plan is already bound to another agreement");
+    if (!existing) this.store.db.prepare("INSERT INTO settlement_agreement_bindings(session_id,plan_hash,binding_hash,created_at) VALUES(?,?,?,?)").run(session, plan.planHash, bindingHash, Date.now());
+  }
+
+  private bindSettlementPlan(command: "pay.x402" | "pay.shielded", args: Record<string, string | boolean>, actual: { amount: string; counterparty: string; asset: string; endpoint?: string; requestId: string; session?: string; requirementsHash?: string }): SettlementPlanV1 | undefined {
+    const mandate = this.planningMandate(args), supplied = typeof args["plan-hash"] === "string" ? args["plan-hash"] : undefined;
+    if (!supplied) { if ((mandate as PlanningMandate & { requireSettlementPlan?: boolean }).requireSettlementPlan) fail("SETTLEMENT_PLAN_REQUIRED", "owner mandate requires an approved settlement plan"); return undefined; }
+    const plan = this.storedPlan(supplied), rail = command === "pay.x402" ? "x402" : "shielded", now = Date.now();
+    if (plan.status !== "approved" || plan.riskLevel === "review_required") fail("SETTLEMENT_PLAN_REVIEW_REQUIRED", "settlement plan requires owner review");
+    if (now >= plan.expiresAt) fail("SETTLEMENT_PLAN_EXPIRED", "settlement plan has expired");
+    if (plan.mandateHash !== settlementMandateHash(mandate)) fail("SETTLEMENT_PLAN_MANDATE_MISMATCH", "owner mandate changed after planning");
+    const operationId = required(args, "operation-id");
+    if (plan.operationId !== operationId || plan.rail !== rail || plan.sellerId !== actual.counterparty || plan.asset !== actual.asset || plan.network !== "sui:testnet" || actual.endpoint && plan.endpoint !== actual.endpoint) fail("SETTLEMENT_PLAN_BINDING_MISMATCH", "execution differs from the planned operation, capability, seller, endpoint, asset, network, or rail");
+    if (rail === "shielded" && actual.session) {
+      const agreement = this.store.db.prepare("SELECT plan_hash FROM settlement_agreement_bindings WHERE session_id=?").get(actual.session) as { plan_hash: string } | undefined;
+      if (agreement && agreement.plan_hash !== plan.planHash) fail("SETTLEMENT_PLAN_BINDING_MISMATCH", "shielded agreement is bound to another plan");
+      if (!agreement && !this.profile.mock) { const agreementHash = hash(canonicalJson({ domain: "supercuts-settlement-agreement-v1", session: actual.session, planHash: plan.planHash, amount: actual.amount, counterparty: actual.counterparty, capabilityId: plan.capabilityId, manifestHash: plan.manifestHash })); this.store.db.prepare("INSERT INTO settlement_agreement_bindings(session_id,plan_hash,binding_hash,created_at) VALUES(?,?,?,?)").run(actual.session, plan.planHash, agreementHash, now); }
+    }
+    const value = BigInt(actual.amount); if (value < BigInt(plan.manifestMinimum) || value > BigInt(plan.maximumAmount)) fail("SETTLEMENT_PLAN_AMOUNT_EXCEEDED", "execution amount is outside the planned manifest bounds");
+    const binding = { planHash: plan.planHash, operationId, capabilityId: plan.capabilityId, manifestHash: plan.manifestHash, rail, amount: actual.amount, counterparty: actual.counterparty, asset: actual.asset, endpoint: actual.endpoint ?? null, requestId: actual.requestId, session: actual.session ?? null, requirementsHash: actual.requirementsHash ?? null };
+    const bindingHash = hash(canonicalJson({ domain: "supercuts-settlement-execution-v1", binding })), existing = this.store.db.prepare("SELECT binding_hash FROM settlement_execution_bindings WHERE operation_id=? OR plan_hash=?").get(operationId, plan.planHash) as { binding_hash: string } | undefined;
+    if (existing && existing.binding_hash !== bindingHash) fail("SETTLEMENT_PLAN_CONSUMED", "plan or operation is already bound to another execution");
+    if (!existing) { this.store.db.prepare("INSERT INTO settlement_execution_bindings(operation_id,plan_hash,binding_hash,binding_json,created_at) VALUES(?,?,?,?,?)").run(operationId, plan.planHash, bindingHash, canonicalJson(binding), now); this.store.db.prepare("UPDATE settlement_plans SET consumed_at=? WHERE plan_hash=?").run(now, plan.planHash); }
+    return plan;
+  }
+
   private async executeLive(command: string, args: Record<string, string | boolean>): Promise<CommandResult> {
     if (!this.profile.live) fail("LIVE_PROFILE_INVALID", "live profile configuration is missing");
+    if (command === "settlement.plan") return output(command, await this.planSettlement(args));
+    if (command === "settlement.approve-review") return output(command, this.approveReview(args));
+    if (command === "memory.policy") return output(command, await this.rememberTyped(args, "owner_policy"));
     const runtime = await LiveRuntime.create(this.profile as LiveRuntimeProfile, this.store);
     if (command === "doctor") return output(command, await runtime.doctor());
     if (command === "status") return output(command, { role: this.profile.role, network: this.profile.network, mock: false, runtime: "testnet-live" });
@@ -250,16 +393,16 @@ export class Phase3App {
     if (command === "offer.show") return output(command, get<Record<string, unknown>>(this.store, "offer", required(args, "session")) ?? fail("OFFER_NOT_FOUND", "offer session was not found"));
     if (command === "pay.quote") {
       const rail = required(args, "rail") as "shielded" | "x402"; if (!(rail === "shielded" || rail === "x402")) fail("RAIL_INVALID", "rail must be shielded or x402");
-      const checked = this.paymentPolicy(args, rail); return output(command, { rail, amount: checked.amount.toString(), counterparty: checked.counterparty, asset: checked.asset, policyDecision: "allowed", visibility: rail === "shielded" ? "amount-and-parties-hidden-in-pool" : "public-transfer" });
+      const checked = this.paymentPolicy(args, rail); return output(command, { rail, amount: checked.amount.toString(), counterparty: checked.counterparty, asset: checked.asset, policyDecision: "allowed", visibility: rail === "shielded" ? "no-direct-public-payment; funding-deposits-withdrawals-gas-and-pool-activity-visible" : "public-transfer" });
     }
     if (command === "wallet.balance") return output(command, await runtime.balance());
     if (command === "wallet.recover") return output(command, await runtime.recover());
     if (command === "wallet.deposit") return output(command, await runtime.deposit(amount(args), required(args, "operation-id")));
     if (command === "wallet.withdraw") return output(command, await runtime.withdraw(required(args, "commitment"), required(args, "recipient"), required(args, "operation-id")));
-    if (command === "offer.accept") return output(command, typeof args.agreement === "string" ? runtime.acceptAgreement(required(args, "session"), args.agreement) : this.localOffer(command, args));
+    if (command === "offer.accept") { const accepted = typeof args.agreement === "string" ? runtime.acceptAgreement(required(args, "session"), args.agreement) : this.localOffer(command, args); if (typeof args["plan-hash"] === "string") this.bindAcceptedAgreement(args, accepted); this.enqueueVerifiedOutcome("agreement", typeof args["operation-id"] === "string" ? args["operation-id"] : `${String(accepted.sessionId)}:${String(accepted.revision)}`, { status: "accepted", commitment: accepted.dealCommitment ?? accepted.transcriptCommitment }, typeof args["plan-hash"] === "string" ? args["plan-hash"] : undefined); return output(command, accepted); }
     if (command === "offer.counter") return output(command, typeof args.agreement === "string" ? runtime.prepareSellerAgreement(required(args, "session"), args.agreement) : this.localOffer(command, args));
-    if (command === "pay.shielded") return output(command, await runtime.settleShielded(required(args, "session"), required(args, "operation-id")));
-    if (command === "pay.x402") return output(command, await runtime.payX402Resource(required(args, "operation-id"), required(args, "resource-url")));
+    if (command === "pay.shielded") { const receipt = await runtime.settleShielded(required(args, "session"), required(args, "operation-id"), (actual) => { this.bindSettlementPlan(command, args, actual); }); this.enqueueVerifiedOutcome("settlement", required(args, "operation-id"), receipt, typeof args["plan-hash"] === "string" ? args["plan-hash"] : undefined, { counterparty: String(receipt.counterparty), asset: String(receipt.asset) }); return output(command, receipt); }
+    if (command === "pay.x402") { const receipt = await runtime.payX402Resource(required(args, "operation-id"), required(args, "resource-url"), (actual) => { this.bindSettlementPlan(command, args, actual); }); const { response: _response, ...evidence } = receipt; this.enqueueVerifiedOutcome("settlement", required(args, "operation-id"), evidence, typeof args["plan-hash"] === "string" ? args["plan-hash"] : undefined, { counterparty: String(receipt.counterparty), asset: String(receipt.asset) }); return output(command, receipt); }
     if (command === "memory.remember" || command === "memory.recall" || command === "memory.status") return output(command, await this.liveMemory(command, args));
     if (command === "resource.serve") {
       const requestId = required(args, "request-id"), body = required(args, "body"), resource = { requestId, responseHash: hash(Buffer.from(body, "base64")), body, deliveryStatus: "ready" }; record(this.store, "resource", requestId, resource); return output(command, { requestId, responseHash: resource.responseHash, deliveryStatus: resource.deliveryStatus });
@@ -267,7 +410,7 @@ export class Phase3App {
     if (command === "resource.fetch") {
       const requestId = required(args, "request-id"), local = get<Record<string, unknown>>(this.store, "resource", requestId);
       if (local) return output(command, { ...local, deliveryStatus: "delivered" });
-      const body = required(args, "response"); return output(command, { requestId, responseHash: hash(Buffer.from(body, "base64")), body, deliveryStatus: "delivered", observation: "artifact-delivered-separate-from-payment" });
+      const body = required(args, "response"), delivered = { requestId, responseHash: hash(Buffer.from(body, "base64")), body, deliveryStatus: "delivered", observation: "artifact-delivered-separate-from-payment" }; this.enqueueVerifiedOutcome("delivery", required(args, "operation-id"), { status: "delivered", requestId, responseHash: delivered.responseHash }); return output(command, delivered);
     }
     return fail("LIVE_COMMAND_UNAVAILABLE", `${command} is not connected to the Testnet runtime`);
   }
@@ -325,12 +468,20 @@ export class Phase3App {
     const manual = new ManualMemory(this.store, config);
     try {
       if (command === "memory.remember") {
+        if (typeof args.memory === "string") return this.rememberTyped(args, "agent_observation");
         const operationId = required(args, "operation-id"), observation = required(args, "fact"), workflow = new WorkflowMemory(this.store, manual);
         const blobId = await workflow.record({ kind: /privacy|sensitive|hide/i.test(observation) ? "privacy_choice" : "delivery_observation", subject: "procurement-demo", observation, operationId, createdAt: Date.now() });
         return { operationId, namespace: config.namespace, blobId, status: "complete" };
       }
       if (command === "memory.recall") {
-        const recalled = await manual.recall(required(args, "query")); return { namespace: config.namespace, recalled: recalled[0]?.text ?? null, matches: recalled.map(({ blobId, distance }) => ({ blobId, distance })), effect: recalled.length ? "candidate-preference-adjusted" : "no-policy-change" };
+        const recalled = await manual.recall(required(args, "query"));
+        const citations = recalled.filter((item) => item.distance <= (this.profile.policy.maxMemoryDistance ?? 0.35)).map((item) => { try { const memory = JSON.parse(item.text) as unknown; validateSettlementMemory(memory); return { blobId: item.blobId, kind: memory.kind, provenance: memory.provenance, distance: item.distance }; } catch { return { blobId: item.blobId, kind: "legacy", provenance: "legacy_untrusted", distance: item.distance }; } });
+        return { namespace: config.namespace, citations, effect: citations.length ? "candidate-preference-adjusted" : "no-policy-change" };
+      }
+      for (const row of this.store.db.prepare("SELECT operation_id FROM memory_jobs WHERE status IN ('pending','unresolved') ORDER BY created_at").all() as Array<{ operation_id: string }>) {
+        const queued = this.store.getSecret(`memory-outbox:${row.operation_id}`); if (!queued) continue;
+        try { const memory = JSON.parse(queued.toString()) as unknown; validateSettlementMemory(memory, "verified_outcome"); this.store.db.prepare("UPDATE memory_jobs SET status='pending' WHERE operation_id=?").run(row.operation_id); const blobId = await manual.remember(memory); this.store.db.prepare("UPDATE memory_jobs SET blob_id=?,status='complete' WHERE operation_id=?").run(blobId, row.operation_id); }
+        catch { this.store.db.prepare("UPDATE memory_jobs SET status='unresolved' WHERE operation_id=?").run(row.operation_id); }
       }
       const jobs = new WorkflowMemory(this.store, manual).completed(); return { namespace: config.namespace, completed: jobs.length, jobs: jobs.map((item) => ({ ...item, status: "complete" })) };
     } finally { manual.destroy(); }
@@ -339,6 +490,9 @@ export class Phase3App {
   execute(command: string, args: Record<string, string | boolean>): CommandResult | Promise<CommandResult> {
     this.allow(command, args);
     if (!this.profile.mock) return this.executeLive(command, args);
+    if (command === "settlement.plan") return this.planSettlement(args).then((data) => output(command, data));
+    if (command === "settlement.approve-review") return output(command, this.approveReview(args));
+    if (command === "memory.policy") return this.rememberTyped(args, "owner_policy").then((data) => output(command, data));
     if (command === "doctor") return output(command, this.doctor());
     if (command === "status") return output(command, { role: this.profile.role, network: this.profile.network, operations: all(this.store, "payment").length, mock: this.profile.mock });
     if (command === "capability.publish") {
@@ -380,12 +534,13 @@ export class Phase3App {
       if (!Number.isSafeInteger(revision) || revision < 1) fail("REVISION_INVALID", "revision must be a positive integer");
       const state = command.split(".")[1]!, termsHash = hash(typeof args.terms === "string" ? args.terms : "accepted");
       const offer = { sessionId, revision, state, termsHash, transcriptCommitment: hash(`${sessionId}:${revision}:${state}:${termsHash}`) }; record(this.store, "offer", sessionId, offer);
+      if (command === "offer.accept") this.enqueueVerifiedOutcome("agreement", typeof args["operation-id"] === "string" ? args["operation-id"] : `${sessionId}:${revision}`, { status: "accepted", transcriptCommitment: offer.transcriptCommitment }, typeof args["plan-hash"] === "string" ? args["plan-hash"] : undefined);
       return output(command, offer);
     }
     if (command === "offer.show") return output(command, get<Record<string, unknown>>(this.store, "offer", required(args, "session")) ?? fail("OFFER_NOT_FOUND", "offer session was not found"));
     if (command === "pay.quote") {
       const rail = required(args, "rail") as "shielded" | "x402"; if (!(["shielded", "x402"] as string[]).includes(rail)) fail("RAIL_INVALID", "rail must be shielded or x402");
-      const checked = this.paymentPolicy(args, rail); return output(command, { rail, amount: checked.amount.toString(), counterparty: checked.counterparty, asset: checked.asset, policyDecision: "allowed", visibility: rail === "shielded" ? "amount-and-parties-hidden-in-pool" : "public-transfer" });
+      const checked = this.paymentPolicy(args, rail); return output(command, { rail, amount: checked.amount.toString(), counterparty: checked.counterparty, asset: checked.asset, policyDecision: "allowed", visibility: rail === "shielded" ? "no-direct-public-payment; funding-deposits-withdrawals-gas-and-pool-activity-visible" : "public-transfer" });
     }
     if (command === "pay.shielded" || command === "pay.x402") return this.pay(command, args);
     if (command === "pay.status") {
@@ -401,15 +556,16 @@ export class Phase3App {
       if (local) return output(command, { ...local, deliveryStatus: "delivered" });
       const body = required(args, "response"), operationId = required(args, "operation-id"), payment = get<Record<string, unknown>>(this.store, "payment", operationId) ?? fail("OPERATION_NOT_FOUND", "payment operation was not found");
       if (payment.status !== "finalized" || payment.requestId !== requestId) fail("RESOURCE_PAYMENT_REQUIRED", "a matching finalized payment is required");
-      return output(command, { requestId, responseHash: hash(body), body, deliveryStatus: "delivered" });
+      const delivered = { requestId, responseHash: hash(body), body, deliveryStatus: "delivered" }; this.enqueueVerifiedOutcome("delivery", operationId, { status: "delivered", requestId, responseHash: delivered.responseHash }, typeof payment.planHash === "string" ? payment.planHash : undefined); return output(command, delivered);
     }
     if (command === "memory.remember") {
+      if (typeof args.memory === "string") return this.rememberTyped(args, "agent_observation").then((data) => output(command, data));
       const operationId = required(args, "operation-id"), fact = required(args, "fact"); if (/private key|spend secret|seed phrase|full transcript/i.test(fact)) fail("MEMORY_SECRET_REJECTED", "memory cannot contain wallet or transcript secrets");
-      const item = { operationId, namespace: `supercuts:${this.profile.role}`, blobId: `mockwalrus_${hash(`${operationId}:${fact}`).slice(0, 40)}`, fact, status: "complete" }; record(this.store, "memory", operationId, item); return output(command, item);
+      const item = { operationId, namespace: `supercuts:${this.profile.role}`, blobId: `mockwalrus_${hash(`${operationId}:${fact}`).slice(0, 40)}`, fact, status: "complete" }; record(this.store, "memory", operationId, item); return output(command, { operationId, namespace: item.namespace, blobId: item.blobId, status: item.status, provenance: "legacy_untrusted" });
     }
     if (command === "memory.recall") {
-      const items = all<Record<string, unknown>>(this.store, "memory"), query = required(args, "query").toLowerCase();
-      const found = items.find((item) => String(item.fact).toLowerCase().includes(query)); return output(command, { namespace: `supercuts:${this.profile.role}`, recalled: found?.fact ?? null, effect: found ? "candidate-preference-adjusted" : "no-policy-change" });
+      const items = [...all<Record<string, unknown>>(this.store, "memory"), ...all<Record<string, unknown>>(this.store, "verified-memory")], query = required(args, "query").toLowerCase();
+      const found = items.filter((item) => String(item.fact ?? "").toLowerCase().includes(query) || item.memory); const citations = found.map((item) => { const memory = item.memory as SettlementMemoryV1 | undefined; return { blobId: String(item.blobId), kind: memory?.kind ?? "legacy", provenance: memory?.provenance ?? "legacy_untrusted", distance: 0 }; }); return output(command, { namespace: `supercuts:${this.profile.role}`, citations, effect: citations.length ? "candidate-preference-adjusted" : "no-policy-change" });
     }
     if (command === "memory.status") { const items = all<Record<string, unknown>>(this.store, "memory"); return output(command, { namespace: `supercuts:${this.profile.role}`, completed: items.length, jobs: items.map(({ operationId, blobId, status }) => ({ operationId, blobId, status })) }); }
     if (command === "disclose") {
@@ -429,10 +585,11 @@ export class Phase3App {
     this.doctor();
     const rail = command === "pay.shielded" ? "shielded" : "x402", checked = this.paymentPolicy(args, rail);
     const operationId = required(args, "operation-id"), requestId = typeof args["request-id"] === "string" ? args["request-id"] : operationId;
+    this.bindSettlementPlan(command as "pay.x402" | "pay.shielded", args, { amount: checked.amount.toString(), counterparty: checked.counterparty, asset: checked.asset, ...(typeof args["resource-url"] === "string" ? { endpoint: args["resource-url"] } : {}), requestId, ...(typeof args.session === "string" ? { session: args.session } : {}) });
     const payload = hash(`${rail}:${checked.amount}:${checked.counterparty}:${checked.asset}:${requestId}`), existing = get<Record<string, unknown>>(this.store, "payment", operationId);
     if (existing) { if (existing.payloadHash !== payload) fail("OPERATION_ID_CONFLICT", "operation ID already identifies another payment"); return output(command, existing); }
-    const transactionDigest = this.digest(rail, operationId), payment = { operationId, status: args["broadcast-only"] === true ? "broadcast" : "finalized", rail, amount: checked.amount.toString(), counterparty: checked.counterparty, asset: checked.asset, requestId, payloadHash: payload, transactionDigest, policyDecision: "allowed", tatumVerified: args["broadcast-only"] !== true, visibility: rail === "shielded" ? "amount-and-parties-hidden-in-pool" : "public-transfer", evidence: this.evidence() };
-    record(this.store, "payment", operationId, payment); return output(command, payment);
+    const transactionDigest = this.digest(rail, operationId), payment = { operationId, status: args["broadcast-only"] === true ? "broadcast" : "finalized", rail, amount: checked.amount.toString(), counterparty: checked.counterparty, asset: checked.asset, requestId, payloadHash: payload, transactionDigest, policyDecision: "allowed", tatumVerified: args["broadcast-only"] !== true, visibility: rail === "shielded" ? "no-direct-public-payment; funding-deposits-withdrawals-gas-and-pool-activity-visible" : "public-transfer", evidence: this.evidence(), ...(typeof args["plan-hash"] === "string" ? { planHash: args["plan-hash"] } : {}) };
+    record(this.store, "payment", operationId, payment); this.enqueueVerifiedOutcome("settlement", operationId, payment, typeof args["plan-hash"] === "string" ? args["plan-hash"] : undefined, { counterparty: checked.counterparty, asset: checked.asset }); return output(command, payment);
   }
   private digest(kind: string, id: string): string { return `mocktx_${hash(`${kind}:${id}`).slice(0, 44)}`; }
   private evidence(): string { return "deterministic-mock-not-funded"; }

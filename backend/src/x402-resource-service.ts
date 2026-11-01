@@ -36,7 +36,7 @@ export class X402ResourceService {
   readonly #prefix: string;
   constructor(store: RoleStore, readonly config: X402ResourceServiceConfig, private readonly http: typeof fetch = fetch) {
     this.#ledger = new PaymentConsumptionLedger(store); this.#origin = safeUrl(config.origin); this.#facilitator = safeUrl(config.facilitatorUrl);
-    this.#prefix = (config.pathPrefix ?? "/research").replace(/\/$/, "");
+    this.#prefix = (config.pathPrefix ?? "/capability").replace(/\/$/, "");
     if (this.#origin.protocol !== "https:" && !(this.#origin.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(this.#origin.hostname))) fail("X402_CONFIG_INVALID", "resource origin must use HTTPS except on loopback");
     if (this.#facilitator.protocol !== "https:" && !(this.#facilitator.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(this.#facilitator.hostname))) fail("X402_CONFIG_INVALID", "facilitator must use HTTPS except on loopback");
     if (!/^0x[0-9a-f]{64}$/i.test(config.payTo) || !/^0x[0-9a-f]+::[A-Za-z0-9_]+::[A-Za-z0-9_]+$/.test(config.asset) || !/^[1-9][0-9]*$/.test(config.amount)) fail("X402_CONFIG_INVALID", "payTo, asset, or amount is invalid");
@@ -60,7 +60,7 @@ export class X402ResourceService {
     requirements.extra = { ...requirements.extra, nonce };
     // The nonce changes the signed requirement set and is persisted per request.
     const finalHash = requirementsHash(requirements);
-    return { x402Version: 2, resource: { url: this.resourceUrl(artifact.requestId), description: "Supercuts seller research artifact", mimeType: "application/json" }, accepts: [{ ...requirements, extra: { ...requirements.extra, requirementsHash: finalHash } }] };
+    return { x402Version: 2, resource: { url: this.resourceUrl(artifact.requestId), description: "Supercuts seller capability artifact", mimeType: "application/json" }, accepts: [{ ...requirements, extra: { ...requirements.extra, requirementsHash: finalHash } }] };
   }
   async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {

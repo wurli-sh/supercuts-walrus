@@ -61,6 +61,10 @@ export class RoleStore {
       CREATE TABLE IF NOT EXISTS delivery_jobs (request_id TEXT PRIMARY KEY, status TEXT NOT NULL, lease_until INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS notes (commitment TEXT PRIMARY KEY, operation_id TEXT, role TEXT NOT NULL, leaf_index TEXT, nullifier TEXT, spent INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS memory_jobs (operation_id TEXT PRIMARY KEY, kind TEXT NOT NULL, fact_hash TEXT NOT NULL, blob_id TEXT, status TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS settlement_plans (plan_hash TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE, plan_json TEXT NOT NULL, status TEXT NOT NULL, expires_at INTEGER NOT NULL, consumed_at INTEGER, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS settlement_execution_bindings (operation_id TEXT PRIMARY KEY, plan_hash TEXT NOT NULL UNIQUE, binding_hash TEXT NOT NULL, binding_json TEXT NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY(plan_hash) REFERENCES settlement_plans(plan_hash));
+      CREATE TABLE IF NOT EXISTS settlement_agreement_bindings (session_id TEXT PRIMARY KEY, plan_hash TEXT NOT NULL UNIQUE, binding_hash TEXT NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY(plan_hash) REFERENCES settlement_plans(plan_hash));
+      CREATE TABLE IF NOT EXISTS settlement_decision_traces (plan_hash TEXT PRIMARY KEY, mandate_hash TEXT NOT NULL, manifest_hash TEXT NOT NULL, risk_level TEXT NOT NULL, reason_codes TEXT NOT NULL, citations TEXT NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY(plan_hash) REFERENCES settlement_plans(plan_hash));
     `);
     const memoryColumns = this.db.prepare("PRAGMA table_info(memory_jobs)").all() as Array<{ name: string }>;
     if (!memoryColumns.some((column) => column.name === "fact_hash")) this.db.exec("ALTER TABLE memory_jobs ADD COLUMN fact_hash TEXT");

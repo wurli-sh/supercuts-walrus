@@ -1,5 +1,6 @@
 import { MemWalManual } from "@mysten-incubation/memwal/manual";
 import { MemoryFact, validateMemoryFact } from "./memory.js";
+import { SETTLEMENT_MEMORY_VERSION, validateSettlementMemory, type SettlementMemoryV1 } from "./settlement.js";
 import { RoleStore } from "./store.js";
 
 export interface ManualMemoryConfig {
@@ -21,10 +22,12 @@ export interface ManualMemoryConfig {
 export class ManualMemory {
   private readonly client: MemWalManual;
   constructor(private readonly store: RoleStore, config: ManualMemoryConfig) {
+    let embedding: URL; try { embedding = new URL(config.embeddingApiBase); } catch (error) { throw new TypeError(`embeddingApiBase is invalid: ${error instanceof Error ? error.message : "invalid URL"}`); }
+    if (!["localhost", "127.0.0.1", "::1"].includes(embedding.hostname)) throw new TypeError("memory embeddings must use a loopback trusted endpoint");
     this.client = MemWalManual.create({ ...config, suiNetwork: "mainnet" });
   }
-  async remember(fact: MemoryFact): Promise<string> {
-    validateMemoryFact(fact);
+  async remember(fact: MemoryFact | SettlementMemoryV1): Promise<string> {
+    if ((fact as { version?: string }).version === SETTLEMENT_MEMORY_VERSION) validateSettlementMemory(fact); else validateMemoryFact(fact as MemoryFact);
     const text = JSON.stringify(fact);
     const result = await this.client.rememberManual(text);
     this.store.putSecret(`memory:${result.blob_id}`, Buffer.from(text));

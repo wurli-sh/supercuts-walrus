@@ -3,7 +3,7 @@ import { Phase3App, errorOutput, homePath, initialize, parseArgs } from "./phase
 
 const words = process.argv.slice(2);
 let command = words.shift() ?? "";
-if (["wallet", "offer", "pay", "resource", "memory", "audit", "capability"].includes(command)) command += `.${words.shift() ?? ""}`;
+if (["wallet", "offer", "pay", "resource", "memory", "audit", "capability", "settlement"].includes(command)) command += `.${words.shift() ?? ""}`;
 const args = parseArgs(words);
 try {
   const home = homePath(args);
