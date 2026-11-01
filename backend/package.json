@@ -8,6 +8,10 @@
     "supercuts-demo": "dist/demo.js",
     "supercuts-mcp": "dist/mcp.js",
     "supercuts-resource": "dist/resource-server.js",
+    "supercuts-seller-service": "dist/seller-service.js",
+    "supercuts-seller-provision": "dist/seller-provision.js",
+    "supercuts-seller-watch": "dist/seller-watch.js",
+    "supercuts-seller-catalog": "dist/seller-catalog-generate.js",
     "supercuts-facilitator": "dist/facilitator.js",
     "supercuts-seam": "dist/seam.js"
   },

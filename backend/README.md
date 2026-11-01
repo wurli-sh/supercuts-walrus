@@ -66,6 +66,8 @@ bytes under that operation ID; retrying another payload with the same ID fails.
 
 ## Procurement demo
 
+For the Codex buyer with three remote Claude-backed sellers, Supabase-backed seller state, and the separate Render facilitator, follow [the remote demo guide](../docs/remote-codex-demo.md). The remote path is live-only and gives Codex a buyer role MCP server; the three seller panes use the safe `supercuts-seller-watch` event stream.
+
 `supercuts-demo` is the operator entry point:
 
 ```sh

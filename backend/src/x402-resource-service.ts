@@ -34,7 +34,7 @@ export class X402ResourceService {
   readonly #origin: URL;
   readonly #facilitator: URL;
   readonly #prefix: string;
-  constructor(store: RoleStore, readonly config: X402ResourceServiceConfig, private readonly http: typeof fetch = fetch) {
+  constructor(store: RoleStore, readonly config: X402ResourceServiceConfig, private readonly http: typeof fetch = fetch, private readonly persist?: () => Promise<void>, private readonly claimExternal?: (digest: string, requestId: string) => Promise<void>) {
     this.#ledger = new PaymentConsumptionLedger(store); this.#origin = safeUrl(config.origin); this.#facilitator = safeUrl(config.facilitatorUrl);
     this.#prefix = (config.pathPrefix ?? "/capability").replace(/\/$/, "");
     if (this.#origin.protocol !== "https:" && !(this.#origin.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(this.#origin.hostname))) fail("X402_CONFIG_INVALID", "resource origin must use HTTPS except on loopback");
@@ -71,7 +71,7 @@ export class X402ResourceService {
       if (!artifact) return this.send(response, 404, Buffer.from("Not Found"));
       const challenge = this.challenge(artifact), requirements = challenge.accepts instanceof Array ? challenge.accepts[0] as ExactRequirements : fail("X402_STATE_INVALID", "challenge omitted requirements");
       const paymentHeader = Array.isArray(request.headers["payment-signature"]) ? request.headers["payment-signature"][0] : request.headers["payment-signature"];
-      if (!paymentHeader) return this.send(response, 402, Buffer.from("Payment Required"), { "payment-required": encode(challenge) });
+      if (!paymentHeader) { await this.persist?.(); return this.send(response, 402, Buffer.from("Payment Required"), { "payment-required": encode(challenge) }); }
       const payload = decode(paymentHeader, "X402_PAYMENT_INVALID"), bindingValue = Array.isArray(request.headers["x-supercuts-binding"]) ? request.headers["x-supercuts-binding"][0] : request.headers["x-supercuts-binding"], binding = decode(bindingValue, "X402_REQUEST_BINDING_INVALID") as unknown as PaymentBinding;
       const offered = payload.accepted as ExactRequirements;
       if (!offered || requirementsHash(offered) !== requirementsHash(requirements)) fail("X402_REQUIREMENTS_MISMATCH", "payment payload changed the challenged requirements");
@@ -87,13 +87,14 @@ export class X402ResourceService {
       const settled = await this.facilitator("settle", body), digest = String(settled.transaction ?? "");
       if (settled.success !== true || settled.network !== this.config.network || digest !== binding.transactionDigest) fail("X402_SETTLEMENT_INVALID", "facilitator returned mismatched settlement evidence");
       const payment = { digest, network: this.config.network, asset: this.config.asset, amount: BigInt(this.config.amount), payTo: this.config.payTo, finalized: true };
-      verifyExactPayment(payment, requirements); this.#ledger.claim(payment, artifact.requestId);
+      verifyExactPayment(payment, requirements); await this.claimExternal?.(digest, artifact.requestId); this.#ledger.claim(payment, artifact.requestId);
       let delivery = this.#ledger.getDelivery(artifact.requestId);
       if (!this.#ledger.isDeliveryComplete(artifact.requestId)) {
         if (!this.#ledger.acquireDelivery(artifact.requestId)) fail("DELIVERY_IN_PROGRESS", "resource delivery is already being produced");
         this.#ledger.completeDelivery(artifact.requestId, artifact.body);
         delivery = artifact.body;
       }
+      await this.persist?.();
       return this.send(response, 200, delivery ?? fail("DELIVERY_STATE_INVALID", "completed delivery has no bytes"), { "content-type": "application/json", "payment-response": encode({ success: true, transaction: digest, network: this.config.network }) });
     } catch (error) {
       const known = error instanceof SupercutsError ? error : new SupercutsError("INTERNAL_ERROR", "resource service failed");

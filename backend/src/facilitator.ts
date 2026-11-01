@@ -88,6 +88,9 @@ export class SuiTestnetFacilitator {
   }
   async verify(value: unknown): Promise<Json> {
     const parsed = await parsePayment(value, this.client);
+    let known: any;
+    try { known = await this.client.getTransaction({ digest: parsed.digest, include: { effects: true, balanceChanges: true } }); } catch { /* Not finalized yet; simulate the signed transaction. */ }
+    if (known) { assertSuccessfulPayment(known, parsed, true); return { isValid: true, network: NETWORK, transaction: parsed.digest, replayed: true }; }
     const simulated = await this.client.simulateTransaction({ transaction: parsed.transaction, include: { effects: true, balanceChanges: true } });
     assertSuccessfulPayment(simulated, parsed, false);
     return { isValid: true, network: NETWORK, transaction: parsed.digest };

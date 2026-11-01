@@ -15,7 +15,7 @@ import { BoundedClaude } from "./claude.js";
 const [command = "", ...words] = process.argv.slice(2), args = parseArgs(words);
 const value = (name: string, fallback?: string): string => typeof args[name] === "string" ? args[name] : fallback ?? fail("ARGUMENT_REQUIRED", `--${name} is required`);
 const stateDir = (): string => resolve(value("state-dir", ".supercuts-demo"));
-const homes = (root: string) => ({ buyer: join(root, "buyer"), publicSeller: join(root, "public-seller"), confidentialSeller: join(root, "confidential-seller"), auditor: join(root, "auditor") });
+const homes = (root: string) => ({ buyer: join(root, "buyer"), publicSeller: join(root, "public-seller"), secondPublicSeller: join(root, "second-public-seller"), confidentialSeller: join(root, "confidential-seller"), auditor: join(root, "auditor") });
 const send = (data: Record<string, unknown>) => process.stdout.write(`${JSON.stringify({ schemaVersion: "supercuts.demo.v1", ok: true, command, data })}\n`);
 
 function keyAddress(path: string): string { const decoded = decodeSuiPrivateKey(readFileSync(path, "utf8").trim()); if (decoded.scheme !== "ED25519") fail("SIGNER_UNSUPPORTED", "demo requires ED25519 Sui keys"); return Ed25519Keypair.fromSecretKey(decoded.secretKey).toSuiAddress(); }
@@ -24,16 +24,16 @@ function createKey(path: string): void { if (!existsSync(path)) writeFileSync(pa
 async function setup(): Promise<Record<string, unknown>> {
   const root = stateDir(), roles = homes(root); mkdirSync(root, { recursive: true, mode: 0o700 }); chmodSync(root, 0o700);
   const mock = args.mock === true, secrets = join(root, "secrets"); mkdirSync(secrets, { recursive: true, mode: 0o700 });
-  const keys = { buyer: join(secrets, "buyer.sui.key"), publicSeller: join(secrets, "public-seller.sui.key"), confidentialSeller: join(secrets, "confidential-seller.sui.key"), auditor: join(secrets, "auditor.sui.key") };
+  const keys = { buyer: join(secrets, "buyer.sui.key"), publicSeller: join(secrets, "public-seller.sui.key"), secondPublicSeller: join(secrets, "second-public-seller.sui.key"), confidentialSeller: join(secrets, "confidential-seller.sui.key"), auditor: join(secrets, "auditor.sui.key") };
   for (const path of Object.values(keys)) createKey(path);
   const addresses = Object.fromEntries(Object.entries(keys).map(([name, path]) => [name, keyAddress(path)]));
   const common: Record<string, string | boolean> = mock ? { mock: true } : { "deployment-config": resolve(value("deployment-config")), "tatum-key-file": resolve(value("tatum-key-file")), "write-grpc": value("write-grpc"), "tatum-grpc": value("tatum-grpc"), "walrus-publisher": value("walrus-publisher"), "walrus-aggregator": value("walrus-aggregator"), ...(typeof args.rapidsnark === "string" ? { rapidsnark: resolve(args.rapidsnark) } : {}) };
-  const roleInputs: Array<[keyof typeof roles, "buyer" | "seller" | "auditor", string]> = [["buyer", "buyer", keys.buyer], ["publicSeller", "seller", keys.publicSeller], ["confidentialSeller", "seller", keys.confidentialSeller], ["auditor", "auditor", keys.auditor]];
+  const roleInputs: Array<[keyof typeof roles, "buyer" | "seller" | "auditor", string]> = [["buyer", "buyer", keys.buyer], ["publicSeller", "seller", keys.publicSeller], ["secondPublicSeller", "seller", keys.secondPublicSeller], ["confidentialSeller", "seller", keys.confidentialSeller], ["auditor", "auditor", keys.auditor]];
   for (const [name, role, key] of roleInputs) {
     if (existsSync(join(roles[name], "profile.json"))) continue;
-    initialize(roles[name], { role, ...common, ...(!mock ? { "sui-key-file": key } : {}), ...(role === "buyer" ? { "allow-counterparty": `${addresses.publicSeller},${addresses.confidentialSeller},public-seller,confidential-seller`, ...(typeof args["memory-config-file"] === "string" ? { "memory-config-file": resolve(args["memory-config-file"]) } : {}) } : {}) });
+    initialize(roles[name], { role, ...common, ...(!mock ? { "sui-key-file": key } : {}), ...(role === "buyer" ? { "allow-counterparty": `${addresses.publicSeller},${addresses.secondPublicSeller},${addresses.confidentialSeller}`, ...(typeof args["memory-config-file"] === "string" ? { "memory-config-file": resolve(args["memory-config-file"]) } : {}) } : {}) });
   }
-  const workflowPath = typeof args.workflow === "string" ? resolve(args.workflow) : !mock ? resolve(value("workflow")) : undefined;
+  const workflowPath = typeof args.workflow === "string" ? resolve(args.workflow) : !mock && typeof args["seller-url"] !== "string" ? resolve(value("workflow")) : undefined;
   if (workflowPath) {
     const workflow = JSON.parse(readFileSync(workflowPath, "utf8")) as { capabilities?: CapabilityManifest[] }, capabilities = workflow.capabilities ?? [];
     if (!capabilities.length) fail("DEMO_CAPABILITIES_REQUIRED", "live workflow must provide capability manifests for the buyer mandate"); for (const manifest of capabilities) validateCapabilityManifest(manifest);
@@ -43,26 +43,65 @@ async function setup(): Promise<Record<string, unknown>> {
   }
   const mcp = { mcpServers: Object.fromEntries(Object.entries(roles).map(([name, home]) => [`supercuts-${name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`, { command: "supercuts-mcp", env: { SUPERCUTS_HOME: home } }])) };
   writeFileSync(join(root, "mcp.json"), `${JSON.stringify(mcp, null, 2)}\n`, { mode: 0o600 });
-  writeFileSync(join(root, "run.json"), `${JSON.stringify({ schema: "supercuts.demo.run.v1", createdAt: new Date().toISOString(), mock, homes: roles, addresses }, null, 2)}\n`, { mode: 0o600 });
-  return { stateDir: root, mock, funding: mock ? [] : [{ address: addresses.buyer, needs: ["Testnet SUI gas", "configured x402 asset", "shielded deposit value"] }], sellerPayTo: addresses.publicSeller, files: { mcp: join(root, "mcp.json"), run: join(root, "run.json") } };
+  const runId = randomUUID(), eventPath = join(root, `events-${runId}.jsonl`);
+  if (typeof args["seller-url"] === "string") {
+    const sellerUrl = new URL(args["seller-url"]);
+    if (sellerUrl.protocol !== "https:" && !(sellerUrl.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(sellerUrl.hostname))) fail("SELLER_ORIGIN_INVALID", "seller URL must use HTTPS except on loopback");
+    const codex = `[mcp_servers.supercuts-buyer]\ncommand = "supercuts-mcp"\n[mcp_servers.supercuts-buyer.env]\nSUPERCUTS_HOME = ${JSON.stringify(roles.buyer)}\nSUPERCUTS_SELLER_URL = ${JSON.stringify(sellerUrl.toString())}\nSUPERCUTS_RUN_ID = ${JSON.stringify(runId)}\nSUPERCUTS_EVENT_PATH = ${JSON.stringify(eventPath)}\n`;
+    writeFileSync(join(root, "buyer-codex.toml"), codex, { mode: 0o600 });
+  }
+  const remote = typeof args["seller-url"] === "string";
+  writeFileSync(join(root, "run.json"), `${JSON.stringify({ schema: "supercuts.demo.run.v1", createdAt: new Date().toISOString(), runId, ...(remote ? { eventPath } : {}), mock, homes: roles, addresses }, null, 2)}\n`, { mode: 0o600 });
+  return { stateDir: root, mock, funding: mock ? [] : [{ address: addresses.buyer, needs: ["Testnet SUI gas", "configured x402 asset", "shielded deposit value"] }], sellerPayTo: addresses.publicSeller, sellerAddresses: { publicA: addresses.publicSeller, publicB: addresses.secondPublicSeller, analysis: addresses.confidentialSeller }, files: { mcp: join(root, "mcp.json"), run: join(root, "run.json"), events: remote ? eventPath : join(root, "events.jsonl"), ...(remote ? { codex: join(root, "buyer-codex.toml") } : {}) } };
 }
 
 async function doctor(): Promise<Record<string, unknown>> {
   const roles = homes(stateDir()), reports: Record<string, unknown> = {};
   for (const [name, home] of Object.entries(roles)) { const app = new Phase3App(home); try { reports[name] = (await app.execute("doctor", {})).data; } finally { app.close(); } }
-  return { healthy: true, roles: reports, isolation: new Set(Object.values(roles)).size === 4 };
+  let remote: Record<string, unknown> | undefined;
+  if (typeof args["seller-url"] === "string") {
+    const base = new URL(args["seller-url"]), health = await fetch(new URL("/health", base), { signal: AbortSignal.timeout(90_000) }), catalog = await fetch(new URL("/v1/catalog", base), { signal: AbortSignal.timeout(30_000) });
+    if (!health.ok || !catalog.ok) fail("SELLER_SERVICE_UNAVAILABLE", "remote seller health or catalog check failed");
+    const body = await catalog.json() as { capabilities?: Array<{ manifest?: CapabilityManifest }> }, capabilities = body.capabilities ?? [];
+    if (capabilities.filter((item) => item.manifest?.capability === "sui.market-brief").length < 2 || !capabilities.some((item) => item.manifest?.capability === "sui.competitor-analysis")) fail("SELLER_CATALOG_INVALID", "remote catalog needs two briefs and one competitor analysis");
+    remote = { healthy: true, origin: base.origin, capabilities: capabilities.length };
+  }
+  return { healthy: true, roles: reports, isolation: new Set(Object.values(roles)).size === 5, ...(remote ? { remote } : {}) };
+}
+
+async function seedPolicy(): Promise<Record<string, unknown>> {
+  const source = JSON.parse(readFileSync(resolve(value("workflow")), "utf8")) as { capabilities?: CapabilityManifest[] };
+  const manifest = source.capabilities?.find((item) => item.capability === "sui.competitor-analysis") ?? fail("DEMO_POLICY_SCOPE_INVALID", "workflow has no competitor analysis capability");
+  validateCapabilityManifest(manifest);
+  if (manifest.capability !== "sui.competitor-analysis") fail("DEMO_POLICY_SCOPE_INVALID", "privacy policy must target the competitor analysis capability");
+  const app = new Phase3App(homes(stateDir()).buyer);
+  try {
+    if (app.profile.mock) fail("LIVE_PROFILE_REQUIRED", "saved demo privacy policy requires a live buyer profile");
+    const memory = { version: "supercuts.settlement-memory.v1", kind: "privacy_rule", scope: { capabilityId: manifest.capabilityId, counterparty: manifest.sellerId, network: "sui:testnet", asset: manifest.asset }, createdAt: Date.now(), signal: { requiresShielded: true } };
+    const parameters = { "operation-id": value("operation-id", `privacy-${manifest.capabilityId}`), memory: Buffer.from(JSON.stringify(memory)).toString("base64url") };
+    const token = app.approve(app.preview("memory.policy", parameters).challengeId);
+    const result = (await app.execute("memory.policy", { ...parameters, "approval-token": token.token })).data;
+    return { capabilityId: manifest.capabilityId, sellerId: manifest.sellerId, blobId: result.blobId, kind: result.kind, provenance: result.provenance };
+  } finally { app.close(); }
 }
 
 function check(): Record<string, unknown> {
   const root = stateDir(), roles = homes(root), checked: string[] = [];
   for (const path of [root, ...Object.values(roles)]) { if (!existsSync(path) || (statSync(path).mode & 0o077) !== 0) fail("DEMO_PERMISSIONS", `${path} is missing or not owner-only`); checked.push(path); }
-  const eventPath = typeof args.events === "string" ? resolve(args.events) : join(root, "events.jsonl");
+  const runPath = join(root, "run.json"), run = existsSync(runPath) ? JSON.parse(readFileSync(runPath, "utf8")) as { eventPath?: string } : {};
+  const eventPath = typeof args.events === "string" ? resolve(args.events) : run.eventPath ?? join(root, "events.jsonl");
+  if (!existsSync(eventPath) && (run.eventPath || typeof args.events === "string")) fail("DEMO_EVENTS_MISSING", "demo event stream is missing");
   if (existsSync(eventPath)) {
     const text = readFileSync(eventPath, "utf8"); if (/(?:suiprivkey|BEGIN [A-Z ]*PRIVATE KEY|approval.?token|note.?opening|full.?prompt)/i.test(text)) fail("SECRET_SCAN_FAILED", "event bundle contains forbidden secret material"); const events = readDemoEvents(eventPath); checked.push(eventPath);
-    if (args["require-claude"] === true && !["buyer", "public-seller", "confidential-seller"].every((actor) => events.some((event) => event.actor === actor && event.stage === "agent-decision" && event.status === "complete" && typeof event.publicDetails.model === "string" && Number(event.publicDetails.outputTokens) > 0))) fail("DEMO_CLAUDE_EVIDENCE_MISSING", "event stream is missing live Claude decisions from a buyer or seller agent");
+    const remoteFlow = events.some((event) => event.stage === "run" && event.publicDetails.flow === "codex-remote");
+    if (args["require-claude"] === true && !remoteFlow && !["buyer", "public-seller", "confidential-seller"].every((actor) => events.some((event) => event.actor === actor && event.stage === "agent-decision" && event.status === "complete" && typeof event.publicDetails.model === "string" && Number(event.publicDetails.outputTokens) > 0))) fail("DEMO_CLAUDE_EVIDENCE_MISSING", "event stream is missing live Claude decisions from a buyer or seller agent");
     const decisionKeys: Record<string, Set<string>> = { "settlement-plan": new Set(["phase", "planHash", "capabilityId", "rail", "openingAmount", "maximumAmount", "riskLevel", "reasonCodes", "blobIds"]), "memory-recall": new Set(["restarted", "citations", "policyBlobId"]) };
     for (const event of events) { const allowed = decisionKeys[event.stage]; if (allowed && Object.keys(event.publicDetails).some((key) => !allowed.has(key))) fail("DEMO_DECISION_EVENT_INVALID", `${event.stage} contains a non-allowlisted public field`); }
-    if (events.some((event) => event.stage === "settlement-plan")) {
+    if (remoteFlow) {
+      const memories = events.filter((event) => event.stage === "memory" && event.status === "complete" && event.publicDetails.kind !== undefined);
+      const deliveries = events.filter((event) => event.stage === "artifact-delivery" && event.status === "complete");
+      if (memories.length < 10 || new Set(memories.map((event) => event.publicDetails.blobId)).size < 10 || memories.some((event) => String(event.publicDetails.blobId).startsWith("mockwalrus_")) || !events.some((event) => event.stage === "memory-recall" && Array.isArray(event.publicDetails.citations) && event.publicDetails.citations.some((citation) => citation.kind === "privacy_rule" && citation.provenance === "owner_policy")) || !events.some((event) => event.stage === "settlement-plan" && event.publicDetails.rail === "shielded" && Array.isArray(event.publicDetails.reasonCodes) && event.publicDetails.reasonCodes.includes("MEMORY_PRIVACY_APPLIED")) || !events.some((event) => event.stage === "public-settlement" && typeof event.publicDetails.transactionDigest === "string") || !events.some((event) => event.stage === "private-settlement" && typeof event.publicDetails.transactionDigest === "string" && event.evidenceHashes.length > 0) || deliveries.length < 2 || new Set(deliveries.map((event) => event.publicDetails.artifactSha256)).size < 2) fail("DEMO_ACCEPTANCE_INCOMPLETE", "remote event stream lacks ten memories, recalled privacy, both funded payments, or both deliveries");
+    } else if (events.some((event) => event.stage === "settlement-plan")) {
       const memoryBlobIds = events.filter((event) => event.stage === "memory" && event.status === "complete").map((event) => String(event.publicDetails.blobId ?? ""));
       if (memoryBlobIds.length < 10 || new Set(memoryBlobIds).size < 10 || memoryBlobIds.some((id) => !id || id.startsWith("mockwalrus_")) || !events.some((event) => event.stage === "memory-recall" && event.publicDetails.restarted === true && Array.isArray(event.publicDetails.citations) && event.publicDetails.citations.some((citation) => citation.kind === "privacy_rule" && citation.provenance === "owner_policy")) || !events.some((event) => event.stage === "settlement-plan" && event.publicDetails.phase === "after-memory" && event.publicDetails.rail === "shielded" && Array.isArray(event.publicDetails.reasonCodes) && event.publicDetails.reasonCodes.includes("MEMORY_PRIVACY_APPLIED")) || !events.some((event) => event.stage === "public-settlement" && event.status === "complete") || !events.some((event) => event.stage === "artifact-delivery" && event.status === "complete") || !events.some((event) => event.stage === "private-settlement" && event.status === "complete" && event.evidenceHashes.length > 0)) fail("DEMO_ACCEPTANCE_INCOMPLETE", "event stream does not contain the required memory-native funded settlement sequence");
     }
@@ -143,5 +182,5 @@ async function replay(): Promise<Record<string, unknown>> {
   return { label: "recorded funded run", freshTransaction: false, events };
 }
 
-try { const data = command === "setup" ? await setup() : command === "doctor" ? await doctor() : command === "check" ? check() : command === "live" ? await live() : command === "replay" ? await replay() : fail("COMMAND_UNKNOWN", "use setup, doctor, live, replay, or check"); send(data); }
+try { const data = command === "setup" ? await setup() : command === "doctor" ? await doctor() : command === "seed-policy" ? await seedPolicy() : command === "check" ? check() : command === "live" ? await live() : command === "replay" ? await replay() : fail("COMMAND_UNKNOWN", "use setup, doctor, seed-policy, live, replay, or check"); send(data); }
 catch (error) { process.stdout.write(`${JSON.stringify(errorOutput(error))}\n`); process.exitCode = 1; }

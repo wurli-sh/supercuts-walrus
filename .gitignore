@@ -6,6 +6,7 @@
 /backend/packages/*/dist/
 /backend/.state/
 /.state/
+/.secrets/
 /circuits/build/
 /contracts/build/
 /seal-policy/build/

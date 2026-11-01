@@ -30,7 +30,7 @@ const POOL = "0x873e37b4745316f21a2780893f5fc36f87da559b08923fb4dad6237cd2e95d98
 const COIN = "0x2::sui::SUI";
 const WRITE = new Set(["wallet.deposit", "wallet.recover", "wallet.withdraw", "offer.open", "offer.propose", "offer.counter", "offer.accept", "pay.shielded", "pay.x402", "resource.serve", "memory.remember", "disclose", "capability.publish", "settlement.plan", "settlement.approve-review", "memory.policy"]);
 const ROLE_COMMANDS: Record<Role, ReadonlySet<string>> = {
-  buyer: new Set(["status", "doctor", "capability.discover", "settlement.plan", "settlement.approve-review", "memory.policy", "wallet.deposit", "wallet.balance", "wallet.recover", "wallet.withdraw", "offer.open", "offer.propose", "offer.accept", "offer.show", "pay.quote", "pay.shielded", "pay.x402", "pay.status", "resource.fetch", "memory.remember", "memory.recall", "memory.status", "disclose"]),
+  buyer: new Set(["status", "doctor", "capability.discover", "settlement.plan", "settlement.approve-review", "memory.policy", "wallet.deposit", "wallet.balance", "wallet.recover", "wallet.withdraw", "offer.open", "offer.propose", "offer.accept", "offer.show", "pay.quote", "pay.shielded", "pay.x402", "pay.status", "resource.fetch", "memory.remember", "memory.recall", "memory.status", "remote.catalog", "remote.rank-briefs", "remote.negotiate", "remote.quote", "remote.purchase-brief", "remote.agreement", "remote.settle-analysis", "remote.delivery", "remote.events", "disclose"]),
   seller: new Set(["status", "doctor", "capability.publish", "wallet.balance", "wallet.recover", "wallet.withdraw", "offer.counter", "offer.show", "pay.status", "resource.serve", "resource.fetch", "memory.remember", "memory.recall", "memory.status"]),
   auditor: new Set(["status", "doctor", "audit.verify"]),
 };
@@ -51,6 +51,14 @@ function amount(args: Record<string, string | boolean>): bigint {
   const value = required(args, "amount");
   if (!/^[1-9][0-9]*$/.test(value)) fail("AMOUNT_INVALID", "amount must be a positive integer");
   return BigInt(value);
+}
+function matchesPlannedEndpoint(planned: string, actual: string, requestId: string): boolean {
+  if (planned === actual) return true;
+  try {
+    const base = new URL(planned), resource = new URL(actual);
+    return base.origin === resource.origin && !base.search && !base.hash && !resource.search && !resource.hash &&
+      resource.pathname === `${base.pathname.replace(/\/$/, "")}/${encodeURIComponent(requestId)}`;
+  } catch { return false; }
 }
 function record(store: RoleStore, scope: string, id: string, value: unknown): void {
   store.db.prepare("INSERT INTO app_records(scope,id,value,updated_at) VALUES(?,?,?,?) ON CONFLICT(scope,id) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at")
@@ -361,7 +369,7 @@ export class Phase3App {
     if (now >= plan.expiresAt) fail("SETTLEMENT_PLAN_EXPIRED", "settlement plan has expired");
     if (plan.mandateHash !== settlementMandateHash(mandate)) fail("SETTLEMENT_PLAN_MANDATE_MISMATCH", "owner mandate changed after planning");
     const operationId = required(args, "operation-id");
-    if (plan.operationId !== operationId || plan.rail !== rail || plan.sellerId !== actual.counterparty || plan.asset !== actual.asset || plan.network !== "sui:testnet" || actual.endpoint && plan.endpoint !== actual.endpoint) fail("SETTLEMENT_PLAN_BINDING_MISMATCH", "execution differs from the planned operation, capability, seller, endpoint, asset, network, or rail");
+    if (plan.operationId !== operationId || plan.rail !== rail || plan.sellerId !== actual.counterparty || plan.asset !== actual.asset || plan.network !== "sui:testnet" || actual.endpoint && !matchesPlannedEndpoint(plan.endpoint, actual.endpoint, actual.requestId)) fail("SETTLEMENT_PLAN_BINDING_MISMATCH", "execution differs from the planned operation, capability, seller, endpoint, asset, network, or rail");
     if (rail === "shielded" && actual.session) {
       const agreement = this.store.db.prepare("SELECT plan_hash FROM settlement_agreement_bindings WHERE session_id=?").get(actual.session) as { plan_hash: string } | undefined;
       if (agreement && agreement.plan_hash !== plan.planHash) fail("SETTLEMENT_PLAN_BINDING_MISMATCH", "shielded agreement is bound to another plan");

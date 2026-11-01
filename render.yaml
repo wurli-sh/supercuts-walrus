@@ -18,3 +18,34 @@ services:
         value: https://fullnode.testnet.sui.io:443
       - key: FACILITATOR_SHARED_KEY
         sync: false
+  - type: web
+    name: supercuts-sellers-testnet
+    runtime: docker
+    region: singapore
+    plan: free
+    branch: main
+    repo: https://github.com/wurli-sh/supercuts-walrus
+    rootDir: backend
+    dockerfilePath: ./Dockerfile.sellers
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SELLER_ORIGIN
+        value: https://supercuts-sellers-testnet.onrender.com
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SELLER_STATE_KEY
+        sync: false
+      - key: FACILITATOR_URL
+        sync: false
+      - key: FACILITATOR_SHARED_KEY
+        sync: false
+      - key: CLAUDE_API_KEY
+        sync: false
+      - key: SELLER_ALLOWED_BUYERS
+        sync: false
