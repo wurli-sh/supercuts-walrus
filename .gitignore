@@ -5,6 +5,7 @@
 /backend/packages/*/node_modules/
 /backend/packages/*/dist/
 /backend/.state/
+/.state/
 /circuits/build/
 /contracts/build/
 /seal-policy/build/

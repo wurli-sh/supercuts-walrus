@@ -33,6 +33,15 @@ mandate's command list, counterparties, assets, per-deal ceiling, total run
 budget, privacy requirement, and expiry before creating an internal exact-intent
 approval. Approval tokens are never returned to the agent.
 
+Buyer mandates may additionally set `requireSettlementPlan` and narrow allowed
+capability IDs, capability classes, and rails. `settlement.plan` deterministically
+ranks validated manifests, applies only trusted typed memories, clamps the opening
+and maximum amounts, and persists a five-minute canonical plan. Pass its
+`planHash` to `pay.x402` or `pay.shielded`; the runtime binds the exact operation,
+manifest, seller, endpoint/session, asset, network, rail, request, and amount
+before signing or proving. `supercuts settlement approve-review` is an owner-only
+CLI path and is intentionally absent from MCP and the agent SDK.
+
 `@supercuts/sdk` is built from `packages/sdk`. It resolves the matching
 `supercuts-seam` binary from this package and exchanges one protocol-v1 request
 per subprocess. SDK mutations use exact-intent approval tokens instead of the
@@ -74,17 +83,35 @@ Omit `--mock` and provide the pinned deployment, Tatum, Sui gRPC, and optional
 owner-only Mainnet memory configuration arguments to create live profiles. The
 setup output prints only the buyer address/assets that need funding and the
 public seller `payTo` address. `live --workflow workflow.json` refuses mock
-profiles. It makes fresh bounded Claude calls, negotiates the public exact
-amount deterministically, executes the seller-owned x402 resource, writes ten
-Mainnet memories plus the explicit privacy rule, and settles the already
-accepted cryptographic private session through the shielded pool. The JSONL
-stream deliberately describes x402 amount/payee as public and does not claim
-that shielded gas submission, funding, deposits, or withdrawals are hidden.
+profiles. Setup also requires `--workflow workflow.json` so the generated buyer
+mandate can be narrowed to its exact capability IDs/classes and rails. The live
+run creates a baseline plan, negotiates the public exact amount, executes the
+seller-owned x402 resource, writes ten typed Mainnet memories plus an owner
+privacy policy, restarts the buyer process, recalls citations without plaintext,
+creates the shielded plan, deposits a buyer note, signs and accepts a
+confidential agreement with the confidential seller, and settles it. The live
+workflow must set `publicOperationId` to the operation ID registered by the
+seller resource for `publicResourceUrl`. It must also set
+`buyerDepositAmount` above the confidential capability's minimum price so the
+private transfer can create a positive change note. Use a fresh operation ID
+and resource registration for each recording. The JSONL stream describes x402 amount/payee as
+public. Shielded settlement avoids a direct public payment revealing the deal
+amount or counterparty; funding, deposits, withdrawals, gas, and pool activity
+remain visible.
+
+For a Claude-agent recording, provide `live --claude-key-file <owner-only-file>`.
+The live path calls Claude for bounded buyer and seller decisions and records
+only the model, action, and token counts. The backend still enforces capability,
+amount, rail, and agreement bindings. Validate that recording with
+`supercuts-demo check --require-claude`; an earlier funded run without these
+agent-decision events does not satisfy that gate.
 
 The optional `--memory-config-file` is imported from a mode-0600 JSON file and
 stored only as encrypted role state. It has the `ManualMemoryConfig` fields
 documented by `src/memwal.ts`; its Sui and embedding credentials never enter
-profiles, prompts, MCP calls, events, or browser state.
+profiles, prompts, MCP calls, events, or browser state. Live profiles reject
+non-loopback embedding endpoints; use the repository's 1536-dimension adapter
+for both writes and recalls.
 
 ## Current boundaries
 
