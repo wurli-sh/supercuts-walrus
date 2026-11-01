@@ -36,5 +36,12 @@ agreement settlement, and `payX402Resource(operationId, resourceUrl)`. The x402
 method obtains amount, asset, and payee from the resource's 402 challenge; it
 does not accept caller-supplied payment requirements.
 
+Use `planSettlement(...)` before negotiation or payment when the owner mandate
+requires plans, then pass the returned `planHash` to `payX402Resource`,
+`payX402`, `settleShielded`, or `settleAcceptedShielded`. Typed
+`rememberSettlement` writes are always assigned `agent_observation` provenance;
+they can be cited but cannot expand authority or act as owner policy. Recall
+returns blob ID, kind, provenance, and distance only, never decrypted text.
+
 Unsupported live role commands fail closed with `LIVE_COMMAND_UNAVAILABLE`.
 Mock and Testnet receipts remain distinct.

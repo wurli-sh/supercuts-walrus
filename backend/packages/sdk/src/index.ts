@@ -21,6 +21,9 @@ export interface ProcurementTask { taskId: string; request: string; privacy: "pu
 export interface SettlementIntent { operationId: OperationId; dealId: string; rail: Rail; amount: bigint; asset: string; counterparty: string; requestId: string; }
 export interface DeliveryReceipt { requestId: string; operationId: OperationId; artifactSha256: string; deliveredAt: number; observation: "artifact-delivered"; }
 export interface MemoryFact { kind: "task" | "capability_choice" | "offer" | "agreed_cost" | "seller_responsiveness" | "settlement_rail" | "delivery_hash" | "latency" | "retry_behavior" | "outcome" | "privacy_policy"; subject: string; observation: string; operationId: OperationId; createdAt: number; }
+export interface SettlementMemoryV1 { version: "supercuts.settlement-memory.v1"; kind: "privacy_rule" | "budget_limit" | "reliability" | "quality" | "outcome"; provenance?: "agent_observation"; scope: { counterparty?: string; capabilityId?: string; capabilityClass?: string; network?: "sui:testnet"; asset?: string }; createdAt: number; evidenceHash?: string; observation?: string; signal: { requiresShielded?: boolean; maximumAmount?: string; reliability?: number; quality?: number; outcome?: "succeeded" | "failed" | "unresolved" } }
+export interface SettlementCitation { blobId: string; kind: SettlementMemoryV1["kind"] | "legacy"; provenance: "owner_policy" | "verified_outcome" | "agent_observation" | "legacy_untrusted"; distance: number; }
+export interface SettlementPlanV1 { version: "supercuts.settlement-plan.v1"; planHash: string; operationId: string; status: "approved" | "review_required"; mandateHash: string; manifestHash: string; capabilityId: string; capabilityClass: string; sellerId: string; endpoint: string; network: "sui:testnet"; asset: string; rail: Rail; openingAmount: string; maximumAmount: string; manifestMinimum: string; manifestMaximum: string; riskLevel: "low" | "medium" | "review_required"; createdAt: number; expiresAt: number; citations: SettlementCitation[]; reasonCodes: string[]; approvedFromPlanHash?: string; }
 export interface DemoEvent { schema: "supercuts.demo.v1"; sequence: number; runId: string; timestamp: string; actor: string; stage: string; status: string; mode: "live" | "recorded-funded-run"; publicDetails: Readonly<Record<string, unknown>>; evidenceHashes: string[]; explorerLinks: string[]; }
 
 export interface AuthorizationIntent {
@@ -32,13 +35,13 @@ export interface ApprovalProvider { approve(intent: Readonly<AuthorizationIntent
 export interface SupercutsSdkConfig { home: string; approvalProvider?: ApprovalProvider; seamPath?: string; timeoutMs?: number; }
 export interface MockInitializeOptions {
   role: Role; mock: true; artifactManifest?: string; maxAmount?: bigint;
-  allowedCounterparties?: string[]; requireShielded?: boolean;
+  allowedCounterparties?: string[]; requireShielded?: boolean; maxMemoryDistance?: number;
 }
 export interface LiveInitializeOptions {
   role: Role; mock?: false; deploymentConfig: string; suiKeyFile: string; tatumKeyFile: string;
   writeGrpc: string; tatumGrpc: string; snarkjsPath?: string; converterPath?: string; rapidsnarkPath?: string;
   memoryConfigFile?: string; walrusPublisher?: string; walrusAggregator?: string;
-  maxAmount?: bigint; allowedCounterparties?: string[]; requireShielded?: boolean;
+  maxAmount?: bigint; allowedCounterparties?: string[]; requireShielded?: boolean; maxMemoryDistance?: number;
 }
 export type InitializeOptions = MockInitializeOptions | LiveInitializeOptions;
 export interface DoctorReport { role: Role; network: "testnet"; packageId: string; poolId: string; asset: string; verifierVersion: number; artifactManifestSha256: string; keyPermissions: "owner-only"; rpc: string; healthy: true; }
@@ -116,9 +119,9 @@ abstract class RoleClient {
   }
 }
 
-const paymentArgs = (input: { operationId: OperationId; amount: bigint; counterparty: string; asset?: string; requestId?: string; broadcastOnly?: boolean }): Arguments => ({
+const paymentArgs = (input: { operationId: OperationId; amount: bigint; counterparty: string; asset?: string; requestId?: string; broadcastOnly?: boolean; planHash?: string }): Arguments => ({
   "operation-id": input.operationId, amount: input.amount.toString(), counterparty: input.counterparty,
-  ...(input.asset ? { asset: input.asset } : {}), ...(input.requestId ? { "request-id": input.requestId } : {}), ...(input.broadcastOnly ? { "broadcast-only": true } : {}),
+  ...(input.asset ? { asset: input.asset } : {}), ...(input.requestId ? { "request-id": input.requestId } : {}), ...(input.broadcastOnly ? { "broadcast-only": true } : {}), ...(input.planHash ? { "plan-hash": input.planHash } : {}),
 });
 const payment = (value: any): PaymentReceipt => ({ ...value, amount: BigInt(value.amount) }) as PaymentReceipt;
 
@@ -127,6 +130,7 @@ export class BuyerClient extends RoleClient {
   async discoverSellers(capabilities: Capability[]): Promise<Capability[]> { const value = await this.read<{ capabilities: Capability[] }>("capability.discover", { capabilities }); return value.capabilities; }
   async discoverCapabilities(manifests: CapabilityManifest[]): Promise<CapabilityManifest[]> { const value = await this.read<{ capabilities: CapabilityManifest[] }>("capability.discover", { capabilities: manifests }); return value.capabilities; }
   async discoverCapabilityBlobs(blobIds: string[]): Promise<Array<CapabilityManifest & { blobId: string }>> { const value = await this.read<{ capabilities: Array<CapabilityManifest & { blobId: string }> }>("capability.discover", { "blob-ids": blobIds }); return value.capabilities; }
+  async planSettlement(input: { operationId: OperationId; manifest: CapabilityManifest; alternatives?: CapabilityManifest[]; requestedAmount?: bigint; privacyHint?: "any" | "shielded" }): Promise<SettlementPlanV1> { return this.mutate("settlement.plan", { "operation-id": input.operationId, manifest: input.manifest, ...(input.alternatives ? { alternatives: input.alternatives } : {}), ...(input.requestedAmount !== undefined ? { "requested-amount": input.requestedAmount.toString() } : {}), ...(input.privacyHint ? { "privacy-hint": input.privacyHint } : {}) }); }
   async deposit(amount: bigint, id: OperationId = operationId(randomUUID())): Promise<TransactionReceipt> { const value = await this.mutate<any>("wallet.deposit", { amount: amount.toString(), "operation-id": id }); return { ...value, amount: BigInt(value.amount) }; }
   async balance(): Promise<WalletBalance> { const value = await this.read<any>("wallet.balance"); return { ...value, available: BigInt(value.available) }; }
   async recover(): Promise<{ recovered: number; source: string }> { return this.mutate("wallet.recover", {}); }
@@ -134,18 +138,19 @@ export class BuyerClient extends RoleClient {
   async openOffer(session?: SessionId): Promise<OfferState> { return this.mutate("offer.open", session ? { session } : {}); }
   async propose(session: SessionId, revision: number, terms: Readonly<Record<string, JsonValue>>): Promise<OfferState> { return this.mutate("offer.propose", { session, revision, terms: JSON.stringify(terms) }); }
   async accept(session: SessionId, revision: number, terms: Readonly<Record<string, JsonValue>>): Promise<OfferState> { return this.mutate("offer.accept", { session, revision, terms: JSON.stringify(terms) }); }
-  async acceptCryptographicAgreement(session: SessionId, agreement: Readonly<Record<string, JsonValue>>): Promise<{ sessionId: string; revision: string; state: "accepted"; dealCommitment: string; expiry: string; paymentAmount: string }> { return this.mutate("offer.accept", { session, agreement: Buffer.from(JSON.stringify(agreement)).toString("base64url") }); }
+  async acceptCryptographicAgreement(session: SessionId, agreement: Readonly<Record<string, JsonValue>>, plan?: { planHash: string; manifest: CapabilityManifest }): Promise<{ sessionId: string; revision: string; state: "accepted"; dealCommitment: string; expiry: string; paymentAmount: string }> { return this.mutate("offer.accept", { session, agreement: Buffer.from(JSON.stringify(agreement)).toString("base64url"), ...(plan ? { "plan-hash": plan.planHash, manifest: plan.manifest } : {}) }); }
   async showOffer(session: SessionId): Promise<OfferState> { return this.read("offer.show", { session }); }
   async quote(input: { rail: Rail; amount: bigint; counterparty: string; asset?: string }): Promise<PaymentQuote> { const value = await this.read<any>("pay.quote", { rail: input.rail, amount: input.amount.toString(), counterparty: input.counterparty, ...(input.asset ? { asset: input.asset } : {}) }); return { ...value, amount: BigInt(value.amount) }; }
   async settleShielded(input: Parameters<typeof paymentArgs>[0]): Promise<PaymentReceipt> { return payment(await this.mutate("pay.shielded", paymentArgs(input))); }
-  async settleAcceptedShielded(operationId: OperationId, session: SessionId): Promise<PaymentReceipt> { return payment(await this.mutate("pay.shielded", { "operation-id": operationId, session })); }
+  async settleAcceptedShielded(operationId: OperationId, session: SessionId, planHash?: string): Promise<PaymentReceipt> { return payment(await this.mutate("pay.shielded", { "operation-id": operationId, session, ...(planHash ? { "plan-hash": planHash } : {}) })); }
   async payX402(input: Parameters<typeof paymentArgs>[0]): Promise<PaymentReceipt> { return payment(await this.mutate("pay.x402", paymentArgs(input))); }
-  async payX402Resource(id: OperationId, resourceUrl: string): Promise<PaymentReceipt & { response: Uint8Array; responseSha256: string }> { const value = await this.mutate<any>("pay.x402", { "operation-id": id, "resource-url": resourceUrl }); return { ...value, amount: BigInt(value.amount), response: Buffer.from(value.response, "base64"), responseSha256: String(value.responseSha256) } as PaymentReceipt & { response: Uint8Array; responseSha256: string }; }
+  async payX402Resource(id: OperationId, resourceUrl: string, planHash?: string): Promise<PaymentReceipt & { response: Uint8Array; responseSha256: string }> { const value = await this.mutate<any>("pay.x402", { "operation-id": id, "resource-url": resourceUrl, ...(planHash ? { "plan-hash": planHash } : {}) }); return { ...value, amount: BigInt(value.amount), response: Buffer.from(value.response, "base64"), responseSha256: String(value.responseSha256) } as PaymentReceipt & { response: Uint8Array; responseSha256: string }; }
   async paymentStatus(operationId: OperationId, reconcile = false): Promise<PaymentReceipt> { return payment(await this.read("pay.status", { "operation-id": operationId, ...(reconcile ? { reconcile: true } : {}) })); }
   async reconcilePayment(operationId: OperationId): Promise<PaymentReceipt> { return this.paymentStatus(operationId, true); }
   async fetchResource(input: { requestId: string; operationId: OperationId; response: Uint8Array }): Promise<{ requestId: string; responseHash: string; body: Uint8Array; deliveryStatus: string }> { const value = await this.read<any>("resource.fetch", { "request-id": input.requestId, "operation-id": input.operationId, response: Buffer.from(input.response).toString("base64") }); return { ...value, body: Buffer.from(value.body, "base64") }; }
   async remember(operationId: OperationId, fact: string): Promise<{ operationId: string; namespace: string; blobId: string; status: string }> { return this.mutate("memory.remember", { "operation-id": operationId, fact }); }
-  async recall(query: string): Promise<{ namespace: string; recalled: string | null; effect: string }> { return this.read("memory.recall", { query }); }
+  async rememberSettlement(operationId: OperationId, memory: Omit<SettlementMemoryV1, "provenance">): Promise<{ operationId: string; namespace: string; blobId: string; status: string; provenance: "agent_observation" }> { return this.mutate("memory.remember", { "operation-id": operationId, memory }); }
+  async recall(query: string): Promise<{ namespace: string; citations: SettlementCitation[]; effect: string }> { return this.read("memory.recall", { query }); }
   async memoryStatus(): Promise<MemoryStatus> { return this.read("memory.status"); }
   async requestDisclosure(input: { dealId: string; auditor: string; paymentDigest: TransactionDigest; transcriptRoot: string }): Promise<DisclosureReference> { return this.mutate("disclose", { "deal-id": input.dealId, auditor: input.auditor, "payment-digest": input.paymentDigest, "transcript-root": input.transcriptRoot }); }
 }
@@ -164,7 +169,7 @@ export class SellerClient extends RoleClient {
   async serveResource(requestId: string, body: Uint8Array): Promise<{ requestId: string; responseHash: string; deliveryStatus: string }> { return this.mutate("resource.serve", { "request-id": requestId, body: Buffer.from(body).toString("base64") }); }
   async fetchResource(input: { requestId: string; operationId: OperationId; response: Uint8Array }): Promise<{ requestId: string; responseHash: string; body: Uint8Array; deliveryStatus: string }> { const value = await this.read<any>("resource.fetch", { "request-id": input.requestId, "operation-id": input.operationId, response: Buffer.from(input.response).toString("base64") }); return { ...value, body: Buffer.from(value.body, "base64") }; }
   async remember(operationId: OperationId, fact: string): Promise<{ operationId: string; namespace: string; blobId: string; status: string }> { return this.mutate("memory.remember", { "operation-id": operationId, fact }); }
-  async recall(query: string): Promise<{ namespace: string; recalled: string | null; effect: string }> { return this.read("memory.recall", { query }); }
+  async recall(query: string): Promise<{ namespace: string; citations: SettlementCitation[]; effect: string }> { return this.read("memory.recall", { query }); }
   async memoryStatus(): Promise<MemoryStatus> { return this.read("memory.status"); }
 }
 
@@ -178,5 +183,5 @@ export async function initializeProfile(config: Omit<SupercutsSdkConfig, "approv
   const version = await seam.call<{ protocol: number; packageVersion: string }>("version", undefined, false);
   if (version.protocol !== SEAM_PROTOCOL || version.packageVersion !== SDK_VERSION) throw new SeamUnavailable("installed Supercuts backend is incompatible with this SDK");
   const live = options.mock === true ? {} : { "deployment-config": options.deploymentConfig, "sui-key-file": options.suiKeyFile, "tatum-key-file": options.tatumKeyFile, "write-grpc": options.writeGrpc, "tatum-grpc": options.tatumGrpc, ...(options.snarkjsPath ? { snarkjs: options.snarkjsPath } : {}), ...(options.converterPath ? { converter: options.converterPath } : {}), ...(options.rapidsnarkPath ? { rapidsnark: options.rapidsnarkPath } : {}), ...(options.memoryConfigFile ? { "memory-config-file": options.memoryConfigFile } : {}), ...(options.walrusPublisher ? { "walrus-publisher": options.walrusPublisher } : {}), ...(options.walrusAggregator ? { "walrus-aggregator": options.walrusAggregator } : {}) };
-  return seam.call("initialize", { role: options.role, ...(options.mock ? { mock: true } : live), ...(options.mock && options.artifactManifest ? { "artifact-manifest": options.artifactManifest } : {}), ...(options.maxAmount !== undefined ? { "max-amount": options.maxAmount.toString() } : {}), ...(options.allowedCounterparties ? { "allow-counterparty": options.allowedCounterparties.join(",") } : {}), ...(options.requireShielded ? { "require-shielded": true } : {}) });
+  return seam.call("initialize", { role: options.role, ...(options.mock ? { mock: true } : live), ...(options.mock && options.artifactManifest ? { "artifact-manifest": options.artifactManifest } : {}), ...(options.maxAmount !== undefined ? { "max-amount": options.maxAmount.toString() } : {}), ...(options.allowedCounterparties ? { "allow-counterparty": options.allowedCounterparties.join(",") } : {}), ...(options.requireShielded ? { "require-shielded": true } : {}), ...(options.maxMemoryDistance !== undefined ? { "max-memory-distance": String(options.maxMemoryDistance) } : {}) });
 }
