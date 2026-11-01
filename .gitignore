@@ -12,7 +12,5 @@
 *.key
 *.zkey
 *.ptau
-reference-shii/
+/reference-shii/
 /*.md
-!/README.md
-!/backend/README.md
