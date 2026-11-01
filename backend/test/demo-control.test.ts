@@ -35,6 +35,8 @@ test("bounded Claude accepts only the forced schema tool output", async () => {
   const calls: unknown[] = [], client = new BoundedClaude({ apiKey: "test", maxTurns: 1, retries: 0, fetch: async (_url, init) => { calls.push(JSON.parse(String(init?.body))); return new Response(JSON.stringify({ content: [{ type: "text", text: "Selected for relevance" }, { type: "tool_use", name: "choose", input: { action: "select", capabilityId: "one", rationale: "fits" } }], usage: { input_tokens: 10, output_tokens: 5 } }), { status: 200, headers: { "content-type": "application/json" } }); } });
   const result = await client.decide<{ action: string; capabilityId: string; rationale: string }>({ system: "Rank only the supplied candidates.", task: "research", candidates: [{ capabilityId: "one" }], schema: { name: "choose", description: "Select one approved candidate.", properties: { action: { type: "string", enum: ["select"] }, capabilityId: { type: "string" }, rationale: { type: "string", maxLength: 200 } }, required: ["action", "capabilityId", "rationale"] } });
   assert.equal(result.action.capabilityId, "one"); assert.equal(result.usage.outputTokens, 5); assert.equal(calls.length, 1);
+  assert.equal((calls[0] as { model: string }).model, "claude-haiku-5-5");
+  assert.equal("temperature" in (calls[0] as object), false);
 });
 
 test("seller-owned x402 service challenges, settles once, and rejects cross-request reuse", async () => {

@@ -37,7 +37,7 @@ export class BoundedClaude {
   constructor(private readonly options: BoundedClaudeOptions = {}) {
     this.#apiKey = options.apiKey ?? process.env.CLAUDE_API_KEY ?? "";
     if (!this.#apiKey) fail("CLAUDE_CREDENTIAL_MISSING", "CLAUDE_API_KEY is required for live agent reasoning");
-    this.model = options.model ?? process.env.CLAUDE_MODEL ?? "claude-haiku-4-5-20251001";
+    this.model = options.model ?? process.env.CLAUDE_MODEL ?? "claude-haiku-5-5";
     this.#maxTurns = options.maxTurns ?? 3; this.#maxTokens = options.maxTokens ?? 700; this.#retries = options.retries ?? 2; this.#fetch = options.fetch ?? fetch;
     if (!Number.isSafeInteger(this.#maxTurns) || this.#maxTurns < 1 || this.#maxTurns > 6 || !Number.isSafeInteger(this.#maxTokens) || this.#maxTokens < 32 || this.#maxTokens > 2048 || !Number.isSafeInteger(this.#retries) || this.#retries < 0 || this.#retries > 3) fail("CLAUDE_LIMIT_INVALID", "Claude bounds exceed the allowed demo limits");
   }
@@ -50,7 +50,7 @@ export class BoundedClaude {
       for (let attempt = 0; attempt <= this.#retries; attempt++) {
         let response: Response;
         try {
-          response = await this.#fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "content-type": "application/json", "anthropic-version": "2023-06-01", "x-api-key": this.#apiKey }, body: JSON.stringify({ model: this.model, max_tokens: this.#maxTokens, temperature: 0, system: input.system, messages: [{ role: "user", content: JSON.stringify({ task: input.task, policyApprovedCandidates: input.candidates }) }], tools: [tool], tool_choice: { type: "tool", name: input.schema.name } }), signal: AbortSignal.timeout(30_000) });
+          response = await this.#fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "content-type": "application/json", "anthropic-version": "2023-06-01", "x-api-key": this.#apiKey }, body: JSON.stringify({ model: this.model, max_tokens: this.#maxTokens, system: input.system, messages: [{ role: "user", content: JSON.stringify({ task: input.task, policyApprovedCandidates: input.candidates }) }], tools: [tool], tool_choice: { type: "tool", name: input.schema.name } }), signal: AbortSignal.timeout(30_000) });
         } catch (error) { last = error; if (attempt < this.#retries) continue; return fail("CLAUDE_UNAVAILABLE", "Claude request failed closed", error); }
         if (!response.ok) { last = new Error(`Anthropic status ${response.status}`); if (attempt < this.#retries && (response.status === 429 || response.status >= 500)) { await response.arrayBuffer(); continue; } return fail("CLAUDE_UNAVAILABLE", `Claude returned status ${response.status}`); }
         let body: Record<string, any>; try { body = await response.json() as Record<string, any>; } catch (error) { return fail("CLAUDE_OUTPUT_INVALID", "Claude returned invalid JSON", error); }
