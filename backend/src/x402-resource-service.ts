@@ -97,7 +97,7 @@ export class X402ResourceService {
       return this.send(response, 200, delivery ?? fail("DELIVERY_STATE_INVALID", "completed delivery has no bytes"), { "content-type": "application/json", "payment-response": encode({ success: true, transaction: digest, network: this.config.network }) });
     } catch (error) {
       const known = error instanceof SupercutsError ? error : new SupercutsError("INTERNAL_ERROR", "resource service failed");
-      return this.send(response, known.code === "PAYMENT_CONSUMED" ? 409 : 400, Buffer.from(JSON.stringify({ error: known.code })) , { "content-type": "application/json" });
+      return this.send(response, known.code === "PAYMENT_CONSUMED" ? 409 : 400, Buffer.from(JSON.stringify({ error: known.code, message: known.message })) , { "content-type": "application/json" });
     }
   }
   createServer(): Server { return createServer((request, response) => void this.handle(request, response)); }
@@ -105,7 +105,11 @@ export class X402ResourceService {
     const endpoint = new URL(path, `${this.#facilitator.toString().replace(/\/$/, "")}/`);
     const response = await this.http(endpoint, { method: "POST", headers: { "content-type": "application/json", "x-supercuts-facilitator-key": this.config.facilitatorKey }, body: JSON.stringify(body), signal: AbortSignal.timeout(60_000) });
     let value: unknown; try { value = await response.json(); } catch (error) { return fail("X402_FACILITATOR_INVALID", "facilitator returned invalid JSON", error); }
-    if (!response.ok || !value || typeof value !== "object" || Array.isArray(value)) fail("X402_FACILITATOR_INVALID", `facilitator ${path} failed with ${response.status}`);
+    if (!response.ok || !value || typeof value !== "object" || Array.isArray(value)) {
+      const message = value && typeof value === "object" && !Array.isArray(value) && typeof (value as Record<string, unknown>).message === "string"
+        ? `: ${(value as Record<string, string>).message}` : "";
+      fail("X402_FACILITATOR_INVALID", `facilitator ${path} failed with ${response.status}${message}`);
+    }
     return value as Record<string, any>;
   }
   private send(response: ServerResponse, status: number, body: Buffer, headers: Record<string, string> = {}): void { response.writeHead(status, { "content-length": String(body.length), ...headers }); response.end(body); }

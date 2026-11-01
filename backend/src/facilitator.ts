@@ -8,6 +8,14 @@ const NETWORK = "sui:testnet" as const;
 const SUI = "0x2::sui::SUI";
 type Json = Record<string, unknown>;
 
+/** Sui RPC may expand a type's address to 32 bytes; policy identifiers use its canonical short form. */
+function canonicalType(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const match = /^(0x)([0-9a-f]+)(::.+)$/i.exec(value);
+  if (!match) return value;
+  return `0x${match[2]!.replace(/^0+/, "") || "0"}${match[3]!}`.toLowerCase();
+}
+
 interface SuiClient {
   getTransaction(options: any): Promise<any>;
   simulateTransaction(options: any): Promise<any>;
@@ -56,9 +64,13 @@ async function parsePayment(value: unknown, client: SuiClient): Promise<ParsedPa
 function transaction(result: any): any { return result?.Transaction ?? result?.FailedTransaction; }
 function assertSuccessfulPayment(result: any, parsed: ParsedPayment, finalized: boolean): void {
   const tx = transaction(result);
-  if (!tx || tx.digest !== parsed.digest || !tx.status?.success || (finalized && !tx.checkpoint)) throw new Error("transaction did not complete successfully");
+  if (!tx) throw new Error("transaction result is missing");
+  const digest = tx.digest ?? tx.effects?.transactionDigest;
+  if (digest !== parsed.digest) throw new Error("transaction digest differs from the signed bytes");
+  if (!tx.status?.success) throw new Error(`transaction did not complete successfully: ${String(tx.status?.error ?? "unknown error")}`);
+  if (finalized && !tx.checkpoint) throw new Error("transaction has not finalized");
   const payTo = String(parsed.requirements.payTo), amount = BigInt(String(parsed.requirements.amount));
-  const matched = (tx.balanceChanges ?? []).some((change: any) => change.address === payTo && change.coinType === SUI && BigInt(change.amount) === amount);
+  const matched = (tx.balanceChanges ?? []).some((change: any) => change.address === payTo && canonicalType(change.coinType) === SUI.toLowerCase() && BigInt(change.amount) === amount);
   if (!matched) throw new Error("transaction does not credit the exact requested native SUI amount");
 }
 
