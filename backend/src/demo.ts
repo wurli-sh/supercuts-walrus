@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { DemoEventLog, readDemoEvents, recordedReplay } from "./events.js";
@@ -31,7 +32,7 @@ async function setup(): Promise<Record<string, unknown>> {
   const roleInputs: Array<[keyof typeof roles, "buyer" | "seller" | "auditor", string]> = [["buyer", "buyer", keys.buyer], ["publicSeller", "seller", keys.publicSeller], ["secondPublicSeller", "seller", keys.secondPublicSeller], ["confidentialSeller", "seller", keys.confidentialSeller], ["auditor", "auditor", keys.auditor]];
   for (const [name, role, key] of roleInputs) {
     if (existsSync(join(roles[name], "profile.json"))) continue;
-    initialize(roles[name], { role, ...common, ...(!mock ? { "sui-key-file": key } : {}), ...(role === "buyer" ? { "allow-counterparty": `${addresses.publicSeller},${addresses.secondPublicSeller},${addresses.confidentialSeller}`, ...(typeof args["memory-config-file"] === "string" ? { "memory-config-file": resolve(args["memory-config-file"]) } : {}) } : {}) });
+    initialize(roles[name], { role, ...common, ...(!mock ? { "sui-key-file": key } : {}), ...(role === "buyer" ? { "allow-counterparty": `${addresses.publicSeller},${addresses.secondPublicSeller},${addresses.confidentialSeller}`, ...(typeof args["memory-config-file"] === "string" ? { "memory-config-file": resolve(args["memory-config-file"]) } : {}), ...(typeof args["max-memory-distance"] === "string" ? { "max-memory-distance": args["max-memory-distance"] } : {}) } : {}) });
   }
   const workflowPath = typeof args.workflow === "string" ? resolve(args.workflow) : !mock && typeof args["seller-url"] !== "string" ? resolve(value("workflow")) : undefined;
   if (workflowPath) {
@@ -41,13 +42,14 @@ async function setup(): Promise<Record<string, unknown>> {
     mandate.requireSettlementPlan = true; mandate.allowedCommands = [...new Set([...(Array.isArray(mandate.allowedCommands) ? mandate.allowedCommands as string[] : []), "settlement.plan"])]; mandate.allowedCapabilityIds = [...new Set(capabilities.map((item) => item.capabilityId))]; mandate.allowedCapabilityClasses = [...new Set(capabilities.map((item) => item.capability))]; mandate.allowedRails = [...new Set(capabilities.flatMap((item) => item.supportedRails))];
     writeFileSync(mandatePath, `${JSON.stringify(mandate, null, 2)}\n`, { mode: 0o600 }); chmodSync(mandatePath, 0o600);
   }
-  const mcp = { mcpServers: Object.fromEntries(Object.entries(roles).map(([name, home]) => [`supercuts-${name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`, { command: "supercuts-mcp", env: { SUPERCUTS_HOME: home } }])) };
+  const mcpScript = join(dirname(fileURLToPath(import.meta.url)), "mcp.js");
+  const mcp = { mcpServers: Object.fromEntries(Object.entries(roles).map(([name, home]) => [`supercuts-${name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`, { command: process.execPath, args: [mcpScript], env: { SUPERCUTS_HOME: home } }])) };
   writeFileSync(join(root, "mcp.json"), `${JSON.stringify(mcp, null, 2)}\n`, { mode: 0o600 });
   const runId = randomUUID(), eventPath = join(root, `events-${runId}.jsonl`);
   if (typeof args["seller-url"] === "string") {
     const sellerUrl = new URL(args["seller-url"]);
     if (sellerUrl.protocol !== "https:" && !(sellerUrl.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(sellerUrl.hostname))) fail("SELLER_ORIGIN_INVALID", "seller URL must use HTTPS except on loopback");
-    const codex = `[mcp_servers.supercuts-buyer]\ncommand = "supercuts-mcp"\n[mcp_servers.supercuts-buyer.env]\nSUPERCUTS_HOME = ${JSON.stringify(roles.buyer)}\nSUPERCUTS_SELLER_URL = ${JSON.stringify(sellerUrl.toString())}\nSUPERCUTS_RUN_ID = ${JSON.stringify(runId)}\nSUPERCUTS_EVENT_PATH = ${JSON.stringify(eventPath)}\n`;
+    const codex = `[mcp_servers.supercuts-buyer]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify([mcpScript])}\n[mcp_servers.supercuts-buyer.env]\nSUPERCUTS_HOME = ${JSON.stringify(roles.buyer)}\nSUPERCUTS_SELLER_URL = ${JSON.stringify(sellerUrl.toString())}\nSUPERCUTS_RUN_ID = ${JSON.stringify(runId)}\nSUPERCUTS_EVENT_PATH = ${JSON.stringify(eventPath)}\n`;
     writeFileSync(join(root, "buyer-codex.toml"), codex, { mode: 0o600 });
   }
   const remote = typeof args["seller-url"] === "string";

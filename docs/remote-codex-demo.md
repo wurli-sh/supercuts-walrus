@@ -28,10 +28,11 @@ node backend/dist/demo.js setup --state-dir .state/remote-demo \
   --deployment-config config/phase1.testnet.json \
   --tatum-key-file .secrets/tatum.key \
   --write-grpc https://fullnode.testnet.sui.io:443 \
-  --tatum-grpc https://sui-testnet.gateway.tatum.io:443 \
+  --tatum-grpc https://sui-testnet-grpc.gateway.tatum.io:443 \
   --walrus-publisher "$WALRUS_PUBLISHER_URL" \
   --walrus-aggregator "$WALRUS_AGGREGATOR_URL" \
   --memory-config-file .secrets/memory.json \
+  --max-memory-distance 0.65 \
   --rapidsnark circuits/build/tools/rapidsnark-src/build_prover/src/prover
 ```
 
@@ -68,6 +69,8 @@ Seed the saved owner privacy rule for the competitor-analysis capability before 
 
 Walrus Mainnet Memory needs the repository's 1536-dimensional embedding adapter. Start Ollama with `embeddinggemma`, set `EMBEDDING_UPSTREAM_BASE_URL=http://127.0.0.1:11434/v1` and `EMBEDDING_UPSTREAM_MODEL=embeddinggemma`, run `pnpm --dir circuits embedding:adapter`, and point the owner-only memory config to `http://127.0.0.1:8787/v1` with model `embeddinggemma-1536` before seeding or recalling.
 
+The remote setup uses an owner-configured 0.65 recall distance limit. A live seeded rule was returned at about 0.58 with this adapter; the normal 0.35 limit excluded it. Supercuts still validates the returned memory's provenance and exact capability, seller, network, and asset scope before it affects settlement.
+
 ```sh
 node backend/dist/demo.js seed-policy --state-dir .state/remote-demo \
   --workflow .secrets/remote-workflow.json
@@ -79,7 +82,7 @@ The saved rule requires shielded settlement. A public-rail answer from the buyer
 
 ## Record the buyer and seller panes
 
-Use the buyer stanza from `.state/remote-demo/buyer-codex.toml` in Codex's MCP config, or register the server with `codex mcp add` using its `SUPERCUTS_HOME`, `SUPERCUTS_SELLER_URL`, `SUPERCUTS_RUN_ID`, and `SUPERCUTS_EVENT_PATH` values. The buyer receives only buyer tools. Seller signing keys and Supabase credentials never enter Codex.
+Use the buyer stanza from `.state/remote-demo/buyer-codex.toml` in Codex's MCP config, or register the server with `codex mcp add` using its Node command, script path, `SUPERCUTS_HOME`, `SUPERCUTS_SELLER_URL`, `SUPERCUTS_RUN_ID`, and `SUPERCUTS_EVENT_PATH` values. The generated config points to the built local MCP script, so a global `supercuts-mcp` executable is not required. The buyer receives only buyer tools. Seller signing keys and Supabase credentials never enter Codex.
 
 On the right, run `supercuts-seller-watch` in three panes, one for each seller address in `run.json`. Each pane shows the live Render service's safe activity for that identity. These are activity views of Claude-backed remote sellers, not separate local Codex sessions. For example, run this in the first pane and substitute `secondPublicSeller` and `confidentialSeller` in the other two:
 
