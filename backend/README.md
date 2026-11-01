@@ -103,9 +103,9 @@ profiles, prompts, MCP calls, events, or browser state.
 - `PrivateWallet` reconciles only finalized, pinned pool evidence and recovers
   payment/change notes from matching openings.
 - `ExactResourceServer` adds a signed request binding and atomic payment-use
-  ledger around the standard x402 exact rail. `scripts/x402-live-e2e.ts` starts
-  with a live 402 challenge, settles the signed Sui transaction through the
-  protected resource, reconciles chain evidence, and checks both replay paths.
+  ledger around the standard x402 exact rail. The seller-owned resource URL is
+  supplied to the live workflow; the facilitator only validates and relays the
+  buyer-signed transaction.
 - `SealClientDisclosureTransport` encrypts auditor-scoped disclosure packages;
   `scripts/seal-live-e2e.ts` supplies the deployed account policy approval PTB,
   verifies finalized chain evidence, and gates the designated auditor decrypt.

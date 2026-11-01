@@ -22,8 +22,7 @@
     "test:e2e": "tsx --test test/phase2.e2e.test.ts",
     "test:phase3": "tsx --test test/phase3.e2e.test.ts",
     "test:sdk": "pnpm --dir packages/sdk test",
-    "test:seal-live": "tsx scripts/seal-live-e2e.ts",
-    "test:x402-live": "tsx scripts/x402-live-e2e.ts"
+    "test:seal-live": "tsx scripts/seal-live-e2e.ts"
   },
   "dependencies": {
     "@mysten-incubation/memwal": "0.1.11",
