@@ -16,3 +16,4 @@
 *.ptau
 /reference-shii/
 /*.md
+!/AGENTS.md
