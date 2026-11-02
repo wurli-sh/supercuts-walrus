@@ -30,6 +30,7 @@ export interface TransferWitness {
   paymentSalt: bigint; changeOpening: NoteOpeningData;
 }
 export interface WithdrawWitness { input: Record<string, unknown>; statement: Buffer; noteNullifier: bigint; }
+export interface WithdrawV2Witness extends WithdrawWitness { newRoot: bigint; newIndex: bigint; changeOpening: NoteOpeningData; exactExit: boolean; amount: bigint; }
 export interface AgreementValues { paymentSalt: bigint; dealCommitment: bigint; dealNullifier: bigint; }
 
 export class PoseidonTree {
@@ -70,10 +71,11 @@ export class ProtocolEngine {
   noteCommitment(amount: bigint, owner: [bigint, bigint], spendSecret: bigint, salt: bigint): bigint { return this.poseidonHash([2010n, this.deploymentField, amount, owner[0], owner[1], this.spendTag(spendSecret), salt]); }
   sign(identity: ProtocolIdentity, domain: 2004n | 2005n, agreement: bigint) { const F = this.eddsa.babyJub.F; const signature = this.eddsa.signPoseidon(identity.seed, F.e(this.poseidonHash([domain, this.deploymentField, agreement]))); return { R8x: F.toObject(signature.R8[0]), R8y: F.toObject(signature.R8[1]), S: signature.S }; }
   verify(publicKey: [bigint, bigint], domain: 2004n | 2005n, agreement: bigint, signature: { R8x: bigint; R8y: bigint; S: bigint }): boolean { const F = this.eddsa.babyJub.F; return this.eddsa.verifyPoseidon(F.e(this.poseidonHash([domain, this.deploymentField, agreement])), { R8: [F.e(signature.R8x), F.e(signature.R8y)], S: signature.S }, [F.e(publicKey[0]), F.e(publicKey[1])]); }
-  private header(kind: 1 | 2 | 3): Buffer { return Buffer.concat([Buffer.from("SCUT"), Buffer.from([1, kind]), Buffer.from(this.deployment.deploymentDomain.replace(/^0x/, ""), "hex"), Buffer.from(this.deployment.poolId.replace(/^0x/, ""), "hex"), Buffer.from(this.deployment.coinTypeHash.replace(/^0x/, ""), "hex"), u32(this.deployment.verifierVersion)]); }
+  private header(kind: 1 | 2 | 3): Buffer { return Buffer.concat([Buffer.from("SCUT"), Buffer.from([this.deployment.verifierVersion === 2 ? 2 : 1, kind]), Buffer.from(this.deployment.deploymentDomain.replace(/^0x/, ""), "hex"), Buffer.from(this.deployment.poolId.replace(/^0x/, ""), "hex"), Buffer.from(this.deployment.coinTypeHash.replace(/^0x/, ""), "hex"), u32(this.deployment.verifierVersion)]); }
   tree(leaves: bigint[]): PoseidonTree { return new PoseidonTree(leaves, this.poseidonHash); }
   buildDeposit(leaves: bigint[], owner: ProtocolIdentity, amount: bigint, spendSecret = scalar(), salt = scalar()): DepositWitness {
     if (amount <= 0n || amount >= 1n << 64n) fail("AMOUNT_INVALID", "deposit amount must be a positive u64");
+    if (this.deployment.verifierVersion === 2 && amount !== 10_000_000n && amount !== 100_000_000n) fail("AMOUNT_INVALID", "v2 deposits must be 10,000,000 or 100,000,000 MIST");
     const tree = this.tree(leaves), oldRoot = tree.root, leafIndex = BigInt(leaves.length), commitment = this.noteCommitment(amount, owner.publicKey, spendSecret, salt), nextTree = this.tree([...leaves, commitment]), newRoot = nextTree.root, newIndex = leafIndex + 1n;
     const expectedInitial = BigInt(`0x${this.deployment.initialRoot.replace(/^0x/, "")}`); if (!leaves.length && oldRoot !== expectedInitial) fail("INITIAL_ROOT_MISMATCH", "circuit zero tree differs from the pinned initial root");
     const statement = Buffer.concat([this.header(1), u64(amount), fieldBytes(commitment), fieldBytes(oldRoot), u64(leafIndex), fieldBytes(newRoot), u64(newIndex)]);
@@ -106,5 +108,20 @@ export class ProtocolEngine {
     const noteNullifier = this.poseidonHash([2011n, this.deploymentField, note.spendSecret, commitment]); const statement = Buffer.concat([this.header(3), fieldBytes(tree.root), fieldBytes(noteNullifier), address, u64(note.amount)]);
     const input = asStrings({ statement: [...statement], ...digestInputs(statement), ownerAx: note.ownerAx, ownerAy: note.ownerAy, spendSecret: note.spendSecret, salt: note.salt, leafIndex: note.leafIndex, pathElements: tree.path(Number(note.leafIndex)).siblings });
     return { input, statement, noteNullifier };
+  }
+  buildWithdrawV2(leaves: bigint[], note: NoteOpeningData, recipient: string, amount: bigint, exactExit = false, changeSpendSecret = scalar(), changeSalt = scalar()): WithdrawV2Witness {
+    if (this.deployment.verifierVersion !== 2) fail("POOL_VERSION_INVALID", "v2 withdrawals require a v2 deployment");
+    if (amount <= 0n || amount > note.amount || (!exactExit && amount !== 1_000_000n)) fail("AMOUNT_INVALID", "standard exit is 1,000,000 MIST; an exact exit may reveal another amount");
+    if (!/^0x[0-9a-f]{64}$/i.test(recipient)) fail("RECIPIENT_INVALID", "withdrawal recipient must be a 32-byte Sui address");
+    const tree = this.tree(leaves), commitment = this.noteCommitment(note.amount, [note.ownerAx, note.ownerAy], note.spendSecret, note.salt);
+    if (commitment !== note.commitment || leaves[Number(note.leafIndex)] !== commitment) fail("NOTE_RECOVERY_MISMATCH", "withdrawal opening does not match indexed leaf");
+    const changeAmount = note.amount - amount, leafIndex = BigInt(leaves.length);
+    const changeCommitment = this.noteCommitment(changeAmount, [note.ownerAx, note.ownerAy], changeSpendSecret, changeSalt);
+    const nextTree = this.tree([...leaves, changeCommitment]), newRoot = nextTree.root, newIndex = leafIndex + 1n;
+    const noteNullifier = this.poseidonHash([2011n, this.deploymentField, note.spendSecret, commitment]);
+    const address = Buffer.from(recipient.slice(2), "hex");
+    const statement = Buffer.concat([this.header(3), fieldBytes(tree.root), fieldBytes(noteNullifier), address, u64(amount), Buffer.from([Number(exactExit)]), fieldBytes(changeCommitment), u64(leafIndex), fieldBytes(newRoot), u64(newIndex)]);
+    const input = asStrings({ statement: [...statement], ...digestInputs(statement), ownerAx: note.ownerAx, ownerAy: note.ownerAy, inputAmount: note.amount, spendSecret: note.spendSecret, salt: note.salt, leafIndex: note.leafIndex, pathElements: tree.path(Number(note.leafIndex)).siblings, changeAmount, changeSpendSecret, changeSalt, appendSiblings: tree.appendPath() });
+    return { input, statement, noteNullifier, newRoot, newIndex, changeOpening: { deployment: this.deploymentField, amount: changeAmount, ownerAx: note.ownerAx, ownerAy: note.ownerAy, spendSecret: changeSpendSecret, salt: changeSalt, commitment: changeCommitment, leafIndex }, exactExit, amount };
   }
 }

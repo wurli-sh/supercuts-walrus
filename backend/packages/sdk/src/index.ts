@@ -47,6 +47,7 @@ export type InitializeOptions = MockInitializeOptions | LiveInitializeOptions;
 export interface DoctorReport { role: Role; network: "testnet"; packageId: string; poolId: string; asset: string; verifierVersion: number; artifactManifestSha256: string; keyPermissions: "owner-only"; rpc: string; healthy: true; }
 export interface Status { role: Role; network: "testnet"; operations: number; mock: boolean; }
 export interface WalletBalance { available: bigint; notes: number; }
+export interface QueuedExit { operationId: string; commitment: string; payoutAddress: string; amount: bigint; exactExit: boolean; windowStart: number; executeAt: number; windowEnd: number; status: "queued" | "submitted" | "finalized"; visibility?: string; }
 export interface TransactionReceipt { transactionDigest: TransactionDigest; finalized: boolean; evidence: string; amount?: bigint; commitment?: string; }
 export interface OfferState { sessionId: SessionId; revision: number; state: string; termsHash?: string; transcriptCommitment: string; }
 export interface PaymentQuote { rail: Rail; amount: bigint; counterparty: string; asset: string; policyDecision: "allowed"; visibility: string; }
@@ -124,6 +125,8 @@ const paymentArgs = (input: { operationId: OperationId; amount: bigint; counterp
   ...(input.asset ? { asset: input.asset } : {}), ...(input.requestId ? { "request-id": input.requestId } : {}), ...(input.broadcastOnly ? { "broadcast-only": true } : {}), ...(input.planHash ? { "plan-hash": input.planHash } : {}),
 });
 const payment = (value: any): PaymentReceipt => ({ ...value, amount: BigInt(value.amount) }) as PaymentReceipt;
+const queuedExit = (value: any): QueuedExit => ({ ...value, amount: BigInt(value.amount) }) as QueuedExit;
+const exitArgs = (input: { operationId: OperationId; commitment: string; amount: bigint; exactExit?: boolean; windowStart: number; windowEnd: number }): Arguments => ({ "operation-id": input.operationId, commitment: input.commitment, amount: input.amount.toString(), "exact-exit": input.exactExit === true, "window-start": String(input.windowStart), "window-end": String(input.windowEnd) });
 
 export class BuyerClient extends RoleClient {
   static async connect(config: SupercutsSdkConfig): Promise<BuyerClient> { const client = new BuyerClient(config); await client.ensureCompatible(); const report = await client.doctor(); if (report.role !== "buyer") throw new SupercutsSdkError("SDK_ROLE_MISMATCH", `expected buyer profile, found ${report.role}`, false); return client; }
@@ -135,6 +138,9 @@ export class BuyerClient extends RoleClient {
   async balance(): Promise<WalletBalance> { const value = await this.read<any>("wallet.balance"); return { ...value, available: BigInt(value.available) }; }
   async recover(): Promise<{ recovered: number; source: string }> { return this.mutate("wallet.recover", {}); }
   async withdraw(commitment: string, recipient?: string, id: OperationId = operationId(randomUUID())): Promise<TransactionReceipt> { const value = await this.mutate<any>("wallet.withdraw", { commitment, "operation-id": id, ...(recipient ? { recipient } : {}) }); return { ...value, amount: BigInt(value.amount) }; }
+  async queueExit(input: Parameters<typeof exitArgs>[0]): Promise<QueuedExit> { return queuedExit(await this.mutate("wallet.exit.queue", exitArgs(input))); }
+  async exitStatus(id: OperationId): Promise<QueuedExit> { return queuedExit(await this.read("wallet.exit.status", { "operation-id": id })); }
+  async finalizeExit(id: OperationId, digest: string, approvalId: OperationId = operationId(randomUUID())): Promise<Record<string, unknown>> { return this.mutate("wallet.exit.finalize", { "operation-id": approvalId, "exit-id": id, digest }); }
   async openOffer(session?: SessionId): Promise<OfferState> { return this.mutate("offer.open", session ? { session } : {}); }
   async propose(session: SessionId, revision: number, terms: Readonly<Record<string, JsonValue>>): Promise<OfferState> { return this.mutate("offer.propose", { session, revision, terms: JSON.stringify(terms) }); }
   async accept(session: SessionId, revision: number, terms: Readonly<Record<string, JsonValue>>): Promise<OfferState> { return this.mutate("offer.accept", { session, revision, terms: JSON.stringify(terms) }); }
@@ -166,6 +172,9 @@ export class SellerClient extends RoleClient {
   async recoverPayment(commitment: string, amount: bigint): Promise<{ recovered: number; source: string }> { return this.mutate("wallet.recover", { commitment, amount: amount.toString() }); }
   async balance(): Promise<WalletBalance> { const value = await this.read<any>("wallet.balance"); return { ...value, available: BigInt(value.available) }; }
   async withdraw(commitment: string, recipient?: string, id: OperationId = operationId(randomUUID())): Promise<TransactionReceipt> { const value = await this.mutate<any>("wallet.withdraw", { commitment, "operation-id": id, ...(recipient ? { recipient } : {}) }); return { ...value, amount: BigInt(value.amount) }; }
+  async queueExit(input: Parameters<typeof exitArgs>[0]): Promise<QueuedExit> { return queuedExit(await this.mutate("wallet.exit.queue", exitArgs(input))); }
+  async exitStatus(id: OperationId): Promise<QueuedExit> { return queuedExit(await this.read("wallet.exit.status", { "operation-id": id })); }
+  async finalizeExit(id: OperationId, digest: string, approvalId: OperationId = operationId(randomUUID())): Promise<Record<string, unknown>> { return this.mutate("wallet.exit.finalize", { "operation-id": approvalId, "exit-id": id, digest }); }
   async serveResource(requestId: string, body: Uint8Array): Promise<{ requestId: string; responseHash: string; deliveryStatus: string }> { return this.mutate("resource.serve", { "request-id": requestId, body: Buffer.from(body).toString("base64") }); }
   async fetchResource(input: { requestId: string; operationId: OperationId; response: Uint8Array }): Promise<{ requestId: string; responseHash: string; body: Uint8Array; deliveryStatus: string }> { const value = await this.read<any>("resource.fetch", { "request-id": input.requestId, "operation-id": input.operationId, response: Buffer.from(input.response).toString("base64") }); return { ...value, body: Buffer.from(value.body, "base64") }; }
   async remember(operationId: OperationId, fact: string): Promise<{ operationId: string; namespace: string; blobId: string; status: string }> { return this.mutate("memory.remember", { "operation-id": operationId, fact }); }

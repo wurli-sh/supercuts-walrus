@@ -5,6 +5,7 @@ import { loadStateKey } from "./config.js";
 import { fail, SupercutsError } from "./errors.js";
 import { RoleStore } from "./store.js";
 import { LiveRuntime, type LiveRuntimeProfile } from "./live-runtime.js";
+import { V2ExitQueue } from "./v2-exits.js";
 import { validateCapabilityManifest, type CapabilityManifest } from "./capability.js";
 import { ManualMemory, type ManualMemoryConfig } from "./memwal.js";
 import { WorkflowMemory } from "./workflow-memory.js";
@@ -27,11 +28,14 @@ export interface ApprovalToken { token: string; expiresAt: number; intentHash: s
 
 const PACKAGE = "0xf887433ddfd1068f6df3020cd757939b99ceb418f0d8b9924092b01c7aee846e";
 const POOL = "0x873e37b4745316f21a2780893f5fc36f87da559b08923fb4dad6237cd2e95d98";
+const V2_PACKAGE = "0x32d104c1ab422d497df4ae3a6861258694949c86428f886ca338e07bd055cf76";
+const V2_POOL = "0x8fd22140c906495bb5334a497dcdd9112479c638e21c5df4b4cfb66f633a106b";
+const V2_RELAYER = "0x405f473ed1f7f609b16d3d7dabc7cd04831cfc73b4a7fcebe9fa502d72e357a3";
 const COIN = "0x2::sui::SUI";
-const WRITE = new Set(["wallet.deposit", "wallet.recover", "wallet.withdraw", "offer.open", "offer.propose", "offer.counter", "offer.accept", "pay.shielded", "pay.x402", "resource.serve", "memory.remember", "disclose", "capability.publish", "settlement.plan", "settlement.approve-review", "memory.policy"]);
+const WRITE = new Set(["wallet.deposit", "wallet.recover", "wallet.withdraw", "wallet.exit.queue", "wallet.exit.finalize", "offer.open", "offer.propose", "offer.counter", "offer.accept", "pay.shielded", "pay.x402", "resource.serve", "memory.remember", "disclose", "capability.publish", "settlement.plan", "settlement.approve-review", "memory.policy"]);
 const ROLE_COMMANDS: Record<Role, ReadonlySet<string>> = {
-  buyer: new Set(["status", "doctor", "capability.discover", "settlement.plan", "settlement.approve-review", "memory.policy", "wallet.deposit", "wallet.balance", "wallet.recover", "wallet.withdraw", "offer.open", "offer.propose", "offer.accept", "offer.show", "pay.quote", "pay.shielded", "pay.x402", "pay.status", "resource.fetch", "memory.remember", "memory.recall", "memory.status", "remote.catalog", "remote.rank-briefs", "remote.negotiate", "remote.quote", "remote.purchase-brief", "remote.agreement", "remote.settle-analysis", "remote.delivery", "remote.events", "disclose"]),
-  seller: new Set(["status", "doctor", "capability.publish", "wallet.balance", "wallet.recover", "wallet.withdraw", "offer.counter", "offer.show", "pay.status", "resource.serve", "resource.fetch", "memory.remember", "memory.recall", "memory.status"]),
+  buyer: new Set(["status", "doctor", "capability.discover", "settlement.plan", "settlement.approve-review", "memory.policy", "wallet.deposit", "wallet.balance", "wallet.recover", "wallet.withdraw", "wallet.exit.queue", "wallet.exit.status", "wallet.exit.finalize", "offer.open", "offer.propose", "offer.accept", "offer.show", "pay.quote", "pay.shielded", "pay.x402", "pay.status", "resource.fetch", "memory.remember", "memory.recall", "memory.status", "remote.catalog", "remote.rank-briefs", "remote.negotiate", "remote.quote", "remote.purchase-brief", "remote.agreement", "remote.settle-analysis", "remote.delivery", "remote.events", "disclose"]),
+  seller: new Set(["status", "doctor", "capability.publish", "wallet.balance", "wallet.recover", "wallet.withdraw", "wallet.exit.queue", "wallet.exit.status", "wallet.exit.finalize", "offer.counter", "offer.show", "pay.status", "resource.serve", "resource.fetch", "memory.remember", "memory.recall", "memory.status"]),
   auditor: new Set(["status", "doctor", "audit.verify"]),
 };
 
@@ -97,7 +101,7 @@ export function initialize(home: string, args: Record<string, string | boolean>)
   const isMock = args.mock === true;
   const deploymentPath = isMock ? undefined : resolve(required(args, "deployment-config"));
   const deployment = deploymentPath ? JSON.parse(readFileSync(deploymentPath, "utf8")) as Record<string, unknown> : undefined;
-  if (deployment && (deployment.network !== "testnet" || deployment.testOnly !== true || deployment.packageId !== PACKAGE || deployment.poolId !== POOL || deployment.coinType !== COIN || deployment.verifierVersion !== 1)) fail("DEPLOYMENT_ID_MISMATCH", "live initialization only accepts the pinned Phase 1 Testnet deployment");
+  if (deployment && (deployment.network !== "testnet" || deployment.testOnly !== true || deployment.coinType !== COIN || !((deployment.packageId === PACKAGE && deployment.poolId === POOL && deployment.verifierVersion === 1) || (deployment.packageId === V2_PACKAGE && deployment.poolId === V2_POOL && deployment.verifierVersion === 2)))) fail("DEPLOYMENT_ID_MISMATCH", "live initialization requires a pinned Testnet pool deployment");
   const manifestValue = String(deployment?.artifactManifest ?? "");
   const manifest = isMock ? (typeof args["artifact-manifest"] === "string" ? resolve(args["artifact-manifest"]) : "mock:pinned-phase1") : (() => { if (!manifestValue) return fail("CONFIG_INVALID", "deployment artifactManifest is missing"); if (isAbsolute(manifestValue)) return manifestValue; const candidates = [resolve(manifestValue), resolve(dirname(deploymentPath!), "..", manifestValue)]; return candidates.find(existsSync) ?? fail("PROVING_ARTIFACT_MISSING", "deployment artifact manifest could not be resolved"); })();
   const manifestHash = manifest.startsWith("mock:") ? hash(manifest) : hash(readFileSync(manifest));
@@ -109,13 +113,15 @@ export function initialize(home: string, args: Record<string, string | boolean>)
     let embedding: URL; try { embedding = new URL(memoryConfig.embeddingApiBase); } catch (error) { return fail("LIVE_MEMORY_CONFIG_INVALID", "embeddingApiBase is invalid", error); }
     if (!["localhost", "127.0.0.1", "::1"].includes(embedding.hostname)) fail("LIVE_MEMORY_EMBEDDING_UNTRUSTED", "live memory embeddings must use the loopback 1536-dimension adapter");
   }
-  const artifactRoot = manifest.startsWith("mock:") ? "" : resolve(manifest, ".."); const repositoryRoot = artifactRoot ? resolve(artifactRoot, "../..") : "";
+  const artifactRoot = manifest.startsWith("mock:") ? "" : resolve(manifest, "..");
+  const circuitsRoot = artifactRoot ? resolve(artifactRoot, deployment?.verifierVersion === 2 ? "../.." : "..") : "";
+  const repositoryRoot = circuitsRoot ? resolve(circuitsRoot, "..") : "";
   const live = deployment ? {
     coinTypeHash: String(deployment.coinTypeHash), deploymentDomain: String(deployment.deploymentDomain), initialRoot: String(deployment.initialRoot), deploymentCheckpoint: String(deployment.deploymentCheckpoint),
     writeGrpcEndpoint: endpoint("write-grpc"), tatumGrpcEndpoint: endpoint("tatum-grpc"), artifactRoot,
     ...(typeof args["walrus-publisher"] === "string" ? { walrusPublisherUrl: endpoint("walrus-publisher") } : {}),
     ...(typeof args["walrus-aggregator"] === "string" ? { walrusAggregatorUrl: endpoint("walrus-aggregator") } : {}),
-    snarkjsPath: typeof args["snarkjs"] === "string" ? resolve(args["snarkjs"]) : resolve(artifactRoot, "../node_modules/.bin/snarkjs"), converterPath: typeof args.converter === "string" ? resolve(args.converter) : resolve(repositoryRoot, "target/debug/supercuts-groth16"),
+    snarkjsPath: typeof args["snarkjs"] === "string" ? resolve(args["snarkjs"]) : resolve(circuitsRoot, "node_modules/.bin/snarkjs"), converterPath: typeof args.converter === "string" ? resolve(args.converter) : resolve(repositoryRoot, "target/debug/supercuts-groth16"),
     ...(typeof args.rapidsnark === "string" ? { rapidsnarkPath: resolve(args.rapidsnark) } : {}),
     artifacts: Object.fromEntries(Object.entries(deployment.artifacts as Record<string, { zkeySha256: string; verifyingKeySha256: string }>).map(([name, item]) => [name, { zkeySha256: item.zkeySha256, verifyingKeySha256: item.verifyingKeySha256 }])) as LiveRuntimeProfile["live"]["artifacts"],
   } : undefined;
@@ -407,6 +413,16 @@ export class Phase3App {
     if (command === "wallet.recover") return output(command, await runtime.recover());
     if (command === "wallet.deposit") return output(command, await runtime.deposit(amount(args), required(args, "operation-id")));
     if (command === "wallet.withdraw") return output(command, await runtime.withdraw(required(args, "commitment"), required(args, "recipient"), required(args, "operation-id")));
+    if (command === "wallet.exit.queue") {
+      const queued = await runtime.queueV2Exit(required(args, "commitment"), required(args, "operation-id"), amount(args), args["exact-exit"] === true,
+        Number(required(args, "window-start")), Number(required(args, "window-end")), true);
+      return output(command, { ...queued, amount: queued.amount.toString(), visibility: queued.exactExit ? "exact exit amount is public" : "standard 1,000,000 MIST exit; payout and pool activity are public" });
+    }
+    if (command === "wallet.exit.status") {
+      const queued = new V2ExitQueue(this.store).get(required(args, "operation-id")) ?? fail("EXIT_REQUEST_INVALID", "exit operation was not found");
+      return output(command, { ...queued, amount: queued.amount.toString() });
+    }
+    if (command === "wallet.exit.finalize") return output(command, await runtime.finalizeV2Exit(required(args, "exit-id"), required(args, "digest"), V2_RELAYER));
     if (command === "offer.accept") { const accepted = typeof args.agreement === "string" ? runtime.acceptAgreement(required(args, "session"), args.agreement) : this.localOffer(command, args); if (typeof args["plan-hash"] === "string") this.bindAcceptedAgreement(args, accepted); this.enqueueVerifiedOutcome("agreement", typeof args["operation-id"] === "string" ? args["operation-id"] : `${String(accepted.sessionId)}:${String(accepted.revision)}`, { status: "accepted", commitment: accepted.dealCommitment ?? accepted.transcriptCommitment }, typeof args["plan-hash"] === "string" ? args["plan-hash"] : undefined); return output(command, accepted); }
     if (command === "offer.counter") return output(command, typeof args.agreement === "string" ? runtime.prepareSellerAgreement(required(args, "session"), args.agreement) : this.localOffer(command, args));
     if (command === "pay.shielded") { const receipt = await runtime.settleShielded(required(args, "session"), required(args, "operation-id"), (actual) => { this.bindSettlementPlan(command, args, actual); }); this.enqueueVerifiedOutcome("settlement", required(args, "operation-id"), receipt, typeof args["plan-hash"] === "string" ? args["plan-hash"] : undefined, { counterparty: String(receipt.counterparty), asset: String(receipt.asset) }); return output(command, receipt); }

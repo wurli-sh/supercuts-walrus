@@ -3,17 +3,20 @@ import { Transaction } from "@mysten/sui/transactions";
 import { fail } from "./errors.js";
 
 export interface TransferCall {
-  packageId: string; poolId: string; coinType: string; expiryMs: bigint; newIndex: bigint;
+  packageId: string; poolId: string; coinType: string; poolModule?: "pool" | "pool_v2"; expiryMs: bigint; newIndex: bigint;
   dealCommitment: Uint8Array; dealNullifier: Uint8Array; inputNullifier: Uint8Array;
   paymentCommitment: Uint8Array; changeCommitment: Uint8Array; newRoot: Uint8Array; proof: Uint8Array;
 }
 export interface DepositCall {
-  packageId: string; poolId: string; coinType: string; amount: bigint; newIndex: bigint;
+  packageId: string; poolId: string; coinType: string; poolModule?: "pool" | "pool_v2"; amount: bigint; newIndex: bigint;
   noteCommitment: Uint8Array; newRoot: Uint8Array; proof: Uint8Array;
 }
 export interface WithdrawCall {
   packageId: string; poolId: string; coinType: string; amount: bigint; recipient: string;
   root: Uint8Array; noteNullifier: Uint8Array; proof: Uint8Array;
+}
+export interface WithdrawV2Call extends WithdrawCall {
+  exactExit: boolean; changeCommitment: Uint8Array; newRoot: Uint8Array; newIndex: bigint;
 }
 const bytes = (value: Uint8Array) => Array.from(value);
 const validateCommon = (call: { packageId: string; poolId: string; coinType: string; proof: Uint8Array }): void => {
@@ -32,7 +35,7 @@ export function buildDeposit(call: DepositCall): Transaction {
   validate32({ noteCommitment: call.noteCommitment, newRoot: call.newRoot });
   const tx = new Transaction();
   const [coin] = tx.splitCoins(tx.gas, [tx.pure.u64(call.amount)]);
-  tx.moveCall({ target: `${call.packageId}::pool::deposit`, typeArguments: [call.coinType], arguments: [
+  tx.moveCall({ target: `${call.packageId}::${call.poolModule ?? "pool"}::deposit`, typeArguments: [call.coinType], arguments: [
     tx.object(call.poolId), coin!, tx.pure.vector("u8", bytes(call.noteCommitment)), tx.pure.vector("u8", bytes(call.newRoot)),
     tx.pure.u64(call.newIndex), tx.pure.vector("u8", bytes(call.proof)),
   ] });
@@ -43,7 +46,7 @@ export function buildPrivateTransfer(call: TransferCall): Transaction {
   validateCommon(call); validateU64(call.expiryMs, "expiry"); validateU64(call.newIndex, "new index");
   validate32({ dealCommitment: call.dealCommitment, dealNullifier: call.dealNullifier, inputNullifier: call.inputNullifier, paymentCommitment: call.paymentCommitment, changeCommitment: call.changeCommitment, newRoot: call.newRoot });
   const tx = new Transaction();
-  tx.moveCall({ target: `${call.packageId}::pool::transfer_private`, typeArguments: [call.coinType], arguments: [
+  tx.moveCall({ target: `${call.packageId}::${call.poolModule ?? "pool"}::transfer_private`, typeArguments: [call.coinType], arguments: [
     tx.object(call.poolId), tx.object("0x6"), tx.pure.vector("u8", bytes(call.dealCommitment)), tx.pure.vector("u8", bytes(call.dealNullifier)),
     tx.pure.vector("u8", bytes(call.inputNullifier)), tx.pure.vector("u8", bytes(call.paymentCommitment)), tx.pure.vector("u8", bytes(call.changeCommitment)),
     tx.pure.u64(call.expiryMs), tx.pure.vector("u8", bytes(call.newRoot)), tx.pure.u64(call.newIndex), tx.pure.vector("u8", bytes(call.proof)),
@@ -59,6 +62,20 @@ export function buildWithdraw(call: WithdrawCall): Transaction {
   tx.moveCall({ target: `${call.packageId}::pool::withdraw`, typeArguments: [call.coinType], arguments: [
     tx.object(call.poolId), tx.pure.vector("u8", bytes(call.root)), tx.pure.vector("u8", bytes(call.noteNullifier)),
     tx.pure.address(call.recipient), tx.pure.u64(call.amount), tx.pure.vector("u8", bytes(call.proof)),
+  ] });
+  return tx;
+}
+export function buildWithdrawV2(call: WithdrawV2Call): Transaction {
+  validateCommon(call); validateU64(call.amount, "amount", true); validateU64(call.newIndex, "new index", true);
+  if (!call.exactExit && call.amount !== 1_000_000n) fail("POOL_ARGUMENT_INVALID", "standard v2 exits are 1,000,000 MIST");
+  if (!/^0x[0-9a-f]{64}$/i.test(call.recipient)) fail("POOL_ARGUMENT_INVALID", "recipient must be a 32-byte Sui address");
+  validate32({ root: call.root, noteNullifier: call.noteNullifier, changeCommitment: call.changeCommitment, newRoot: call.newRoot });
+  const tx = new Transaction();
+  tx.moveCall({ target: `${call.packageId}::pool_v2::withdraw`, typeArguments: [call.coinType], arguments: [
+    tx.object(call.poolId), tx.pure.vector("u8", bytes(call.root)), tx.pure.vector("u8", bytes(call.noteNullifier)),
+    tx.pure.address(call.recipient), tx.pure.u64(call.amount), tx.pure.bool(call.exactExit),
+    tx.pure.vector("u8", bytes(call.changeCommitment)), tx.pure.vector("u8", bytes(call.newRoot)),
+    tx.pure.u64(call.newIndex), tx.pure.vector("u8", bytes(call.proof)),
   ] });
   return tx;
 }

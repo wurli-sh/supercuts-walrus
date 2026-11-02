@@ -12,8 +12,8 @@ const remote = app.profile.role === "buyer" && !app.profile.mock && process.env.
 const eventLog = remote && process.env.SUPERCUTS_EVENT_PATH && process.env.SUPERCUTS_RUN_ID ? new DemoEventLog(process.env.SUPERCUTS_EVENT_PATH, process.env.SUPERCUTS_RUN_ID) : undefined;
 if (eventLog) eventLog.append({ actor: "operator", stage: "run", status: "started", publicDetails: { flow: "codex-remote" }, evidenceHashes: [], explorerLinks: [] });
 const tools: Record<string, string> = {
-  buyer: "status,doctor,capability.discover,settlement.plan,wallet.deposit,wallet.balance,wallet.recover,wallet.withdraw,offer.open,offer.propose,offer.accept,offer.show,pay.quote,pay.shielded,pay.x402,pay.status,resource.fetch,memory.remember,memory.recall,memory.status,remote.catalog,remote.rank-briefs,remote.negotiate,remote.quote,remote.purchase-brief,remote.agreement,remote.settle-analysis,remote.delivery,remote.events,disclose",
-  seller: "status,doctor,capability.publish,wallet.balance,wallet.recover,wallet.withdraw,offer.counter,offer.show,pay.status,resource.serve,resource.fetch,memory.remember,memory.recall,memory.status",
+  buyer: "status,doctor,capability.discover,settlement.plan,wallet.deposit,wallet.balance,wallet.recover,wallet.withdraw,wallet.exit.queue,wallet.exit.status,wallet.exit.finalize,offer.open,offer.propose,offer.accept,offer.show,pay.quote,pay.shielded,pay.x402,pay.status,resource.fetch,memory.remember,memory.recall,memory.status,remote.catalog,remote.rank-briefs,remote.negotiate,remote.quote,remote.purchase-brief,remote.agreement,remote.settle-analysis,remote.delivery,remote.events,disclose",
+  seller: "status,doctor,capability.publish,wallet.balance,wallet.recover,wallet.withdraw,wallet.exit.queue,wallet.exit.status,wallet.exit.finalize,offer.counter,offer.show,pay.status,resource.serve,resource.fetch,memory.remember,memory.recall,memory.status",
   auditor: "status,doctor,audit.verify",
 };
 const send = (value: unknown) => process.stdout.write(`${JSON.stringify(value)}\n`);

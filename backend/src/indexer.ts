@@ -3,7 +3,8 @@ import { fail } from "./errors.js";
 export type PoolEvent =
   | { kind: "deposit"; checkpoint: bigint; transactionIndex: bigint; eventIndex: number; oldRoot: string; newRoot: string; leafIndex: bigint; noteCommitment: string }
   | { kind: "transfer"; checkpoint: bigint; transactionIndex: bigint; eventIndex: number; oldRoot: string; newRoot: string; firstLeafIndex: bigint; paymentCommitment: string; changeCommitment: string; dealNullifier: string; inputNullifier: string }
-  | { kind: "withdraw"; checkpoint: bigint; transactionIndex: bigint; eventIndex: number; root: string; noteNullifier: string; recipient: string; amount: bigint };
+  | { kind: "withdraw"; checkpoint: bigint; transactionIndex: bigint; eventIndex: number; root: string; noteNullifier: string; recipient: string; amount: bigint }
+  | { kind: "withdraw_v2"; checkpoint: bigint; transactionIndex: bigint; eventIndex: number; oldRoot: string; newRoot: string; leafIndex: bigint; noteNullifier: string; changeCommitment: string; recipient: string; amount: bigint; exactExit: boolean };
 
 export interface PoolIndex {
   root: string; nextLeaf: bigint; spent: Set<string>; deals: Set<string>; checkpoint: bigint;
@@ -32,6 +33,11 @@ export function applyPoolEvent(index: PoolIndex, event: PoolEvent): void {
     if (event.oldRoot !== index.root || event.firstLeafIndex !== index.nextLeaf) fail("POOL_TRANSITION_INVALID", "transfer root or leaf index does not match index");
     if (index.spent.has(event.inputNullifier) || index.deals.has(event.dealNullifier)) fail("POOL_REPLAY", "pool event reuses a consumed identity");
     index.root = event.newRoot; index.acceptedRoots.add(event.newRoot); index.nextLeaf += 2n; index.spent.add(event.inputNullifier); index.deals.add(event.dealNullifier);
+  } else if (event.kind === "withdraw_v2") {
+    if (event.oldRoot !== index.root || event.leafIndex !== index.nextLeaf) fail("POOL_TRANSITION_INVALID", "v2 exit root or leaf index does not match index");
+    if (index.spent.has(event.noteNullifier)) fail("POOL_REPLAY", "v2 exit reuses a spent nullifier");
+    if (!event.exactExit && event.amount !== 1_000_000n) fail("POOL_TRANSITION_INVALID", "v2 standard exit amount is invalid");
+    index.root = event.newRoot; index.acceptedRoots.add(event.newRoot); index.nextLeaf += 1n; index.spent.add(event.noteNullifier);
   } else {
     if (!index.acceptedRoots.has(event.root)) fail("POOL_TRANSITION_INVALID", "withdrawal references a root that was never accepted");
     if (index.spent.has(event.noteNullifier)) fail("POOL_REPLAY", "withdrawal reuses a spent nullifier");

@@ -13,7 +13,8 @@
     "supercuts-seller-watch": "dist/seller-watch.js",
     "supercuts-seller-catalog": "dist/seller-catalog-generate.js",
     "supercuts-facilitator": "dist/facilitator.js",
-    "supercuts-seam": "dist/seam.js"
+    "supercuts-seam": "dist/seam.js",
+    "supercuts-v2-relayer": "dist/v2-relayer-cli.js"
   },
   "files": ["dist", "README.md"],
   "engines": {

@@ -1,0 +1,9 @@
+{
+  "network": "testnet",
+  "packageId": "0x32d104c1ab422d497df4ae3a6861258694949c86428f886ca338e07bd055cf76",
+  "poolId": "0x8fd22140c906495bb5334a497dcdd9112479c638e21c5df4b4cfb66f633a106b",
+  "coinType": "0x2::sui::SUI",
+  "relayerAddress": "0x405f473ed1f7f609b16d3d7dabc7cd04831cfc73b4a7fcebe9fa502d72e357a3",
+  "writeGrpcEndpoint": "https://fullnode.testnet.sui.io:443",
+  "tatumGrpcEndpoint": "https://sui-testnet-grpc.gateway.tatum.io:443"
+}
