@@ -35,18 +35,19 @@ function tree(poseidon, leaves, selectedIndex) {
   return { root: nodes.get(0) ?? zero[20], pathElements };
 }
 
-export async function semanticFixtures() {
+export async function semanticFixtures(version = 1, options = {}) {
+  if (version !== 1 && version !== 2) throw new Error("unsupported semantic fixture version");
   const eddsa = await buildEddsa();
   const F = eddsa.babyJub.F;
   const poseidon = (values) => F.toObject(eddsa.poseidon(values));
   const domainBytes = bytes32(0x11);
   const poolBytes = bytes32(0x22);
   const coinBytes = bytes32(0x33);
-  const common = (kind) => Buffer.concat([Buffer.from("SCUT"), Buffer.from([1, kind]), domainBytes, poolBytes, coinBytes, u32(1)]);
+  const common = (kind) => Buffer.concat([Buffer.from("SCUT"), Buffer.from([version, kind]), domainBytes, poolBytes, coinBytes, u32(version)]);
   const [domainHi, domainLo] = limbs(domainBytes);
   const [poolHi, poolLo] = limbs(poolBytes);
   const [coinHi, coinLo] = limbs(coinBytes);
-  const deployment = poseidon([2100n, domainHi, domainLo, poolHi, poolLo, coinHi, coinLo, 1n]);
+  const deployment = poseidon([2100n, domainHi, domainLo, poolHi, poolLo, coinHi, coinLo, BigInt(version)]);
 
   const buyerSeed = createHash("sha256").update("SUPERCUTS_BUYER_TEST_ONLY").digest();
   const sellerSeed = createHash("sha256").update("SUPERCUTS_SELLER_TEST_ONLY").digest();
@@ -55,11 +56,12 @@ export async function semanticFixtures() {
   const inputSpendSecret = 101n;
   const inputSalt = 102n;
   const inputSpendTag = poseidon([2006n, inputSpendSecret]);
-  const inputNote = poseidon([2010n, deployment, 100n, buyer[0], buyer[1], inputSpendTag, inputSalt]);
+  const inputAmount = version === 2 ? 10000000n : 100n;
+  const inputNote = poseidon([2010n, deployment, inputAmount, buyer[0], buyer[1], inputSpendTag, inputSalt]);
   const empty = tree(poseidon, [], 0);
   const deposited = tree(poseidon, [inputNote], 0);
   const depositStatement = Buffer.concat([
-    common(1), u64(100), fieldBytes(inputNote), fieldBytes(empty.root), u64(0), fieldBytes(deposited.root), u64(1),
+    common(1), u64(inputAmount), fieldBytes(inputNote), fieldBytes(empty.root), u64(0), fieldBytes(deposited.root), u64(1),
   ]);
   const deposit = {
     statement: [...depositStatement], ...digestInputs(depositStatement),
@@ -75,8 +77,8 @@ export async function semanticFixtures() {
   const serviceDigestHi = 504n;
   const settlementNonceLo = 505n;
   const settlementNonceHi = 506n;
-  const paymentAmount = 60n;
-  const changeAmount = 40n;
+  const paymentAmount = version === 2 ? 3000000n : 60n;
+  const changeAmount = inputAmount - paymentAmount;
   const blinding = 507n;
   const expiry = 1900000000000n;
   const sellerSpendSecret = 601n;
@@ -116,7 +118,7 @@ export async function semanticFixtures() {
     sellerAx: seller[0], sellerAy: seller[1], recipientSpendTag,
     buyerR8x: buyerSig.R8x, buyerR8y: buyerSig.R8y, buyerS: buyerSig.S,
     sellerR8x: sellerSig.R8x, sellerR8y: sellerSig.R8y, sellerS: sellerSig.S,
-    inputAmount: 100n, inputSalt, inputSpendSecret, inputLeafIndex: 0n,
+    inputAmount, inputSalt, inputSpendSecret, inputLeafIndex: 0n,
     inputPath: deposited.pathElements, changeAmount, changeSpendSecret, changeSalt,
     paymentAppendPath: paymentAppend.pathElements, changeAppendPath: changeAppend.pathElements,
   };
@@ -124,11 +126,19 @@ export async function semanticFixtures() {
 
   const withdrawalNullifier = poseidon([2011n, deployment, sellerSpendSecret, paymentNote]);
   const recipient = bytes32(0x77);
-  const withdrawStatement = Buffer.concat([
-    common(3), fieldBytes(finalTree.root), fieldBytes(withdrawalNullifier), recipient, u64(paymentAmount),
-  ]);
+  const exitAmount = version === 2 ? BigInt(options.exitAmount ?? 1000000n) : paymentAmount;
+  const exitChangeAmount = paymentAmount - exitAmount;
+  const exitChangeSpendSecret = 801n;
+  const exitChangeSalt = 802n;
+  const exitChangeTag = poseidon([2006n, exitChangeSpendSecret]);
+  const exitChangeNote = poseidon([2010n, deployment, exitChangeAmount, seller[0], seller[1], exitChangeTag, exitChangeSalt]);
+  const exitTree = tree(poseidon, [inputNote, paymentNote, changeNote, exitChangeNote], 3);
+  const withdrawStatement = version === 2
+    ? Buffer.concat([common(3), fieldBytes(finalTree.root), fieldBytes(withdrawalNullifier), recipient, u64(exitAmount), Buffer.from([options.exactExit ? 1 : 0]), fieldBytes(exitChangeNote), u64(3), fieldBytes(exitTree.root), u64(4)])
+    : Buffer.concat([common(3), fieldBytes(finalTree.root), fieldBytes(withdrawalNullifier), recipient, u64(paymentAmount)]);
   const withdraw = {
     statement: [...withdrawStatement], ...digestInputs(withdrawStatement), ownerAx: seller[0], ownerAy: seller[1],
+    ...(version === 2 ? { inputAmount: paymentAmount, changeAmount: exitChangeAmount, changeSpendSecret: exitChangeSpendSecret, changeSalt: exitChangeSalt, appendSiblings: tree(poseidon, [inputNote, paymentNote, changeNote], 3).pathElements } : {}),
     spendSecret: sellerSpendSecret, salt: paymentSalt, leafIndex: 1n, pathElements: finalTree.pathElements,
   };
   return strings({ deposit, transfer, withdraw, public: {

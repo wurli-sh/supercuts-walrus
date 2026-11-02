@@ -11,7 +11,7 @@ import { ProtocolEngine } from "../src/protocol-engine.js";
 import { Groth16Prover } from "../src/prover.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const deployment = JSON.parse(readFileSync(resolve(root, "config/phase1.testnet.json"), "utf8")) as any;
+const deployment = JSON.parse(readFileSync(resolve(root, "config/pool-v1.testnet.json"), "utf8")) as any;
 
 test("live protocol engine reproduces the pinned root and creates a dynamic deposit witness", async () => {
   const engine = await ProtocolEngine.create(deployment);
@@ -38,7 +38,7 @@ test("live prover doctor verifies every pinned zkey and prepared verifying key",
 test("live initialization provisions separate encrypted signing and transport identities", () => {
   const directory = mkdtempSync(join(tmpdir(), "supercuts-live-profile-")), suiKey = join(directory, "sui.key"), tatumKey = join(directory, "tatum.key"), home = join(directory, "buyer");
   writeFileSync(suiKey, Ed25519Keypair.generate().getSecretKey(), { mode: 0o600 }); writeFileSync(tatumKey, "test-key-not-used", { mode: 0o600 }); chmodSync(directory, 0o700);
-  const result = initialize(home, { role: "buyer", "deployment-config": resolve(root, "config/phase1.testnet.json"), "sui-key-file": suiKey, "tatum-key-file": tatumKey, "write-grpc": "https://fullnode.testnet.sui.io:443", "tatum-grpc": "https://example.invalid:443", rapidsnark: resolve(root, "circuits/build/tools/rapidsnark-src/build_prover/src/prover") });
+  const result = initialize(home, { role: "buyer", "deployment-config": resolve(root, "config/pool-v1.testnet.json"), "sui-key-file": suiKey, "tatum-key-file": tatumKey, "write-grpc": "https://fullnode.testnet.sui.io:443", "tatum-grpc": "https://example.invalid:443", rapidsnark: resolve(root, "circuits/build/tools/rapidsnark-src/build_prover/src/prover") });
   assert.equal(result.data.mock, false); const app = new Phase3App(home);
   try { assert.equal(app.profile.version, 2); assert.equal(app.store.getSecret("identity:babyjub-seed")?.length, 32); assert.notDeepEqual(app.store.getSecret("identity:x25519-private"), app.store.getSecret("identity:x25519-public")); assert.equal(app.store.getSecret("live:tatum-api-key")?.toString(), "test-key-not-used"); } finally { app.close(); }
 });

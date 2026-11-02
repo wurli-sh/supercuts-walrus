@@ -7,7 +7,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repository = resolve(root, "..");
 const config = JSON.parse(readFileSync(process.env.PHASE1_CONFIG
   ? resolve(repository, process.env.PHASE1_CONFIG)
-  : resolve(repository, "config/phase1.testnet.json")));
+  : resolve(repository, "config/pool-v1.testnet.json")));
 const [stage, ...options] = process.argv.slice(2);
 const execute = options.includes("--execute");
 const append = options.includes("--append");

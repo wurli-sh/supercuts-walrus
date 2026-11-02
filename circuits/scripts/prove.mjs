@@ -7,11 +7,12 @@ import { semanticFixtures } from "./semantic.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repository = resolve(root, "..");
-const build = resolve(root, "build");
+const v2 = process.argv.includes("--v2");
+const build = resolve(root, "build", ...(v2 ? ["v2"] : []));
 const snarkjs = resolve(root, "node_modules/.bin/snarkjs");
-const phase1 = resolve(build, "pot19_final.ptau");
-const phase2 = resolve(build, "pot19_phase2.ptau");
-const fixtures = await semanticFixtures();
+const phase1 = resolve(root, "build", "pot19_final.ptau");
+const phase2 = resolve(root, "build", "pot19_phase2.ptau");
+const fixtures = await semanticFixtures(v2 ? 2 : 1);
 
 function run(command, args, cwd = root) {
   execFileSync(command, args, { cwd, stdio: "inherit" });
@@ -27,7 +28,7 @@ if (!existsSync(phase2)) {
 }
 
 const manifest = {
-  version: "supercuts-phase1-v1",
+  version: v2 ? "supercuts-pool-v2" : "supercuts-phase1-v1",
   testOnly: true,
   warning: "Per-circuit contributions are locally generated and unaudited; never use these keys with production assets.",
   powersOfTauSha256: sha256(phase2),
@@ -35,28 +36,29 @@ const manifest = {
 };
 
 for (const name of ["deposit", "transfer", "withdraw"]) {
-  const output = resolve(build, "proofs", name);
+  const artifact = `${name}${v2 ? "_v2" : ""}`;
+  const output = resolve(build, "proofs", artifact);
   mkdirSync(output, { recursive: true });
   const input = resolve(output, "input.json");
   const witness = resolve(output, "witness.wtns");
   const initialZkey = resolve(output, "initial.zkey");
-  const finalZkey = resolve(output, `${name}.zkey`);
+  const finalZkey = resolve(output, `${artifact}.zkey`);
   const verificationKey = resolve(output, "verification-key.json");
   const proof = resolve(output, "proof.json");
   const publicInputs = resolve(output, "public.json");
   const suiVector = resolve(output, "sui-vector.json");
   if (!existsSync(suiVector)) {
     writeFileSync(input, `${JSON.stringify(fixtures[name])}\n`);
-    run(snarkjs, ["groth16", "setup", resolve(build, `${name}.r1cs`), phase2, initialZkey]);
+    run(snarkjs, ["groth16", "setup", resolve(build, `${artifact}.r1cs`), phase2, initialZkey]);
     run(snarkjs, [
       "zkey", "contribute", initialZkey, finalZkey,
-      `-n=supercuts-${name}-test-only`,
+      `-n=supercuts-${artifact}-test-only`,
       `-e=${randomBytes(64).toString("hex")}`,
     ]);
     run(snarkjs, ["zkey", "export", "verificationkey", finalZkey, verificationKey]);
     run("node", [
-      resolve(build, `${name}_js/generate_witness.js`),
-      resolve(build, `${name}_js/${name}.wasm`), input, witness,
+      resolve(build, `${artifact}_js/generate_witness.js`),
+      resolve(build, `${artifact}_js/${artifact}.wasm`), input, witness,
     ]);
     run(snarkjs, ["groth16", "prove", finalZkey, witness, proof, publicInputs]);
     run(snarkjs, ["groth16", "verify", verificationKey, publicInputs, proof]);
@@ -67,10 +69,10 @@ for (const name of ["deposit", "transfer", "withdraw"]) {
   } else {
     console.log(`reusing verified ${name} Sui vector`);
   }
-  run(snarkjs, ["zkey", "verify", resolve(build, `${name}.r1cs`), phase2, finalZkey]);
+  run(snarkjs, ["zkey", "verify", resolve(build, `${artifact}.r1cs`), phase2, finalZkey]);
 
   manifest.circuits[name] = {
-    r1csSha256: sha256(resolve(build, `${name}.r1cs`)),
+    r1csSha256: sha256(resolve(build, `${artifact}.r1cs`)),
     zkeySha256: sha256(finalZkey),
     verificationKeySha256: sha256(resolve(output, "verifying-key.bin")),
     proofSha256: sha256(resolve(output, "proof.bin")),

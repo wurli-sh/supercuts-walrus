@@ -4,9 +4,12 @@
   "version": "0.1.0",
   "scripts": {
     "compile": "node scripts/build.mjs",
+    "compile:v2": "node scripts/build.mjs --v2",
+    "test:v2": "node --test scripts/v2-witness.check.mjs",
     "fixtures:live": "node scripts/create-live-fixtures.mjs",
     "fixtures:live:append": "node scripts/create-live-fixtures.mjs --append",
     "prove:test-only": "node scripts/prove.mjs",
+    "prove:v2:test-only": "node scripts/prove.mjs --v2",
     "prove:transaction": "node scripts/prove-transaction.mjs",
     "setup:rapidsnark": "node scripts/setup-rapidsnark.mjs",
     "submit:live": "node scripts/submit-live-demo.mjs",

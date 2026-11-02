@@ -24,7 +24,7 @@ const zkey = resolve(build, `proofs/${name}/${name}.zkey`);
 const verificationKey = resolve(build, `proofs/${name}/verification-key.json`);
 const witnessGenerator = resolve(build, `${name}_js/generate_witness.js`);
 const wasm = resolve(build, `${name}_js/${name}.wasm`);
-const config = JSON.parse(readFileSync(resolve(repository, "config/phase1.testnet.json")));
+const config = JSON.parse(readFileSync(resolve(repository, "config/pool-v1.testnet.json")));
 const expected = config.artifacts?.[name];
 
 function sha256(path) {

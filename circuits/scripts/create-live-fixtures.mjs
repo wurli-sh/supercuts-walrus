@@ -12,7 +12,7 @@ const output = process.env.LIVE_FIXTURE_DIR
   : resolve(root, append ? "build/live-fixtures-append" : "build/live-fixtures");
 const config = JSON.parse(readFileSync(process.env.PHASE1_CONFIG
   ? resolve(repository, process.env.PHASE1_CONFIG)
-  : resolve(repository, "config/phase1.testnet.json")));
+  : resolve(repository, "config/pool-v1.testnet.json")));
 const scalar = (bits = 248) => {
   const value = BigInt(`0x${randomBytes(Math.ceil(bits / 8)).toString("hex")}`) & ((1n << BigInt(bits)) - 1n);
   return value || 1n;

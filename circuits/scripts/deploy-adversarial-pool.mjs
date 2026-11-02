@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repository = resolve(root, "..");
-const base = JSON.parse(readFileSync(resolve(repository, "config/phase1.testnet.json")));
+const base = JSON.parse(readFileSync(resolve(repository, "config/pool-v1.testnet.json")));
 const execute = process.argv.includes("--execute");
 const domain = randomBytes(32);
 const bytes = (value) => `[${[...value].join(",")}]`;

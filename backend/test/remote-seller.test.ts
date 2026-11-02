@@ -73,7 +73,7 @@ test("signed encrypted negotiation and quote survive a remote seller restart", a
   const reservation = createServer(); await new Promise<void>((done) => reservation.listen(0, "127.0.0.1", done));
   const sellerAddress = reservation.address(); assert(sellerAddress && typeof sellerAddress === "object");
   const origin = `http://127.0.0.1:${sellerAddress.port}`; await new Promise<void>((done) => reservation.close(() => done()));
-  const deployment = resolve(fileURLToPath(import.meta.url), "../../../config/phase1.testnet.json");
+  const deployment = resolve(fileURLToPath(import.meta.url), "../../../config/pool-v1.testnet.json");
   const buyerSigner = Ed25519Keypair.generate(), sellerSigner = Ed25519Keypair.generate();
   const buyerKeyPath = join(root, "buyer.key"), sellerKeyPath = join(root, "seller.key"), tatumKeyPath = join(root, "tatum.key");
   const { writeFileSync } = await import("node:fs");

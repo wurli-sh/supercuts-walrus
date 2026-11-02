@@ -10,6 +10,52 @@ pub const COMMON_BYTES: usize = 106;
 pub const DEPOSIT_BYTES: usize = COMMON_BYTES + 120;
 pub const TRANSFER_BYTES: usize = COMMON_BYTES + 248;
 pub const WITHDRAW_BYTES: usize = COMMON_BYTES + 104;
+pub const WITHDRAW_V2_BYTES: usize = COMMON_BYTES + 185;
+pub const STANDARD_EXIT_MIST: u64 = 1_000_000;
+pub const V2_DEPOSIT_AMOUNTS: [u64; 2] = [10_000_000, 100_000_000];
+
+/// The v2 withdrawal consumes one note and appends one private change note.
+/// An exact exit exposes its nonstandard amount by design.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WithdrawV2 {
+    pub deployment: Deployment,
+    pub root: [u8; 32],
+    pub note_nullifier: [u8; 32],
+    pub recipient: [u8; 32],
+    pub amount: u64,
+    pub exact_exit: bool,
+    pub change_commitment: [u8; 32],
+    pub old_index: u64,
+    pub new_root: [u8; 32],
+    pub new_index: u64,
+}
+
+impl WithdrawV2 {
+    pub fn encode(&self) -> Result<Vec<u8>, &'static str> {
+        if self.deployment.verifier_version != 2 { return Err("v2 verifier version required"); }
+        if self.amount == 0 || (!self.exact_exit && self.amount != STANDARD_EXIT_MIST) { return Err("invalid exit amount"); }
+        if self.old_index.checked_add(1) != Some(self.new_index) { return Err("invalid tree transition"); }
+        let mut out = Vec::with_capacity(WITHDRAW_V2_BYTES);
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&[2, StatementKind::Withdraw as u8]);
+        out.extend_from_slice(&self.deployment.domain);
+        out.extend_from_slice(&self.deployment.pool_id);
+        out.extend_from_slice(&self.deployment.coin_type_hash);
+        out.extend_from_slice(&self.deployment.verifier_version.to_be_bytes());
+        out.extend_from_slice(&self.root);
+        out.extend_from_slice(&self.note_nullifier);
+        out.extend_from_slice(&self.recipient);
+        out.extend_from_slice(&self.amount.to_be_bytes());
+        out.push(u8::from(self.exact_exit));
+        out.extend_from_slice(&self.change_commitment);
+        out.extend_from_slice(&self.old_index.to_be_bytes());
+        out.extend_from_slice(&self.new_root);
+        out.extend_from_slice(&self.new_index.to_be_bytes());
+        debug_assert_eq!(out.len(), WITHDRAW_V2_BYTES);
+        Ok(out)
+    }
+    pub fn digest(&self) -> Result<[u8; 32], &'static str> { Ok(Sha256::digest(self.encode()?).into()) }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
@@ -63,6 +109,21 @@ pub enum Statement {
 }
 
 impl Statement {
+    pub fn encode_v2(&self) -> Result<Vec<u8>, &'static str> {
+        let deployment = match self {
+            Self::Deposit { deployment, amount, .. } => {
+                if !V2_DEPOSIT_AMOUNTS.contains(amount) { return Err("invalid v2 deposit amount"); }
+                deployment
+            }
+            Self::Transfer { deployment, .. } => deployment,
+            Self::Withdraw { .. } => return Err("use WithdrawV2 for v2 exits"),
+        };
+        if deployment.verifier_version != 2 { return Err("v2 verifier version required"); }
+        let mut encoded = self.encode();
+        encoded[4] = 2;
+        Ok(encoded)
+    }
+
     pub fn kind(&self) -> StatementKind {
         match self {
             Self::Deposit { .. } => StatementKind::Deposit,
@@ -303,5 +364,43 @@ mod tests {
     fn malformed_fixed_bytes_are_rejected() {
         assert!(matches!(hex32("01"), Err(Hex32Error::Length(2))));
         assert!(matches!(hex32(&"g".repeat(64)), Err(Hex32Error::Hex(_))));
+    }
+
+    #[test]
+    fn v2_exit_statement_binds_mode_and_change() {
+        let mut exit = WithdrawV2 {
+            deployment: Deployment { verifier_version: 2, ..deployment() },
+            root: fill(0x55), note_nullifier: fill(0x46), recipient: fill(0x77),
+            amount: STANDARD_EXIT_MIST, exact_exit: false, change_commitment: fill(0x88),
+            old_index: 7, new_root: fill(0x99), new_index: 8,
+        };
+        let encoded = exit.encode().unwrap();
+        assert_eq!(encoded.len(), WITHDRAW_V2_BYTES);
+        assert_eq!(encoded[4], 2);
+        assert_eq!(encoded[210], 0);
+        let digest = exit.digest().unwrap();
+        exit.change_commitment[0] ^= 1;
+        assert_ne!(exit.digest().unwrap(), digest);
+        exit.exact_exit = true;
+        assert_eq!(exit.encode().unwrap()[210], 1);
+        exit.amount = 2_000_000;
+        assert!(exit.encode().is_ok());
+        exit.exact_exit = false;
+        assert!(exit.encode().is_err());
+        exit.new_index = 7;
+        assert!(exit.encode().is_err());
+    }
+
+    #[test]
+    fn v2_deposit_uses_separate_version_and_standard_amount() {
+        let mut deposit = Statement::Deposit {
+            deployment: Deployment { verifier_version: 2, ..deployment() },
+            amount: V2_DEPOSIT_AMOUNTS[0], note_commitment: fill(0x44),
+            transition: Transition { old_root: fill(0x55), old_index: 0, new_root: fill(0x66), new_index: 1 },
+        };
+        assert_eq!(deposit.encode()[4], 1);
+        assert_eq!(deposit.encode_v2().unwrap()[4], 2);
+        if let Statement::Deposit { amount, .. } = &mut deposit { *amount = 1; }
+        assert!(deposit.encode_v2().is_err());
     }
 }

@@ -29,7 +29,7 @@ interface Phase1Config {
 type DecimalRecord = Record<string, string>;
 
 const sealConfig = await load<SealConfig>("config/seal-policy.testnet.json");
-const phase1 = await load<Phase1Config>("config/phase1.testnet.json");
+const phase1 = await load<Phase1Config>("config/pool-v1.testnet.json");
 const fixture = await load<DecimalRecord>("circuits/build/live-fixtures-append/transfer.json");
 const publicValues = await load<DecimalRecord>("circuits/build/live-fixtures-append/public.json");
 const transferDigest = "9GkRqDK6RYNEMBs3iEY1aa3HqNhZ6vxQViHTAvBfuGcv";

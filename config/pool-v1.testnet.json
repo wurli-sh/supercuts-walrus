@@ -1,0 +1,38 @@
+{
+  "network": "testnet",
+  "sender": "0x66fdfe84ff521627c93910c93ec0bc26934ee1fef3a1a0a5ce14b7dc4567ec00",
+  "coinType": "0x2::sui::SUI",
+  "coinTypeHash": "be4507e04f555448ca05c0c9f8345c5ea9f3e40e8616a20f5d5c18b40ef399eb",
+  "packageId": "0xf887433ddfd1068f6df3020cd757939b99ceb418f0d8b9924092b01c7aee846e",
+  "packagePublishTransaction": "6qDfLyy3HjB6moYb32JqSCH6KAeUSE78zThzSXDZmA4e",
+  "poolId": "0x873e37b4745316f21a2780893f5fc36f87da559b08923fb4dad6237cd2e95d98",
+  "poolCreateTransaction": "7D4q2VQDx35aAarLVzUgq7PrZ3y38ZCuEdfvpKb59ZV9",
+  "deploymentCheckpoint": "400806621",
+  "deploymentDomain": "124998efcdbc869bb75638c05ab6b4b8f7cc8a1b7a278c9c50a755dd406385a0",
+  "initialRoot": "2134e76ac5d21aab186c2be1dd8f84ee880a1e46eaf712f9d371b6df22191f3e",
+  "verifierVersion": 1,
+  "testOnly": true,
+  "artifactManifest": "circuits/build/proving-manifest.json",
+  "powersOfTau": {
+    "url": "https://circom.info/powersOfTau28_hez_final_19.ptau",
+    "blake2b512": "bca9d8b04242f175189872c42ceaa21e2951e0f0f272a0cc54fc37193ff6648600eaf1c555c70cdedfaf9fb74927de7aa1d33dc1e2a7f1a50619484989da0887",
+    "sha256": "3f428d1a407e4704ef906960e000b03089e5e6ec29bf65b07bb5e3de005f4700"
+  },
+  "artifacts": {
+    "deposit": {
+      "r1csSha256": "0639967a15d6620d406c39dec98e51e4eae582438514420d78106ab4a42e4fc5",
+      "zkeySha256": "f6a06251552ef9e835389e09e95076e4bb44f15918d83111217f0f5656c24255",
+      "verifyingKeySha256": "5dbdda85143b3756355ea88554e2e3bdd56c8732ca4ca68674aa6d6fbb16e4fd"
+    },
+    "transfer": {
+      "r1csSha256": "fd5055fe7073f2ef6f6097e935b500f306f1eec10a9e5f5e03b3d7e9af0666c8",
+      "zkeySha256": "66259d5b9a7c2297e9f99ce38867856db9559cc4573b8fe036d51f271a8d9ff0",
+      "verifyingKeySha256": "8c89c32a76a16dc14f5ac9aab362f7391e163fa89fbc9a256cb3498aec2bd325"
+    },
+    "withdraw": {
+      "r1csSha256": "ff3fb629496f85515872ec5eb00bb199832a4d5138febc321d379d045e354fbb",
+      "zkeySha256": "5a340940e79dbb9979907d283100c95748e27841d28f0f76ce88018f2dbc7f45",
+      "verifyingKeySha256": "44413f15569af9b0f95a84da6d1430601d332de509266b605bfc9587dc467372"
+    }
+  }
+}
