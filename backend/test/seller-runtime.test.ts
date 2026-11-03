@@ -50,5 +50,14 @@ test("seller handler runs only after exact finalized payment and caches one deli
     assert.equal((responses[0]!.result.capabilities as unknown[]).length, 1);
     assert.equal(responses[1]!.result.blobId, "delivery-blob");
     assert.equal(handled, 1);
+    const renewedManifest = createCapabilityManifest({ capabilityId: manifest.capabilityId, sellerId: manifest.sellerId, capability: manifest.capability, description: "renewed service", inputSchema: manifest.inputSchema, outputSchema: manifest.outputSchema, supportedRails: manifest.supportedRails, priceBand: manifest.priceBand, asset: manifest.asset, endpoint: manifest.endpoint, expiresAt: manifest.expiresAt + 120_000 });
+    blobs.set("renewed-blob", Buffer.from(JSON.stringify(renewedManifest)));
+    const renewed = { manifest: renewedManifest, manifestBlobId: "renewed-blob", transportPublicKey: registration.transportPublicKey, sellerSignature: (await signer.signPersonalMessage(Buffer.from(`${renewedManifest.manifestHash}:${registration.transportPublicKey}`))).signature };
+    await assert.rejects(() => runtime.registerCapability(renewed, async () => ({ artifact: Buffer.from("new"), contentType: "text/plain", metadata: { format: "text" } })), { code: "SELLER_CAPABILITY_CONFLICT" });
+    const realNow = Date.now;
+    Date.now = () => manifest.expiresAt + 1;
+    try { await runtime.registerCapability(renewed, async () => ({ artifact: Buffer.from("new"), contentType: "text/plain", metadata: { format: "text" } })); }
+    finally { Date.now = realNow; }
+    assert.equal(runtime.catalog()[0]?.manifest.manifestHash, renewedManifest.manifestHash);
   } finally { store.close(); }
 });

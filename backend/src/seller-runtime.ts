@@ -59,8 +59,12 @@ export class SellerRuntime {
     if (canonicalJson(remote) !== canonicalJson(registration.manifest)) fail("CAPABILITY_BLOB_MISMATCH", "Walrus capability blob differs from the seller's signed manifest");
     const id = registration.manifest.capabilityId;
     const prior = this.#handlers.get(id);
-    if (prior && prior.registration.manifest.manifestHash !== registration.manifest.manifestHash) fail("SELLER_CAPABILITY_CONFLICT", "capability ID is already registered with different terms");
-    this.store.putSecretOnce(`seller:capability:${id}`, Buffer.from(canonicalJson(registration)));
+    const saved = this.store.getSecret(`seller:capability:${id}`);
+    const old = saved ? JSON.parse(saved.toString()) as SignedCapabilityRegistration : prior?.registration;
+    if (old && old.manifest.manifestHash !== registration.manifest.manifestHash) {
+      if (old.manifest.expiresAt > Date.now() || old.manifest.sellerId !== registration.manifest.sellerId || old.manifest.capabilityId !== id) fail("SELLER_CAPABILITY_CONFLICT", "an active capability cannot be replaced with different terms");
+      this.store.putSecret(`seller:capability:${id}`, Buffer.from(canonicalJson(registration)));
+    } else this.store.putSecretOnce(`seller:capability:${id}`, Buffer.from(canonicalJson(registration)));
     this.#handlers.set(id, { registration, handler });
   }
 

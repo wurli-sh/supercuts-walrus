@@ -110,7 +110,8 @@ handlers. No seller state or key is copied into a buyer home.
 For the full video, use the live v2 pool and Mainnet-backed Walrus services.
 Prefund the buyer before negotiation; show a public x402 deal and its artifact;
 complete ten encrypted Memory writes or clearly label ten reused completed
-live writes; recall the owner privacy rule; settle a confidential deal; and
+live writes with `supercuts-demo reuse-memories --buyer-home <buyer-home>
+--events <event-path>`; recall the owner privacy rule; settle a confidential deal; and
 queue the confidential seller's standard delayed exit after recovering its
 note. The seller must use its own role home. The Codex event stream contains
 redacted `deal-lifecycle` evidence, never task plaintext, key material,

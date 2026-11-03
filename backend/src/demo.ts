@@ -121,6 +121,10 @@ function check(): Record<string, unknown> {
     try {
       if (seller.profile.role !== "seller" || seller.profile.mock || seller.profile.verifierVersion !== 2) fail("LIVE_PROFILE_REQUIRED", "queued exit must belong to a separate live v2 seller");
       const journal = new DealJournal(buyer.store);
+      for (const event of memories) {
+        const row = buyer.store.db.prepare("SELECT 1 FROM memory_jobs WHERE blob_id=? AND status='complete'").get(String(event.publicDetails.blobId));
+        if (!row) fail("DEMO_EVIDENCE_MISMATCH", "logged memory is absent from completed buyer writes");
+      }
       for (const event of rails.values()) {
         const dealId = String(event.publicDetails.dealId ?? ""), row = buyer.store.db.prepare("SELECT operation_id FROM deal_operations WHERE deal_id=?").get(dealId) as { operation_id: string } | undefined;
         if (!row) fail("DEMO_EVIDENCE_MISMATCH", "logged deal is absent from buyer journal");
@@ -162,6 +166,20 @@ function check(): Record<string, unknown> {
     }
   }
   return { healthy: true, checked, secretScan: "pass" };
+}
+
+function reuseMemories(): Record<string, unknown> {
+  const home = resolve(value("buyer-home")), path = resolve(value("events")), buyer = new Phase3App(home);
+  try {
+    if (buyer.profile.role !== "buyer" || buyer.profile.mock) fail("LIVE_PROFILE_REQUIRED", "memory reuse requires a live buyer home");
+    const completed = buyer.store.db.prepare("SELECT operation_id,blob_id FROM memory_jobs WHERE operation_id LIKE 'memory-%' AND status='complete' AND blob_id IS NOT NULL ORDER BY created_at DESC").all() as Array<{ operation_id: string; blob_id: string }>;
+    const selected = [...new Map(completed.filter((item) => !item.blob_id.startsWith("mockwalrus_")).map((item) => [item.blob_id, item])).values()].slice(0, 10);
+    if (selected.length < 10) fail("DEMO_MEMORIES_MISSING", "buyer has fewer than ten completed live advisory memories");
+    const existing = readDemoEvents(path), runId = existing[0]?.runId ?? fail("DEMO_EVENTS_MISSING", "start the Codex MCP event stream before recording reused memories");
+    const log = new DemoEventLog(path, runId);
+    for (const item of selected) log.append({ actor: "buyer", stage: "memory", status: "complete", publicDetails: { blobId: item.blob_id, kind: "reused-live-memory", reused: true }, evidenceHashes: [], explorerLinks: [] });
+    return { reused: selected.length, eventPath: path, runId };
+  } finally { buyer.close(); }
 }
 
 async function live(): Promise<Record<string, unknown>> {
@@ -256,5 +274,5 @@ async function replay(): Promise<Record<string, unknown>> {
   return { label: "recorded funded run", freshTransaction: false, events };
 }
 
-try { const data = command === "setup" ? await setup() : command === "doctor" ? await doctor() : command === "seed-policy" ? await seedPolicy() : command === "check" ? check() : command === "live" ? await live() : command === "replay" ? await replay() : fail("COMMAND_UNKNOWN", "use setup, doctor, seed-policy, live, replay, or check"); send(data); }
+try { const data = command === "setup" ? await setup() : command === "doctor" ? await doctor() : command === "seed-policy" ? await seedPolicy() : command === "reuse-memories" ? reuseMemories() : command === "check" ? check() : command === "live" ? await live() : command === "replay" ? await replay() : fail("COMMAND_UNKNOWN", "use setup, doctor, seed-policy, reuse-memories, live, replay, or check"); send(data); }
 catch (error) { process.stdout.write(`${JSON.stringify(errorOutput(error))}\n`); process.exitCode = 1; }
