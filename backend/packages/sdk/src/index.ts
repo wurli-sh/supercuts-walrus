@@ -16,6 +16,8 @@ export interface ExecuteDealInput { operationId: string; capabilityId?: string; 
 export interface DealView { version: "supercuts.deal.v2"; dealId: string; operationId: string; state: DealState; rail?: Rail; visibility?: "shielded-direct-payment" | "public-x402"; planHash?: string; paymentDigest?: string; deliveryHash?: string; evidence: { agreement: "pending" | "verified"; payment: "pending" | "finalized"; delivery: "pending" | "verified"; outcomeMemory: "pending" | "indexed" | "unresolved" }; nextAction?: "resume" | "fund_buyer" | "owner_approval" | "owner_review"; }
 export interface DealEvidenceView { version: "supercuts.deal-evidence.v1"; dealId: string; transcriptBlobIds: string[]; agreementBlobId?: string; deliveryBlobId?: string; outcomeMemoryBlobId?: string; ciphertextReadback: "pending" | "verified" | "unresolved"; inventory: "pending" | "indexed" | "missing" | "unresolved"; paymentFinalized: boolean; paymentDigest?: string; }
 export interface DealDelivery { dealId: string; contentType: string; artifactSha256: string; artifact: Uint8Array; }
+export interface DealPolicySummary { perDealCeiling: string; totalBudget: string; remainingBudget: string; expiresAt: number; defaultRail: "shielded"; allowPublicX402: boolean; allowedAssets: string[]; allowedCapabilityIds?: string[]; allowedCapabilityClasses?: string[]; }
+export interface DealCatalogEntry { origin: string; manifest: CapabilityManifest; manifestBlobId: string; }
 
 export interface CapabilityManifest {
   protocol: "supercuts.capability.v1"; capabilityId: string; sellerId: string; capability: string; description: string;
@@ -134,6 +136,8 @@ const queuedExit = (value: any): QueuedExit => ({ ...value, amount: BigInt(value
 const exitArgs = (input: { operationId: OperationId; commitment: string; amount: bigint; exactExit?: boolean; windowStart: number; windowEnd: number }): Arguments => ({ "operation-id": input.operationId, commitment: input.commitment, amount: input.amount.toString(), "exact-exit": input.exactExit === true, "window-start": String(input.windowStart), "window-end": String(input.windowEnd) });
 
 export class BuyerClient extends RoleClient {
+  async listDealCapabilities(): Promise<DealCatalogEntry[]> { const result = await this.seam.call<{ capabilities: DealCatalogEntry[] }>("deal.catalog"); return result.capabilities; }
+  async getDealPolicy(): Promise<DealPolicySummary> { return this.seam.call("deal.policy"); }
   static async connect(config: SupercutsSdkConfig): Promise<BuyerClient> { const client = new BuyerClient(config); await client.ensureCompatible(); const report = await client.doctor(); if (report.role !== "buyer") throw new SupercutsSdkError("SDK_ROLE_MISMATCH", `expected buyer profile, found ${report.role}`, false); return client; }
   async executeDeal(input: ExecuteDealInput): Promise<DealView> { return this.seam.call("deal.execute", { input }); }
   async getDeal(operationId: string): Promise<DealView> { return this.seam.call("deal.get", { operationId }); }

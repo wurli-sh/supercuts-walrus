@@ -51,6 +51,23 @@ export class LiveDealPorts implements DealPorts {
     if (!response.ok || !value || typeof value !== "object" || Array.isArray(value)) fail("DEAL_SELLER_RESPONSE_INVALID", `seller returned HTTP ${response.status}`);
     return value as Record<string, unknown>;
   }
+  async catalog(): Promise<Array<{ origin: string; registration: SignedCapabilityRegistration }>> {
+    const found: Array<{ origin: string; registration: SignedCapabilityRegistration }> = [];
+    for (const origin of this.#origins) {
+      const catalog = await this.request(origin.toString(), "/v2/catalog");
+      if (!Array.isArray(catalog.capabilities) || catalog.capabilities.length > 100) fail("SELLER_CATALOG_INVALID", "seller catalog is invalid");
+      for (const item of catalog.capabilities as unknown[]) {
+        const registration = item as SignedCapabilityRegistration;
+        await verifySignedCapability(registration);
+        if (new URL(registration.manifest.endpoint).origin !== origin.origin) fail("SELLER_CATALOG_INVALID", "signed capability points outside catalog seller origin");
+        if (!this.mandate.allowedCounterparties.includes(registration.manifest.sellerId) || this.mandate.allowedCapabilityIds && !this.mandate.allowedCapabilityIds.includes(registration.manifest.capabilityId) || this.mandate.allowedCapabilityClasses && !this.mandate.allowedCapabilityClasses.includes(registration.manifest.capability)) continue;
+        const readback = await this.readBlob(registration.manifestBlobId);
+        if (canonicalJson(JSON.parse(Buffer.from(readback).toString())) !== canonicalJson(registration.manifest)) fail("CAPABILITY_BLOB_MISMATCH", "Walrus capability blob differs from signed manifest");
+        found.push({ origin: origin.origin, registration });
+      }
+    }
+    return found;
+  }
   async discover(input: ExecuteDealInput): Promise<SignedCapabilityRegistration> {
     const candidates: SignedCapabilityRegistration[] = [];
     for (const origin of this.#origins) {
@@ -123,7 +140,7 @@ export class LiveDealPorts implements DealPorts {
     const request: ServiceRequest = { dealId: input.operationId, capabilityId: plan.capabilityId, input: input.input, requestId: prepared.sessionId, paymentDigest: payment.transactionDigest, agreementHash: prepared.agreementHash, agreedAmount: prepared.agreedAmount, rail: plan.rail };
     const ciphertext = wireEncrypt(key, prepared.sessionId, "fulfill", request), signer = this.signer();
     const signature = (await signer.signPersonalMessage(Buffer.from(`${prepared.sessionId}:${wireHash(Buffer.from(ciphertext, "base64"))}`))).signature;
-    const reply = await this.request(prepared.sellerOrigin, "/v2/fulfill", { sessionId: prepared.sessionId, ciphertext, buyerSignature: signature });
+    const reply = await this.request(prepared.sellerOrigin, "/v2/fulfill", { sessionId: prepared.sessionId, sellerId: plan.sellerId, ciphertext, buyerSignature: signature });
     if (reply.sessionId !== prepared.sessionId || typeof reply.ciphertext !== "string") return fail("DEAL_DELIVERY_UNVERIFIED", "seller delivery response is invalid");
     const receipt = wireDecrypt<SellerDelivery>(key, prepared.sessionId, "receipt", reply.ciphertext);
     if (receipt.dealId !== input.operationId || receipt.requestId !== prepared.sessionId) fail("DEAL_DELIVERY_UNVERIFIED", "seller delivery belongs to another deal");

@@ -2,6 +2,8 @@
 import { Phase3App, errorOutput, homePath, initialize, type Role } from "./phase3.js";
 import { DealJournal } from "./deal.js";
 import { createConfiguredDealEngine } from "./deal-adapter.js";
+import { loadMandate } from "./mandate.js";
+import { LiveDealPorts } from "./live-deal-ports.js";
 
 const PROTOCOL = 1;
 interface SeamRequest { protocol: number; requestId: string; method: string; home?: string; params?: Record<string, unknown>; }
@@ -40,6 +42,16 @@ process.stdin.on("end", async () => {
       if (request.method.startsWith("deal.")) {
         if (app.profile.role !== "buyer") throw Object.assign(new Error("deal methods require a buyer role home"), { code: "ROLE_FORBIDDEN" });
         const journal = new DealJournal(app.store);
+        if (request.method === "deal.catalog") {
+          const mandate = loadMandate(home);
+          const entries = await new LiveDealPorts(app, mandate).catalog();
+          return write(envelope(request.requestId, { ok: true, result: { capabilities: entries.map(({ origin, registration }) => ({ origin, manifest: registration.manifest, manifestBlobId: registration.manifestBlobId })) } }));
+        }
+        if (request.method === "deal.policy") {
+          const mandate = loadMandate(home), hasTable = Boolean(app.store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mandate_operations'").get());
+          const reserved = hasTable ? (app.store.db.prepare("SELECT amount FROM mandate_operations").all() as Array<{ amount: string }>).reduce((sum, row) => sum + BigInt(row.amount), 0n) : 0n;
+          return write(envelope(request.requestId, { ok: true, result: { perDealCeiling: mandate.perDealCeiling, totalBudget: mandate.totalRunBudget, remainingBudget: (BigInt(mandate.totalRunBudget) - reserved).toString(), expiresAt: mandate.expiresAt, defaultRail: "shielded", allowPublicX402: mandate.allowPublicX402 === true, allowedAssets: mandate.allowedAssets, allowedCapabilityIds: mandate.allowedCapabilityIds, allowedCapabilityClasses: mandate.allowedCapabilityClasses } }));
+        }
         if (request.method === "deal.execute") {
           const engine = await createConfiguredDealEngine(app);
           return write(envelope(request.requestId, { ok: true, result: await engine.execute(request.params?.input as never) }));

@@ -6,7 +6,7 @@
   "bin": {
     "supercuts": "dist/cli.js",
     "supercuts-demo": "dist/demo.js",
-    "supercuts-mcp": "dist/mcp.js",
+    "supercuts-mcp": "dist/mcp-bootstrap.js",
     "supercuts-resource": "dist/resource-server.js",
     "supercuts-seller-service": "dist/seller-service.js",
     "supercuts-seller-provision": "dist/seller-provision.js",
@@ -17,7 +17,8 @@
     "supercuts-v2-relayer": "dist/v2-relayer-cli.js",
     "supercuts-memory-worker": "dist/memory-worker.js",
     "supercuts-seller-live": "dist/seller-live-cli.js",
-    "supercuts-seller-register": "dist/seller-register-cli.js"
+    "supercuts-seller-register": "dist/seller-register-cli.js",
+    "supercuts-seller-v2-provision": "dist/seller-v2-provision.js"
   },
   "files": [
     "dist",

@@ -6,22 +6,24 @@ import { RemoteBuyer } from "./remote-buyer.js";
 import { DemoEventLog } from "./events.js";
 import { DealJournal, type ExecuteDealInput } from "./deal.js";
 import { createConfiguredDealEngine } from "./deal-adapter.js";
+import { LiveDealPorts } from "./live-deal-ports.js";
+import type { SettlementPlanV1 } from "./settlement.js";
 
 const home = homePath({});
 const app = new Phase3App(home);
 const mandate = loadMandate(home);
 const remote = app.profile.role === "buyer" && !app.profile.mock && process.env.SUPERCUTS_SELLER_URL ? new RemoteBuyer(app, mandate, process.env.SUPERCUTS_SELLER_URL) : undefined;
-const eventLog = remote && process.env.SUPERCUTS_EVENT_PATH && process.env.SUPERCUTS_RUN_ID ? new DemoEventLog(process.env.SUPERCUTS_EVENT_PATH, process.env.SUPERCUTS_RUN_ID) : undefined;
-if (eventLog) eventLog.append({ actor: "operator", stage: "run", status: "started", publicDetails: { flow: "codex-remote" }, evidenceHashes: [], explorerLinks: [] });
+const eventLog = process.env.SUPERCUTS_EVENT_PATH && process.env.SUPERCUTS_RUN_ID ? new DemoEventLog(process.env.SUPERCUTS_EVENT_PATH, process.env.SUPERCUTS_RUN_ID) : undefined;
+if (eventLog) eventLog.append({ actor: "operator", stage: "run", status: "started", publicDetails: { flow: remote ? "codex-remote" : "codex-deal-v2" }, evidenceHashes: [], explorerLinks: [] });
 const tools: Record<string, string> = {
-  buyer: "status,doctor,deal.execute,deal.get,deal.resume,capability.discover,settlement.plan,wallet.deposit,wallet.balance,wallet.recover,wallet.withdraw,wallet.exit.queue,wallet.exit.status,wallet.exit.finalize,offer.open,offer.propose,offer.accept,offer.show,pay.quote,pay.shielded,pay.x402,pay.status,resource.fetch,memory.remember,memory.recall,memory.status,memory.inventory,remote.catalog,remote.rank-briefs,remote.negotiate,remote.quote,remote.purchase-brief,remote.agreement,remote.settle-analysis,remote.delivery,remote.events,disclose",
+  buyer: "status,doctor,deal.catalog,deal.policy,deal.execute,deal.get,deal.resume,deal.evidence,deal.delivery,capability.discover,settlement.plan,wallet.deposit,wallet.balance,wallet.recover,wallet.withdraw,wallet.exit.queue,wallet.exit.status,wallet.exit.finalize,offer.open,offer.propose,offer.accept,offer.show,pay.quote,pay.shielded,pay.x402,pay.status,resource.fetch,memory.remember,memory.recall,memory.status,memory.inventory,remote.catalog,remote.rank-briefs,remote.negotiate,remote.quote,remote.purchase-brief,remote.agreement,remote.settle-analysis,remote.delivery,remote.events,disclose",
   seller: "status,doctor,capability.publish,wallet.balance,wallet.recover,wallet.withdraw,wallet.exit.queue,wallet.exit.status,wallet.exit.finalize,offer.counter,offer.show,pay.status,resource.serve,resource.fetch,memory.remember,memory.recall,memory.status",
   auditor: "status,doctor,audit.verify",
 };
 const send = (value: unknown) => process.stdout.write(`${JSON.stringify(value)}\n`);
 function logTool(name: string, data: Record<string, unknown>): void {
   if (!eventLog) return;
-  const append = (actor: "buyer" | "supercuts", stage: string, details: Record<string, unknown>, hashes: string[] = []) => eventLog.append({ actor, stage, status: "complete", publicDetails: details, evidenceHashes: hashes, explorerLinks: [] });
+  const append = (actor: "buyer" | "supercuts" | "confidential-seller", stage: string, details: Record<string, unknown>, hashes: string[] = []) => eventLog.append({ actor, stage, status: "complete", publicDetails: details, evidenceHashes: hashes, explorerLinks: [] });
   if (name === "remote.rank-briefs") append("buyer", "seller-selection", { winner: (data.winner as Record<string, unknown> | undefined)?.capabilityId, rankings: (data.rankings as Array<Record<string, unknown>> | undefined)?.map((item) => ({ capabilityId: item.capabilityId, score: item.score, priceMist: item.priceMist })) });
   if (name === "remote.negotiate") append("buyer", "negotiation", { capabilityId: data.capabilityId, sessionId: data.sessionId, requestBlobId: data.requestBlobId, replyBlobId: data.replyBlobId, transcriptHash: data.transcriptHash }, typeof data.transcriptHash === "string" ? [data.transcriptHash] : []);
   if (name === "remote.purchase-brief") {
@@ -32,6 +34,8 @@ function logTool(name: string, data: Record<string, unknown>): void {
   }
   if (name === "memory.remember") append("buyer", "memory", { blobId: data.blobId, kind: data.kind, provenance: data.provenance });
   if (name === "memory.recall") append("supercuts", "memory-recall", { citations: data.citations, restarted: false });
+  if (name === "wallet.deposit" && typeof data.transactionDigest === "string") append("buyer", "prefunding", { transactionDigest: data.transactionDigest, amount: data.amount });
+  if (name === "wallet.exit.queue") append(app.profile.role === "seller" ? "confidential-seller" : "buyer", "delayed-exit", { state: data.status, amount: data.amount, operationId: data.operationId });
   if (name === "remote.agreement") {
     const plan = data.plan as Record<string, unknown>;
     const negotiation = data.negotiation as Record<string, unknown> | undefined;
@@ -40,6 +44,12 @@ function logTool(name: string, data: Record<string, unknown>): void {
   }
   if (name === "remote.settle-analysis") append("buyer", "private-settlement", { rail: "shielded", transactionDigest: data.transactionDigest, checkpoint: data.checkpoint, planHash: data.planHash, visibility: data.visibility }, typeof data.dealCommitment === "string" ? [data.dealCommitment] : []);
   if (name === "remote.delivery" && data.status === "delivered") append("buyer", "artifact-delivery", { kind: "competitor-analysis", artifactSha256: data.artifactSha256, sessionId: data.sessionId }, typeof data.artifactSha256 === "string" ? [data.artifactSha256] : []);
+  if ((name === "deal.execute" || name === "deal.resume") && typeof data.dealId === "string") {
+    const journal = new DealJournal(app.store), evidence = journal.evidence(data.dealId);
+    const plan = journal.step<SettlementPlanV1>(String(data.operationId), "planning");
+    if (plan) append("supercuts", "settlement-plan", { phase: "after-memory", planHash: plan.planHash, capabilityId: plan.capabilityId, rail: plan.rail, openingAmount: plan.openingAmount, maximumAmount: plan.maximumAmount, riskLevel: plan.riskLevel, reasonCodes: plan.reasonCodes, blobIds: plan.citations.map((item) => item.blobId) });
+    append("supercuts", "deal-lifecycle", { dealId: data.dealId, state: data.state, rail: data.rail, agreement: (data.evidence as Record<string, unknown> | undefined)?.agreement, payment: (data.evidence as Record<string, unknown> | undefined)?.payment, delivery: (data.evidence as Record<string, unknown> | undefined)?.delivery, outcomeMemory: (data.evidence as Record<string, unknown> | undefined)?.outcomeMemory, agreementBlobId: evidence.agreementBlobId, deliveryBlobId: evidence.deliveryBlobId, outcomeMemoryBlobId: evidence.outcomeMemoryBlobId, paymentDigest: evidence.paymentDigest });
+  }
 }
 const rl = createInterface({ input: process.stdin });
 let queue: Promise<unknown> = Promise.resolve();
@@ -55,8 +65,19 @@ rl.on("line", (line) => { queue = queue.then(async () => {
       let data: Record<string, unknown>;
       if (name.startsWith("deal.")) {
         const spec = toolSchema(name); const { validateToolArguments } = await import("./mandate.js"); validateToolArguments(spec, raw);
-        if (mandate.version !== "supercuts.mandate.v2" || Date.now() > mandate.expiresAt || !mandate.allowedCommands.includes(name)) throw new Error("deal tool is not authorized by an active v2 mandate");
-        if (name === "deal.execute") {
+        if (mandate.version !== "supercuts.mandate.v2" || !mandate.allowedCommands.includes(name) || (name === "deal.execute" || name === "deal.resume") && Date.now() > mandate.expiresAt) throw new Error("deal tool is not authorized by an active v2 mandate");
+        if (name === "deal.catalog") data = { capabilities: (await new LiveDealPorts(app, mandate).catalog()).map(({ origin, registration }) => ({ origin, manifest: registration.manifest, manifestBlobId: registration.manifestBlobId })) };
+        else if (name === "deal.policy") {
+          const hasTable = Boolean(app.store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mandate_operations'").get());
+          const reserved = hasTable ? (app.store.db.prepare("SELECT amount FROM mandate_operations").all() as Array<{ amount: string }>).reduce((sum, row) => sum + BigInt(row.amount), 0n) : 0n;
+          data = { perDealCeiling: mandate.perDealCeiling, totalBudget: mandate.totalRunBudget, remainingBudget: (BigInt(mandate.totalRunBudget) - reserved).toString(), expiresAt: mandate.expiresAt, defaultRail: "shielded", allowPublicX402: mandate.allowPublicX402 === true, allowedAssets: mandate.allowedAssets, allowedCapabilityIds: mandate.allowedCapabilityIds, allowedCapabilityClasses: mandate.allowedCapabilityClasses };
+        }
+        else if (name === "deal.evidence") data = new DealJournal(app.store).evidence(String(raw.dealId)) as unknown as Record<string, unknown>;
+        else if (name === "deal.delivery") {
+          const delivery = new DealJournal(app.store).delivery(String(raw.dealId));
+          data = { dealId: delivery.dealId, contentType: delivery.contentType, artifactSha256: delivery.artifactSha256, artifactBase64: Buffer.from(delivery.artifact).toString("base64") };
+        }
+        else if (name === "deal.execute") {
           const input = raw.input as ExecuteDealInput;
           if (raw["operation-id"] !== input?.operationId) throw new Error("deal operation ID does not match its input");
           data = await (await createConfiguredDealEngine(app)).execute(input) as unknown as Record<string, unknown>;

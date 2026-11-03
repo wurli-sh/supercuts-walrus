@@ -1,0 +1,131 @@
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
+import { randomUUID } from "node:crypto";
+import { createInterface } from "node:readline/promises";
+import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
+import { fail } from "./errors.js";
+import { Phase3App, initialize } from "./phase3.js";
+import { loadMandate, type AgentMandate } from "./mandate.js";
+import { LiveDealPorts } from "./live-deal-ports.js";
+
+interface BuyerSetup {
+  deploymentConfig: string; tatumKeyFile: string; writeGrpc: string; tatumGrpc: string;
+  walrusPublisher: string; walrusAggregator: string; memoryConfigFile: string;
+  sellerOrigins: string[]; allowedCounterparties: string[]; allowedCapabilityIds?: string[];
+  allowedCapabilityClasses?: string[]; perDealCeiling: string; totalBudget: string;
+  expiresAt: number; allowPublicX402?: boolean; suiKeyFile?: string; rapidsnark?: string;
+}
+
+function ownerFile(path: string): void {
+  if ((statSync(path).mode & 0o077) !== 0) fail("SETUP_PERMISSIONS", `${path} must be owner-only`);
+}
+function amount(value: unknown, name: string): string {
+  if (typeof value !== "string" || !/^[1-9][0-9]*$/.test(value)) fail("SETUP_INVALID", `${name} must be a positive base-unit string`);
+  return value as string;
+}
+function origins(values: unknown): string[] {
+  if (!Array.isArray(values) || !values.length || values.length > 32) fail("SETUP_INVALID", "sellerOrigins requires 1..32 origins");
+  return (values as unknown[]).map((value) => {
+    const url = new URL(String(value));
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname)) || url.username || url.password || url.pathname !== "/" || url.search || url.hash) fail("SETUP_INVALID", "seller origin must be HTTPS or loopback HTTP without path or credentials");
+    return url.origin;
+  });
+}
+function validateConfig(config: BuyerSetup): BuyerSetup {
+  amount(config.perDealCeiling, "perDealCeiling"); amount(config.totalBudget, "totalBudget");
+  if (BigInt(config.totalBudget) < BigInt(config.perDealCeiling)) fail("SETUP_INVALID", "totalBudget must cover one permitted deal");
+  if (!Number.isSafeInteger(config.expiresAt) || config.expiresAt <= Date.now()) fail("SETUP_INVALID", "expiresAt must be a future Unix millisecond timestamp");
+  if (!Array.isArray(config.allowedCounterparties) || !config.allowedCounterparties.length || config.allowedCounterparties.some((item) => typeof item !== "string" || !/^0x[0-9a-f]{64}$/i.test(item))) fail("SETUP_INVALID", "allowedCounterparties requires seller Sui addresses");
+  origins(config.sellerOrigins);
+  for (const key of ["deploymentConfig", "tatumKeyFile", "writeGrpc", "tatumGrpc", "walrusPublisher", "walrusAggregator", "memoryConfigFile"] as const) if (typeof config[key] !== "string" || !config[key]) fail("SETUP_INVALID", `${key} is required`);
+  for (const path of [config.tatumKeyFile, config.memoryConfigFile, ...(config.suiKeyFile ? [config.suiKeyFile] : [])]) ownerFile(resolve(path));
+  const deployment = JSON.parse(readFileSync(resolve(config.deploymentConfig), "utf8")) as { verifierVersion?: number; network?: string };
+  if (deployment.network !== "testnet" || deployment.verifierVersion !== 2) fail("SETUP_INVALID", "buyer setup requires the pinned v2 Testnet deployment");
+  if (config.allowPublicX402 !== undefined && typeof config.allowPublicX402 !== "boolean") fail("SETUP_INVALID", "allowPublicX402 must be boolean");
+  for (const list of [config.allowedCapabilityIds, config.allowedCapabilityClasses]) if (list !== undefined && (!Array.isArray(list) || list.some((item) => typeof item !== "string" || !item))) fail("SETUP_INVALID", "capability allowlists must contain nonempty strings");
+  return config;
+}
+function readConfig(path: string): BuyerSetup { ownerFile(path); return validateConfig(JSON.parse(readFileSync(path, "utf8")) as BuyerSetup); }
+function writePolicy(home: string, config: BuyerSetup): void {
+  const path = join(home, "mandate.json"), mandate = loadMandate(home);
+  const base: AgentMandate = { ...mandate }; delete base.allowedCapabilityIds; delete base.allowedCapabilityClasses;
+  const next: AgentMandate = { ...base, version: "supercuts.mandate.v2", allowedCommands: [...new Set([...mandate.allowedCommands, "deal.execute", "deal.get", "deal.resume", "deal.evidence", "deal.delivery", "deal.catalog", "deal.policy", "settlement.plan", "memory.inventory"])], allowedCounterparties: config.allowedCounterparties, perDealCeiling: config.perDealCeiling, totalRunBudget: config.totalBudget, expiresAt: config.expiresAt, requiredPrivacy: "any", requireSettlementPlan: true, allowedRails: config.allowPublicX402 === true ? ["shielded", "x402"] : ["shielded"], allowPublicX402: config.allowPublicX402 === true, ...(config.allowedCapabilityIds ? { allowedCapabilityIds: config.allowedCapabilityIds } : {}), ...(config.allowedCapabilityClasses ? { allowedCapabilityClasses: config.allowedCapabilityClasses } : {}) };
+  writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 }); chmodSync(path, 0o600);
+  writeFileSync(join(home, "deal-sellers.json"), `${JSON.stringify(origins(config.sellerOrigins), null, 2)}\n`, { mode: 0o600 });
+}
+export function setupBuyer(home: string, configPath: string): Record<string, unknown> { return setupBuyerConfig(home, readConfig(resolve(configPath))); }
+export async function promptBuyerSetup(home: string): Promise<Record<string, unknown>> {
+  if (!process.stdin.isTTY) fail("SETUP_INPUT_REQUIRED", "interactive setup requires a terminal; use --config with an owner-only JSON file");
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const ask = async (label: string) => (await rl.question(`${label}: `)).trim();
+    const days = Number(await ask("Policy duration in days"));
+    if (!Number.isSafeInteger(days) || days < 1 || days > 365) fail("SETUP_INVALID", "policy duration must be 1..365 days");
+    const config: BuyerSetup = {
+      deploymentConfig: await ask("Pinned Testnet deployment config path"), tatumKeyFile: await ask("Tatum key file path"),
+      writeGrpc: await ask("Sui write gRPC URL"), tatumGrpc: await ask("Tatum read gRPC URL"),
+      walrusPublisher: await ask("Walrus publisher URL"), walrusAggregator: await ask("Walrus aggregator URL"),
+      memoryConfigFile: await ask("Owner-only Walrus Memory config path"),
+      sellerOrigins: (await ask("Seller HTTPS origins, comma separated")).split(",").map((item) => item.trim()),
+      allowedCounterparties: (await ask("Allowed seller Sui addresses, comma separated")).split(",").map((item) => item.trim()),
+      perDealCeiling: await ask("Maximum per deal in MIST"), totalBudget: await ask("Lifetime cumulative budget in MIST"),
+      expiresAt: Date.now() + days * 24 * 60 * 60 * 1000, allowPublicX402: (await ask("Allow public x402 when requested? yes/no")).toLowerCase() === "yes",
+    };
+    return setupBuyerConfig(home, validateConfig(config));
+  } finally { rl.close(); }
+}
+function setupBuyerConfig(home: string, config: BuyerSetup): Record<string, unknown> {
+  if (existsSync(join(home, "profile.json"))) fail("PROFILE_EXISTS", "buyer home already exists; use setup renew for a standing policy update");
+  mkdirSync(home, { recursive: true, mode: 0o700 }); chmodSync(home, 0o700);
+  const keyPath = config.suiKeyFile ? resolve(config.suiKeyFile) : join(home, "buyer.sui.key");
+  if (!config.suiKeyFile) writeFileSync(keyPath, Ed25519Keypair.generate().getSecretKey(), { mode: 0o600, flag: "wx" });
+  ownerFile(keyPath);
+  initialize(home, { role: "buyer", "deployment-config": resolve(config.deploymentConfig), "sui-key-file": keyPath, "tatum-key-file": resolve(config.tatumKeyFile), "write-grpc": config.writeGrpc, "tatum-grpc": config.tatumGrpc, "walrus-publisher": config.walrusPublisher, "walrus-aggregator": config.walrusAggregator, "memory-config-file": resolve(config.memoryConfigFile), "allow-counterparty": config.allowedCounterparties.join(","), "max-amount": config.perDealCeiling, ...(config.rapidsnark ? { rapidsnark: resolve(config.rapidsnark) } : {}) });
+  writePolicy(home, config);
+  const session = createBuyerSession(home);
+  const decoded = decodeSuiPrivateKey(readFileSync(keyPath, "utf8").trim());
+  if (decoded.scheme !== "ED25519") fail("SETUP_INVALID", "buyer key must use ED25519");
+  return { home, address: Ed25519Keypair.fromSecretKey(decoded.secretKey).toSuiAddress(), ...session, policy: "configured" };
+}
+export function createBuyerSession(home: string): Record<string, unknown> {
+  if (!existsSync(join(home, "profile.json"))) fail("SETUP_REQUIRED", "initialize the buyer before creating a Codex session");
+  const runId = randomUUID(), eventPath = join(home, `events-${runId}.jsonl`), mcpScript = join(dirname(fileURLToPath(import.meta.url)), "mcp-bootstrap.js");
+  const mcp = `[mcp_servers.supercuts-buyer]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify([mcpScript])}\n[mcp_servers.supercuts-buyer.env]\nSUPERCUTS_HOME = ${JSON.stringify(home)}\nSUPERCUTS_RUN_ID = ${JSON.stringify(runId)}\nSUPERCUTS_EVENT_PATH = ${JSON.stringify(eventPath)}\n`;
+  const mcpConfig = join(home, "buyer-codex.toml");
+  writeFileSync(mcpConfig, mcp, { mode: 0o600 }); chmodSync(mcpConfig, 0o600);
+  return { runId, eventPath, mcpConfig };
+}
+export function renewBuyer(home: string, configPath: string): Record<string, unknown> {
+  const config = readConfig(resolve(configPath));
+  const prior = loadMandate(home);
+  if (prior.role !== "buyer" || prior.version !== "supercuts.mandate.v2") fail("SETUP_INVALID", "renewal requires an initialized v2 buyer home");
+  const spent = (readReserved(home));
+  if (BigInt(config.totalBudget) < spent) fail("SETUP_INVALID", "renewed lifetime budget is below already reserved spend");
+  writePolicy(home, config);
+  return { home, policy: "renewed", reservedMist: spent.toString(), remainingMist: (BigInt(config.totalBudget) - spent).toString() };
+}
+export async function addBuyerPrivacyRule(home: string, capabilityId: string): Promise<Record<string, unknown>> {
+  const app = new Phase3App(home);
+  try {
+    if (app.profile.role !== "buyer" || app.profile.mock) fail("LIVE_PROFILE_REQUIRED", "privacy rules require a live buyer home");
+    const mandate = loadMandate(home);
+    const matches = (await new LiveDealPorts(app, mandate).catalog()).filter(({ registration }) => registration.manifest.capabilityId === capabilityId);
+    if (matches.length !== 1) fail("POLICY_CAPABILITY_INVALID", "privacy rule requires one signed seller capability");
+    const manifest = matches[0]!.registration.manifest;
+    const memory = { version: "supercuts.settlement-memory.v1", kind: "privacy_rule", scope: { capabilityId: manifest.capabilityId, counterparty: manifest.sellerId, network: "sui:testnet", asset: manifest.asset }, createdAt: Date.now(), signal: { requiresShielded: true } };
+    const args = { "operation-id": `owner-privacy-${manifest.manifestHash}`, memory: Buffer.from(JSON.stringify(memory)).toString("base64url") };
+    const approval = app.approve(app.preview("memory.policy", args).challengeId);
+    const result = (await app.execute("memory.policy", { ...args, "approval-token": approval.token })).data;
+    return { capabilityId, sellerId: manifest.sellerId, blobId: result.blobId, kind: result.kind, provenance: result.provenance };
+  } finally { app.close(); }
+}
+function readReserved(home: string): bigint {
+  const app = new Phase3App(home);
+  try {
+    if (!app.store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mandate_operations'").get()) return 0n;
+    return (app.store.db.prepare("SELECT amount FROM mandate_operations").all() as Array<{ amount: string }>).reduce((sum, row) => sum + BigInt(row.amount), 0n);
+  } finally { app.close(); }
+}
