@@ -16,10 +16,12 @@ import { decryptSessionMessage, encryptSessionMessage } from "./negotiation.js";
 import { SellerDatabase } from "./seller-database.js";
 import { captureSellerHome, decryptSellerSnapshot, encryptSellerSnapshot, restoreSellerHome } from "./seller-state.js";
 import { X402ResourceService } from "./x402-resource-service.js";
+import { LiveSellerTransport } from "./live-seller-transport.js";
 
 interface CatalogRow { seller_id: string; capability_id: string; manifest: CapabilityManifest; blob_id: string; signature: string; transport_public_key: string; preview: Record<string, unknown>; }
 interface Quote { requestId: string; operationId: string; capabilityId: string; amount: string; artifactKey: string; runId: string; }
 interface Slot { sellerId: string; home: string; app: Phase3App; artifacts: Record<string, string>; revision: number; resources: Map<string, X402ResourceService>; }
+const isV2 = (row: CatalogRow): boolean => row.preview.genericV2 === true;
 
 const sha256 = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 const validId = (value: unknown, name: string): string => typeof value === "string" && /^[a-zA-Z0-9._:-]{1,128}$/.test(value) ? value : fail("SELLER_REQUEST_INVALID", `${name} is invalid`);
@@ -28,6 +30,8 @@ const asObject = (value: unknown): Record<string, unknown> => value && typeof va
 export class SellerService {
   readonly #slots = new Map<string, Slot>();
   readonly #catalog = new Map<string, CatalogRow>();
+  readonly #v2 = new Map<string, { slot: Slot; transport: LiveSellerTransport; row: CatalogRow }>();
+  readonly #v2BySeller = new Map<string, LiveSellerTransport>();
   readonly #root = mkdtempSync(join(tmpdir(), "supercuts-sellers-"));
   readonly #claude: BoundedClaude;
   #queue: Promise<unknown> = Promise.resolve();
@@ -39,13 +43,12 @@ export class SellerService {
 
   static async create(config: { db: SellerDatabase; snapshotKey: string; origin: string; facilitatorUrl: string; facilitatorKey: string; allowedBuyers: ReadonlySet<string>; claudeKey: string }): Promise<SellerService> {
     const service = new SellerService(config.db, config.snapshotKey, config.origin, config.facilitatorUrl, config.facilitatorKey, config.allowedBuyers, config.claudeKey);
-    const rows = await config.db.listCatalog() as unknown as CatalogRow[];
-    if (!rows.length) fail("SELLER_CATALOG_EMPTY", "provision seller capabilities before starting the service");
+    const rows = (await config.db.listCatalog() as unknown as CatalogRow[]).filter((row) => !(isV2(row) && row.manifest.expiresAt <= Date.now()));
     for (const row of rows) {
       validateCapabilityManifest(row.manifest);
       if (row.manifest.capabilityId !== row.capability_id || row.manifest.sellerId !== row.seller_id || !row.blob_id || !row.signature || !row.transport_public_key) fail("SELLER_CATALOG_INVALID", "catalog entry does not match its manifest");
       await verifySignedCapability({ manifest: row.manifest, manifestBlobId: row.blob_id, transportPublicKey: row.transport_public_key, sellerSignature: row.signature });
-      service.#catalog.set(row.capability_id, row);
+      if (!isV2(row)) service.#catalog.set(row.capability_id, row);
     }
     for (const sellerId of new Set(rows.map((row) => row.seller_id))) {
       const stored = await config.db.getSnapshot(sellerId) ?? fail("SELLER_STATE_MISSING", `snapshot is missing for ${sellerId}`);
@@ -58,12 +61,23 @@ export class SellerService {
       app.store.db.exec("CREATE TABLE IF NOT EXISTS remote_negotiations(session_id TEXT PRIMARY KEY, capability_id TEXT NOT NULL, buyer_address TEXT NOT NULL, buyer_public_key TEXT NOT NULL, request_ciphertext TEXT NOT NULL, reply_ciphertext TEXT NOT NULL, reply_signature TEXT NOT NULL, request_blob_id TEXT NOT NULL, reply_blob_id TEXT NOT NULL, transcript_hash TEXT NOT NULL, brief_hash TEXT, run_id TEXT NOT NULL)");
       const slot: Slot = { sellerId, home, app, artifacts: snapshot.artifacts, revision: stored.revision, resources: new Map() };
       service.#slots.set(sellerId, slot);
-      for (const row of rows.filter((item) => item.seller_id === sellerId && item.manifest.supportedRails.includes("x402"))) {
+      for (const row of rows.filter((item) => item.seller_id === sellerId && !isV2(item) && item.manifest.supportedRails.includes("x402"))) {
         const resource = service.resource(slot, row);
         for (const quote of app.store.db.prepare("SELECT request_id AS requestId,operation_id AS operationId,capability_id AS capabilityId,amount,artifact_key AS artifactKey,run_id AS runId FROM remote_quotes WHERE capability_id=?").all(row.capability_id) as unknown as Quote[]) {
           if (quote.amount !== row.manifest.priceBand.minimum) fail("SELLER_QUOTE_INVALID", "stored quote price differs from the manifest");
           resource.register(quote.requestId, quote.operationId, service.artifact(slot, quote.artifactKey));
         }
+      }
+      const v2Rows = rows.filter((item) => item.seller_id === sellerId && isV2(item));
+      if (v2Rows.length) {
+        const transport = new LiveSellerTransport(app, { origin: config.origin, facilitatorUrl: config.facilitatorUrl, facilitatorKey: config.facilitatorKey, persist: async () => { try { await service.persist(slot); } catch (error) { service.#healthy = false; throw error; } }, claimPayment: (digest, requestId) => config.db.claimPayment(digest, requestId, sellerId) });
+        for (const row of v2Rows) {
+          const metadata = row.preview.outputMetadata;
+          if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) fail("SELLER_CONFIG_INVALID", "v2 fixed artifact requires outputMetadata in catalog preview");
+          await transport.register({ manifest: row.manifest, manifestBlobId: row.blob_id, transportPublicKey: row.transport_public_key, sellerSignature: row.signature }, async () => ({ artifact: service.artifact(slot, row.capability_id), contentType: typeof row.preview.contentType === "string" ? row.preview.contentType : "application/octet-stream", metadata: metadata as Record<string, unknown> }));
+          service.#v2.set(row.capability_id, { slot, transport, row });
+        }
+        service.#v2BySeller.set(sellerId, transport);
       }
     }
     return service;
@@ -133,6 +147,27 @@ export class SellerService {
       const url = new URL(request.url ?? "/", this.origin);
       if (request.method === "GET" && url.pathname === "/health") return this.reply(response, this.#healthy ? 200 : 503, { ok: this.#healthy, service: "supercuts-sellers" });
       if (request.method === "GET" && url.pathname === "/v1/catalog") return this.reply(response, 200, { capabilities: [...this.#catalog.values()].map(({ manifest, blob_id, signature, transport_public_key, preview }) => ({ manifest, blobId: blob_id, signature, transportPublicKey: transport_public_key, preview })) });
+      if (request.method === "GET" && url.pathname === "/v2/catalog") return this.reply(response, 200, { capabilities: [...this.#v2.values()].map(({ row }) => ({ manifest: row.manifest, manifestBlobId: row.blob_id, sellerSignature: row.signature, transportPublicKey: row.transport_public_key })) });
+      if (request.method === "POST" && url.pathname === "/v2/prepare") {
+        const input = await this.body(request);
+        return this.serialize(async () => {
+          const capabilityId = validId(input.capabilityId, "capabilityId"), item = this.#v2.get(capabilityId) ?? fail("SELLER_CAPABILITY_UNKNOWN", "v2 capability is unknown");
+          return this.reply(response, 200, await item.transport.prepareRequest(input));
+        });
+      }
+      if (request.method === "POST" && url.pathname === "/v2/fulfill") {
+        const input = await this.body(request);
+        return this.serialize(async () => {
+          const sessionId = validId(input.sessionId, "sessionId"), sellerId = String(input.sellerId ?? "");
+          const transport = this.#v2BySeller.get(sellerId), slot = this.#slots.get(sellerId);
+          if (!transport || !slot?.app.store.db.prepare("SELECT 1 FROM seller_deal_prepares WHERE session_id=?").get(sessionId)) fail("NEGOTIATION_REQUIRED", "seller has no matching prepared v2 deal");
+          return this.reply(response, 200, await transport!.fulfillRequest(input));
+        });
+      }
+      if (request.method === "GET") {
+        const item = [...this.#v2.values()].find(({ row }) => url.pathname.startsWith(`${new URL(row.manifest.endpoint).pathname.replace(/\/$/, "")}/`));
+        if (item) return this.serialize(async () => item.transport.handle(request, response));
+      }
       if (request.method === "GET" && url.pathname === "/v1/events") {
         const runId = validId(url.searchParams.get("runId"), "runId");
         return this.reply(response, 200, { events: await this.db.listEvents(runId) });

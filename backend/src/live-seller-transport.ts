@@ -26,7 +26,7 @@ export class LiveSellerTransport {
   readonly #verifier: LiveSellerPaymentVerifier;
   readonly #resources = new Map<string, X402ResourceService>();
   readonly #registrations = new Map<string, SignedCapabilityRegistration>();
-  constructor(private readonly app: Phase3App, private readonly config: { origin: string; facilitatorUrl?: string; facilitatorKey?: string; allowedBuyers?: string[] }, runtimeFactory?: () => Promise<LiveRuntime>) {
+  constructor(private readonly app: Phase3App, private readonly config: { origin: string; facilitatorUrl?: string; facilitatorKey?: string; allowedBuyers?: string[]; persist?: () => Promise<void>; claimPayment?: (digest: string, requestId: string) => Promise<void> }, runtimeFactory?: () => Promise<LiveRuntime>) {
     if (app.profile.role !== "seller" || app.profile.mock) fail("SELLER_LIVE_REQUIRED", "generic seller transport requires a live seller role home");
     const origin = new URL(config.origin);
     if (origin.protocol !== "https:" && !(origin.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(origin.hostname))) fail("SELLER_ORIGIN_INVALID", "seller transport requires HTTPS except on loopback");
@@ -55,7 +55,7 @@ export class LiveSellerTransport {
       const facilitatorUrl = this.config.facilitatorUrl ?? fail("SELLER_FACILITATOR_REQUIRED", "x402 capability requires a facilitator URL");
       const facilitatorKey = this.config.facilitatorKey ?? fail("SELLER_FACILITATOR_REQUIRED", "x402 capability requires a seller-only facilitator key");
       const endpoint = new URL(registration.manifest.endpoint);
-      const resource = new X402ResourceService(this.app.store, { origin: this.config.origin, pathPrefix: endpoint.pathname, facilitatorUrl, facilitatorKey, network: "sui:testnet", asset: registration.manifest.asset, payTo: registration.manifest.sellerId, amount: registration.manifest.priceBand.minimum });
+      const resource = new X402ResourceService(this.app.store, { origin: this.config.origin, pathPrefix: endpoint.pathname, facilitatorUrl, facilitatorKey, network: "sui:testnet", asset: registration.manifest.asset, payTo: registration.manifest.sellerId, amount: registration.manifest.priceBand.minimum }, fetch, this.config.persist, this.config.claimPayment);
       this.#resources.set(registration.manifest.capabilityId, resource);
       const rows = this.app.store.db.prepare("SELECT session_id,payment_operation_id FROM seller_deal_prepares WHERE capability_id=?").all(registration.manifest.capabilityId) as Array<{ session_id: string; payment_operation_id: string }>;
       for (const row of rows) resource.register(row.session_id, row.payment_operation_id, Buffer.from(canonicalJson({ status: "paid", requestId: row.session_id })));
@@ -80,8 +80,8 @@ export class LiveSellerTransport {
     try {
       const url = new URL(request.url ?? "/", this.config.origin);
       if (request.method === "GET" && url.pathname === "/v2/catalog") return this.respond(response, 200, { capabilities: this.runtime.catalog() });
-      if (request.method === "POST" && url.pathname === "/v2/prepare") return this.respond(response, 200, await this.prepare(await this.body(request)));
-      if (request.method === "POST" && url.pathname === "/v2/fulfill") return this.respond(response, 200, await this.fulfill(await this.body(request)));
+      if (request.method === "POST" && url.pathname === "/v2/prepare") return this.respond(response, 200, await this.prepareRequest(await this.body(request)));
+      if (request.method === "POST" && url.pathname === "/v2/fulfill") return this.respond(response, 200, await this.fulfillRequest(await this.body(request)));
       if (request.method === "GET") {
         for (const resource of this.#resources.values()) if (url.pathname.startsWith(`${(resource.config.pathPrefix ?? "/capability").replace(/\/$/, "")}/`)) return resource.handle(request, response);
       }
@@ -89,6 +89,9 @@ export class LiveSellerTransport {
     } catch (error) { const known = error instanceof SupercutsError ? error : new SupercutsError("SELLER_REQUEST_FAILED", "seller request failed"); if (!response.headersSent) this.respond(response, 400, { error: known.code, message: known.message }); }
   }
   createServer(): Server { return createServer((request, response) => void this.handle(request, response)); }
+
+  async prepareRequest(body: Record<string, unknown>): Promise<Record<string, unknown>> { const result = await this.prepare(body); await this.config.persist?.(); return result; }
+  async fulfillRequest(body: Record<string, unknown>): Promise<Record<string, unknown>> { const result = await this.fulfill(body); await this.config.persist?.(); return result; }
 
   private async prepare(body: Record<string, unknown>): Promise<Record<string, unknown>> {
     const sessionId = id(body.sessionId), capabilityId = id(body.capabilityId);
