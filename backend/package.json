@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "private": false,
   "type": "module",
+  "exports": {
+    "./seam": "./dist/seam.js",
+    "./package.json": "./package.json"
+  },
   "bin": {
     "supercuts": "dist/cli.js",
     "supercuts-demo": "dist/demo.js",
@@ -18,12 +22,14 @@
     "supercuts-memory-worker": "dist/memory-worker.js",
     "supercuts-seller-live": "dist/seller-live-cli.js",
     "supercuts-seller-register": "dist/seller-register-cli.js",
-    "supercuts-seller-v2-provision": "dist/seller-v2-provision.js"
+    "supercuts-seller-v2-provision": "dist/seller-v2-provision.js",
+    "supercuts-hosted-exit": "dist/hosted-exit-cli.js"
   },
   "files": [
     "dist",
     "README.md"
   ],
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=22.13"
   },
@@ -34,6 +40,7 @@
     "test:e2e": "tsx --test test/phase2.e2e.test.ts",
     "test:phase3": "tsx --test test/phase3.e2e.test.ts",
     "test:sdk": "pnpm --dir packages/sdk test",
+    "release:gate": "node scripts/release-gate.mjs",
     "test:seal-live": "tsx scripts/seal-live-e2e.ts"
   },
   "dependencies": {

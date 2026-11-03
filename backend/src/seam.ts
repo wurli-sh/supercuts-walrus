@@ -4,8 +4,10 @@ import { DealJournal } from "./deal.js";
 import { createConfiguredDealEngine } from "./deal-adapter.js";
 import { loadMandate } from "./mandate.js";
 import { LiveDealPorts } from "./live-deal-ports.js";
+import { createRequire } from "node:module";
 
 const PROTOCOL = 1;
+const PACKAGE_VERSION = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 interface SeamRequest { protocol: number; requestId: string; method: string; home?: string; params?: Record<string, unknown>; }
 const envelope = (requestId: string | null, value: Record<string, unknown>) => ({ protocol: PROTOCOL, requestId, ...value });
 let responded = false;
@@ -22,14 +24,15 @@ const asArgs = (value: Record<string, unknown> | undefined): Record<string, stri
 
 let raw = "";
 process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => { raw += chunk; if (raw.length > 1024 * 1024) process.stdin.destroy(new Error("request exceeds 1 MiB")); });
-process.stdin.on("error", (error) => write(envelope(null, { ok: false, error: { code: "SEAM_REQUEST_INVALID", message: error.message, retryable: false } }), 1));
+process.stdin.on("data", (chunk) => { raw += chunk; if (raw.length > 1024 * 1024) write(envelope(null, { ok: false, error: { code: "SEAM_REQUEST_TOO_LARGE", message: "request exceeds 1 MiB; reduce the input", retryable: false } }), 1); });
+process.stdin.on("error", () => write(envelope(null, { ok: false, error: { code: "SEAM_REQUEST_INVALID", message: "request stream failed", retryable: false } }), 1));
 process.stdin.on("end", async () => {
+  if (responded) return;
   let request: SeamRequest;
   try { request = JSON.parse(raw) as SeamRequest; } catch { return write(envelope(null, { ok: false, error: { code: "SEAM_REQUEST_INVALID", message: "request is not valid JSON", retryable: false } }), 1); }
-  if (!request || request.protocol !== PROTOCOL || typeof request.requestId !== "string" || typeof request.method !== "string") return write(envelope(typeof request?.requestId === "string" ? request.requestId : null, { ok: false, error: { code: "SEAM_PROTOCOL_MISMATCH", message: `supercuts seam protocol ${PROTOCOL} is required`, retryable: false } }), 1);
+  if (!request || request.protocol !== PROTOCOL || typeof request.requestId !== "string" || !request.requestId || request.requestId.length > 256 || typeof request.method !== "string" || !request.method || request.method.length > 128) return write(envelope(typeof request?.requestId === "string" ? request.requestId : null, { ok: false, error: { code: "SEAM_PROTOCOL_MISMATCH", message: `supercuts seam protocol ${PROTOCOL} and a bounded request identity and method are required`, retryable: false } }), 1);
   try {
-    if (request.method === "version") return write(envelope(request.requestId, { ok: true, result: { protocol: PROTOCOL, packageVersion: "0.1.0" } }));
+    if (request.method === "version") return write(envelope(request.requestId, { ok: true, result: { protocol: PROTOCOL, packageVersion: PACKAGE_VERSION } }));
     if (typeof request.home !== "string" || !request.home) return write(envelope(request.requestId, { ok: false, error: { code: "SEAM_HOME_REQUIRED", message: "an explicit role home is required", retryable: false } }), 1);
     if (request.params !== undefined && (!request.params || typeof request.params !== "object" || Array.isArray(request.params))) return write(envelope(request.requestId, { ok: false, error: { code: "SEAM_REQUEST_INVALID", message: "params must be an object", retryable: false } }), 1);
     const params = asArgs(request.params), home = homePath({ home: request.home ?? "" });

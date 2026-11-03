@@ -81,10 +81,11 @@ export function parseArgs(values: string[]): Record<string, string | boolean> {
   const result: Record<string, string | boolean> = {};
   for (let i = 0; i < values.length; i++) {
     const token = values[i]!;
-    if (!token.startsWith("--")) fail("ARGUMENT_INVALID", `unexpected argument ${token}`);
+    if (!token.startsWith("--") || token.length <= 2 || token.length > 130) fail("ARGUMENT_INVALID", "arguments must be named --options of at most 128 characters");
     const key = token.slice(2);
+    if (!/^[a-z][a-z0-9-]*$/.test(key) || key in result) fail("ARGUMENT_INVALID", `invalid or repeated option --${key}`);
     const next = values[i + 1];
-    if (next && !next.startsWith("--")) { result[key] = next; i++; } else result[key] = true;
+    if (next && !next.startsWith("--")) { if (Buffer.byteLength(next) > 1024 * 1024) fail("ARGUMENT_INVALID", `--${key} exceeds 1 MiB`); result[key] = next; i++; } else result[key] = true;
   }
   return result;
 }

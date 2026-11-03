@@ -9,10 +9,10 @@ mandate and verifies payment evidence.
 subprocess seam. Wallet keys, state keys, witnesses, and service credentials stay
 inside the Supercuts process; the SDK receives intents and verified receipts.
 
-Install the SDK with the exact matching backend version:
+Install the SDK. It installs the matching backend runtime automatically:
 
 ```sh
-pnpm add @supercuts/sdk@0.1.0 @supercuts/backend@0.1.0
+pnpm add @supercuts/sdk@0.1.0
 ```
 
 ```ts

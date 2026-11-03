@@ -13,6 +13,8 @@ rows are encrypted before reaching SQLite. Do not reuse a role's key file.
 
 ## Development
 
+For npm tarball verification and publishing handoff, see [the release guide](../docs/npm-release.md).
+
 ```sh
 pnpm install
 pnpm check

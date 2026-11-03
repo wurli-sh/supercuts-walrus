@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { existsSync } from "node:fs";
 
 export const SEAM_PROTOCOL = 1 as const;
-export const SDK_VERSION = "0.1.0" as const;
+const require = createRequire(import.meta.url);
+export const SDK_VERSION: string = (require("../package.json") as { version: string }).version;
 export type Role = "buyer" | "seller" | "auditor";
 export type Rail = "shielded" | "x402";
 export type OperationId = string & { readonly __brand: "OperationId" };
@@ -80,28 +81,29 @@ interface SeamEnvelope { protocol: number; requestId: string | null; ok: boolean
 interface SeamRequest { protocol: 1; requestId: string; method: string; home?: string; params?: Record<string, unknown>; }
 
 function defaultSeamPath(): string {
-  const require = createRequire(import.meta.url);
-  return join(dirname(require.resolve("@supercuts/backend/package.json")), "dist", "seam.js");
+  try { return require.resolve("@supercuts/backend/seam"); }
+  catch { throw new SeamUnavailable(`@supercuts/backend@${SDK_VERSION} is missing. Reinstall @supercuts/sdk to restore its runtime dependency.`); }
 }
 class Seam {
   readonly #path: string; readonly #timeout: number;
-  constructor(private readonly config: SupercutsSdkConfig) { this.#path = config.seamPath ?? defaultSeamPath(); this.#timeout = config.timeoutMs ?? 300_000; }
+  constructor(private readonly config: SupercutsSdkConfig) { this.#path = config.seamPath ?? defaultSeamPath(); this.#timeout = config.timeoutMs ?? 300_000; if (!Number.isSafeInteger(this.#timeout) || this.#timeout <= 0) throw new TypeError("timeoutMs must be a positive integer"); if (!existsSync(this.#path)) throw new SeamUnavailable(`Supercuts runtime file is missing at ${this.#path}. Reinstall @supercuts/sdk and @supercuts/backend.`); }
   async call<T>(method: string, params?: Record<string, unknown>, withHome = true): Promise<T> {
     const request: SeamRequest = { protocol: SEAM_PROTOCOL, requestId: randomUUID(), method, ...(withHome ? { home: this.config.home } : {}), ...(params ? { params } : {}) };
     return await new Promise<T>((resolve, reject) => {
-      const child = spawn(process.execPath, [this.#path], { stdio: ["pipe", "pipe", "pipe"], env: { PATH: process.env.PATH ?? "" } });
+      const child = spawn(process.execPath, [this.#path], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } });
       let stdout = "", stderrBytes = 0, done = false;
-      const timer = setTimeout(() => { child.kill("SIGKILL"); finish(new SeamUnavailable(`${method} exceeded ${this.#timeout}ms`)); }, this.#timeout);
+      const timer = setTimeout(() => { child.kill("SIGKILL"); finish(new SeamUnavailable(`${method} exceeded ${this.#timeout}ms. Retry the operation with the same operation ID after checking the role journal.`)); }, this.#timeout);
       const finish = (error?: Error, value?: T) => { if (done) return; done = true; clearTimeout(timer); error ? reject(error) : resolve(value as T); };
       child.stdout.setEncoding("utf8"); child.stdout.on("data", (chunk: string) => { stdout += chunk; if (stdout.length > 2 * 1024 * 1024) { child.kill("SIGKILL"); finish(new SeamUnavailable("seam response exceeded 2 MiB")); } });
       child.stderr.on("data", (chunk: Buffer) => { stderrBytes += chunk.length; });
       child.on("error", (error) => finish(new SeamUnavailable(`could not start Supercuts seam: ${error.message}`)));
-      child.on("close", () => {
+      child.stdin.on("error", () => finish(new SeamUnavailable("Supercuts seam closed its input before accepting the request. Check the backend installation and retry with the same operation ID.")));
+      child.on("close", (code, signal) => {
         if (done) return;
-        let response: SeamEnvelope; try { response = JSON.parse(stdout) as SeamEnvelope; } catch { return finish(new SeamUnavailable(`seam returned invalid JSON (${stderrBytes} stderr bytes)`)); }
-        if (response.protocol !== SEAM_PROTOCOL || response.requestId !== request.requestId) return finish(new SeamUnavailable("seam protocol or request identity mismatch"));
+        let response: SeamEnvelope; try { response = JSON.parse(stdout) as SeamEnvelope; } catch { return finish(new SeamUnavailable(`seam returned invalid JSON (exit ${code ?? signal ?? "unknown"}; ${stderrBytes} stderr bytes). Check the installed backend and retry with the same operation ID.`)); }
+        if (!response || response.protocol !== SEAM_PROTOCOL || response.requestId !== request.requestId || typeof response.ok !== "boolean") return finish(new SeamUnavailable("seam response protocol or shape is invalid. Reinstall matching SDK and backend versions."));
         if (!response.ok) return finish(new SupercutsSdkError(response.error?.code ?? "INTERNAL_ERROR", response.error?.message ?? "Supercuts returned no detail", Boolean(response.error?.retryable), response.error?.recovery));
-        if (response.result === undefined) return finish(new SeamUnavailable("seam success response omitted its result"));
+        if (response.result === undefined) return finish(new SeamUnavailable("seam success response omitted its result. Check backend compatibility."));
         finish(undefined, response.result as T);
       });
       child.stdin.end(JSON.stringify(request));
@@ -115,7 +117,7 @@ abstract class RoleClient {
   protected constructor(protected readonly config: SupercutsSdkConfig) { this.seam = new Seam(config); }
   async doctor(): Promise<DoctorReport> { return this.read("doctor"); }
   async status(): Promise<Status> { return this.read("status"); }
-  protected async ensureCompatible(): Promise<void> { const version = await this.seam.call<{ protocol: number; packageVersion: string }>("version", undefined, false); if (version.protocol !== SEAM_PROTOCOL || version.packageVersion !== SDK_VERSION) throw new SeamUnavailable(`Supercuts seam ${version.packageVersion}/protocol ${version.protocol} is incompatible with SDK ${SDK_VERSION}/protocol ${SEAM_PROTOCOL}`); }
+  protected async ensureCompatible(): Promise<void> { const version = await this.seam.call<{ protocol: number; packageVersion: string }>("version", undefined, false); if (version.protocol !== SEAM_PROTOCOL || version.packageVersion !== SDK_VERSION) throw new SeamUnavailable(`Supercuts backend ${version.packageVersion}/protocol ${version.protocol} is incompatible with SDK ${SDK_VERSION}/protocol ${SEAM_PROTOCOL}. Install matching versions.`); }
   protected async read<T>(command: string, args: Arguments = {}): Promise<T> { return this.seam.call("command.execute", { command, arguments: args }); }
   protected async mutate<T>(command: string, args: Arguments): Promise<T> {
     const provider = this.config.approvalProvider;

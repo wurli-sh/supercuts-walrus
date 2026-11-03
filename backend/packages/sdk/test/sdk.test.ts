@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { Phase3App } from "../../../src/phase3.js";
 import { DealJournal } from "../../../src/deal.js";
 import {
-  AuditorClient, BuyerClient, SellerClient, SupercutsSdkError, initializeProfile,
+  AuditorClient, BuyerClient, SellerClient, SeamUnavailable, SupercutsSdkError, initializeProfile,
   type ApprovalProvider, type AuthorizationIntent, type OperationId, type SessionId,
 } from "../src/index.js";
 
@@ -66,4 +66,17 @@ test("deal status crosses the SDK seam without exposing encrypted task input", a
   assert.equal(received.state, "created");
   assert.equal(JSON.stringify(received).includes("not in status"), false);
   await assert.rejects(() => buyer.executeDeal({ operationId: "sdk-live-only", capabilityClass: "artifact.generation", input: {}, budget: { asset: "0x2::sui::SUI", maximum: "10" } }), (error: unknown) => error instanceof SupercutsSdkError && error.code === "DEAL_LIVE_REQUIRED");
+});
+
+test("SDK reports missing, malformed, interrupted, timed-out, and mismatched backend seams", async () => {
+  const fake = (name: string, source: string) => { const path = join(root, name); writeFileSync(path, source); return path; };
+  await assert.rejects(() => initializeProfile({ home: join(root, "missing"), seamPath: join(root, "absent.js") }, { role: "buyer", mock: true }), (error: unknown) => error instanceof SeamUnavailable && /missing/.test(error.message));
+  const malformed = fake("malformed.cjs", "process.stdin.resume(); process.stdin.on('end',()=>process.stdout.write('oops'));");
+  await assert.rejects(() => initializeProfile({ home: join(root, "malformed"), seamPath: malformed }, { role: "buyer", mock: true }), (error: unknown) => error instanceof SeamUnavailable && /invalid JSON/.test(error.message));
+  const interrupted = fake("interrupted.cjs", "process.exit(7);");
+  await assert.rejects(() => initializeProfile({ home: join(root, "interrupted"), seamPath: interrupted }, { role: "buyer", mock: true }), (error: unknown) => error instanceof SeamUnavailable && /exit 7/.test(error.message));
+  const stalled = fake("stalled.cjs", "process.stdin.resume(); setInterval(()=>{},1000);");
+  await assert.rejects(() => initializeProfile({ home: join(root, "stalled"), seamPath: stalled, timeoutMs: 50 }, { role: "buyer", mock: true }), (error: unknown) => error instanceof SeamUnavailable && /exceeded/.test(error.message));
+  const mismatch = fake("mismatch.cjs", "let s=''; process.stdin.on('data',x=>s+=x); process.stdin.on('end',()=>{const r=JSON.parse(s); process.stdout.write(JSON.stringify({protocol:1,requestId:r.requestId,ok:true,result:{protocol:1,packageVersion:'9.9.9'}}))});");
+  await assert.rejects(() => initializeProfile({ home: join(root, "mismatch"), seamPath: mismatch }, { role: "buyer", mock: true }), (error: unknown) => error instanceof SeamUnavailable && /incompatible/.test(error.message));
 });

@@ -8,6 +8,10 @@ import { DealJournal, type ExecuteDealInput } from "./deal.js";
 import { createConfiguredDealEngine } from "./deal-adapter.js";
 import { LiveDealPorts } from "./live-deal-ports.js";
 import type { SettlementPlanV1 } from "./settlement.js";
+import { createRequire } from "node:module";
+
+const PACKAGE_VERSION = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
+const MAX_REQUEST_BYTES = 1024 * 1024;
 
 const home = homePath({});
 const app = new Phase3App(home);
@@ -66,14 +70,19 @@ function logTool(name: string, data: Record<string, unknown>): void {
 const rl = createInterface({ input: process.stdin });
 let queue: Promise<unknown> = Promise.resolve();
 rl.on("line", (line) => { queue = queue.then(async () => {
+  if (Buffer.byteLength(line) > MAX_REQUEST_BYTES) return send({ jsonrpc: "2.0", error: { code: -32600, message: "Request exceeds 1 MiB" }, id: null });
   let request: { id?: unknown; method?: string; params?: Record<string, unknown> };
   try { request = JSON.parse(line) as typeof request; } catch { return send({ jsonrpc: "2.0", error: { code: -32700, message: "Parse error" }, id: null }); }
+  if (!request || typeof request !== "object" || request.method !== undefined && typeof request.method !== "string" || request.id !== undefined && typeof request.id !== "string" && typeof request.id !== "number" && request.id !== null || request.params !== undefined && (!request.params || typeof request.params !== "object" || Array.isArray(request.params))) return send({ jsonrpc: "2.0", error: { code: -32600, message: "Invalid JSON-RPC request" }, id: null });
   try {
-    if (request.method === "initialize") return send({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: `supercuts-${app.profile.role}`, version: "0.1.0" } } });
+    if (request.method === "initialize") return send({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: `supercuts-${app.profile.role}`, version: PACKAGE_VERSION } } });
     if (request.method === "notifications/initialized") return;
-    if (request.method === "tools/list") return send({ jsonrpc: "2.0", id: request.id, result: { tools: tools[app.profile.role]!.split(",").filter((name) => remote || !name.startsWith("remote.")).map((name) => { const spec = toolSchema(name); return { name, description: spec.description, inputSchema: spec.inputSchema }; }) } });
+    const available = tools[app.profile.role]!.split(",").filter((name) => (remote || !name.startsWith("remote.")) && (app.profile.mock || memoryConfigured || !name.startsWith("memory.")) && (!name.startsWith("deal.") || mandate.version === "supercuts.mandate.v2") && (["status", "doctor"].includes(name) || mandate.allowedCommands.includes(name === "deal.reconcile" ? "deal.resume" : name)));
+    if (request.method === "tools/list") return send({ jsonrpc: "2.0", id: request.id, result: { tools: available.map((name) => { const spec = toolSchema(name); return { name, description: spec.description, inputSchema: spec.inputSchema }; }) } });
     if (request.method === "tools/call") {
       const name = String(request.params?.name ?? ""), raw = (request.params?.arguments ?? {}) as Record<string, unknown>;
+      if (!available.includes(name)) return send({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: "Tool is unavailable for this role or configuration" } });
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return send({ jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "Tool arguments must be an object" } });
       let data: Record<string, unknown>;
       if (name.startsWith("deal.")) {
         const spec = toolSchema(name); const { validateToolArguments } = await import("./mandate.js"); validateToolArguments(spec, raw);

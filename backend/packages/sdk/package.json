@@ -20,7 +20,7 @@
     "pretest": "pnpm --dir ../.. build",
     "test": "tsx --test test/**/*.test.ts"
   },
-  "peerDependencies": {
+  "dependencies": {
     "@supercuts/backend": "workspace:0.1.0"
   },
   "devDependencies": {
