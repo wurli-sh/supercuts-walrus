@@ -159,12 +159,15 @@ live test evidence and explicit production boundary.
 
 ## Protocol memory worker
 
-For a live role home configured with Walrus Memory, run
+The long-running buyer MCP process drains pending outcome writes every 30
+seconds. For a live role home used without MCP, run
 `supercuts-memory-worker <role-home>` as a separate process. It drains pending
 verified outcome writes and synchronizes the role's Walrus Memory metadata
 using `listMemories()`. `memory.inventory` performs one metadata sync on demand.
 An uncertain write remains `unresolved` for operator reconciliation; the
-worker does not submit it again automatically.
+worker does not submit it again automatically. `deal.reconcile` compares
+client-decrypted recall results with the exact saved outcome; a missing search
+hit leaves the job unresolved.
 
 ## Composite deal adapters
 
@@ -224,8 +227,12 @@ public x402 additionally requires `allowPublicX402: true`, `allowedRails`
 containing `x402`, and no shielded-only privacy rule. The buyer must have
 Testnet SUI for gas and payment, a v2 pool deposit for shielded settlement,
 proof artifacts, and an owner-only Mainnet Walrus Memory configuration.
-`supercuts-memory-worker` may run separately; `executeDeal` also attempts an
-outcome write before reporting completion. Mock profiles are refused.
+`executeDeal` returns `outcome_pending` after finalized payment and verified
+delivery, with the artifact available through `getDealDelivery`. Walrus Memory
+indexing proceeds in the worker; `getDeal` later returns `complete` when the
+outcome blob appears in inventory. `reconcileDealOutcome` handles an ambiguous
+manual Memory write without repaying or resubmitting it. Mock profiles are
+refused.
 
 The generic live wire has been tested with local Walrus and signed HTTP
 negotiation on both rails, plus simulated Sui and Tatum seller verification.

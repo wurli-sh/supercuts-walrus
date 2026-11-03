@@ -5,7 +5,7 @@ Walrus Memory. Walrus carries signed capability registrations and encrypted
 deal transcripts; Memory carries typed owner rules and verified outcomes into
 later planning. The runtime binds both to an owner-approved payment.
 
-Status: implemented with local integration and funded Testnet coverage, 2026-11-03.
+Status: implemented with local integration and funded Testnet coverage, 2026-11-04.
 This document does not change the pinned Testnet pool, its proof statement,
 or existing notes.
 
@@ -16,14 +16,15 @@ planner and mandate gate; a shielded tie preference for v2; local authority
 checks for recalled owner policies and verified memories; signed capability
 verification shared by the buyer and seller catalog; a durable deal journal
 and strict input validator; metadata-only `listMemories()` synchronization;
-and a separate memory worker command. The worker leaves uncertain writes
+and a buyer MCP memory loop plus a separate worker command. Both leave uncertain writes
 unresolved instead of resubmitting them.
 
 The composite deal engine and journal now support discovery, planning,
 negotiation evidence, payment, delivery, and outcome inventory transitions.
 The buyer SDK and seam expose `executeDeal`, `getDeal`, `resumeDeal`,
-`getDealEvidence`, and `getDealDelivery`; MCP exposes redacted execute, status,
-and resume tools. A generic seller handler runtime validates signed
+`getDealEvidence`, `getDealDelivery`, and `reconcileDealOutcome`; MCP exposes
+redacted execute, status, resume, and reconciliation tools. A generic seller
+handler runtime validates signed
 registrations, task input, payment evidence, output metadata, and encrypted
 delivery readback. These components use injected transport and verification
 ports. The default live buyer adapter reads owner-only `deal-sellers.json` in
@@ -57,6 +58,15 @@ same-state transitions are now idempotent. These operations are live Testnet
 evidence, not a `supercuts-demo` event stream, and the pool is not production
 custody.
 
+On 2026-11-04, another funded shielded deal returned verified delivery in
+58.4 seconds, with payment digest
+`4vcUsi2VEzB7MnRyeohRhHYpVAZi59EE9rUBZg2umKjq`. The buyer-facing result
+was `outcome_pending`; a targeted client-encrypted Walrus Memory write then
+indexed and moved the same deal to `complete`. The recorded proof step took
+2.2 seconds. This is one live observation, not a guaranteed latency bound.
+The observed pool still had only one distinct depositing address, so proof
+privacy must not be presented as a broad anonymity set.
+
 ## Goal and boundary
 
 Supercuts is an agent-to-agent settlement protocol. An agent supplies a task,
@@ -81,15 +91,16 @@ remains experimental Testnet software.
   Walrus via `backend/src/phase3.ts`.
 - `backend/src/memwal.ts` encrypts and embeds memory client side. Planning in
   `backend/src/phase3.ts` recalls memory; accepted agreements, settlement, and
-  delivery enqueue verified outcome memories. Those jobs currently drain via
-  `memory.status`. Agents also see `memory.remember` and `memory.recall`.
+  delivery enqueue verified outcome memories. The buyer MCP process or
+  standalone worker drains those jobs without an agent Memory call. Agents
+  can also use `memory.remember` and `memory.recall` explicitly.
 - `backend/packages/sdk/src/index.ts` exposes many low-level buyer actions.
   `backend/src/remote-buyer.ts` contains a task-specific procurement flow.
 
-The missing abstraction is a *deal lifecycle*. Walrus writes and recalls are
-separate operations rather than mandatory, recoverable protocol transitions.
-Memory affects planning, but a successful settlement does not itself guarantee
-that its encrypted evidence and outcome memory are durable on Walrus.
+The composite deal lifecycle now journals encrypted Walrus evidence before
+payment and queues the verified outcome after delivery. A delivered deal can
+temporarily have `outcome_pending`; only an indexed memory promotes it to
+`complete`.
 
 ## Proposed protocol surface
 
@@ -226,7 +237,9 @@ encrypted signed agreement before payment. `paid` requires finalized Sui and
 Tatum evidence, not merely a broadcast digest. `complete` requires encrypted
 delivery evidence and a durable outcome write. A Walrus outage before
 `evidence_ready` pauses payment; an outage after payment leaves the deal in
-`outcome_pending` and `resume` retries the same write. Unknown broadcast
+`outcome_pending` with the verified artifact available. The buyer call returns
+after delivery and queues outcome memory for the worker. An ambiguous Memory
+POST is marked unresolved and is never submitted again automatically. Unknown broadcast
 outcomes must reconcile the original signed transaction, never create a
 different payment under the same operation ID. A receipt exposes the current
 state honestly, including `outcome_pending`.
@@ -573,7 +586,7 @@ databases, state keys, Sui signers, and memory accounts.
 | `payment_pending` | Signed transaction or x402 request bound to the plan and journaled | Reconcile the exact transaction or request |
 | `paid` | Successful checkpoint and matching Tatum evidence; pool or x402 bindings verified | Read finality again; do not sign a replacement payment |
 | `delivered` | Encrypted artifact fetched, authenticated, and matched to the promised hash | Replay saved delivery, never regenerate it silently |
-| `outcome_pending` | Payment and delivery facts finalized; memory payload saved in the outbox | Reconcile or submit the same memory payload |
+| `outcome_pending` | Payment and delivery facts finalized; memory payload saved in the outbox | Let the worker submit a pending job; use `deal.reconcile` for an ambiguous write |
 | `complete` | Outcome memory blob ID recorded and present in inventory | Return the same receipt and evidence references |
 
 `failed` is for a definitive terminal error before payment or for an
@@ -603,7 +616,11 @@ idempotency key in the current installed API. If a call times out before
 returning `blob_id`, `listMemories()` cannot identify that payload from
 metadata alone. Mark the outbox item `unresolved`; do not blindly repeat a
 potentially paid write. Add a reconciliation method or a documented
-idempotent write path before claiming automatic recovery for that case.
+idempotent write path before claiming automatic recovery for that case. The
+owner-only `deal.reconcile` reads candidate memories through client-managed
+recall and accepts a blob ID only when decrypted canonical content exactly
+matches the saved outbox payload. No match leaves the job unresolved; an empty
+recall is not evidence that a timed-out write failed.
 
 Inventory polling uses `MemWal.listMemories({ cursor, namespace })` from the
 same role's account and delegate. Do not swap in the relayer-managed
@@ -617,11 +634,13 @@ it does not verify its plaintext, ciphertext, provenance, or chain finality.
 Keep owner policy as an exact owner-approved record in local state and an
 encrypted Walrus backup; do not authorize a payment from a semantic hit alone.
 
-Run the outbox in a dedicated backend worker process and from explicit
-`resumeDeal`. The one-request `supercuts-seam` subprocess exits after a call,
-so a timer inside it is not a durable background worker. Worker startup scans
-pending and unresolved jobs and respects rate limits and retry delays. A
-normal agent interaction does not need to call `memory.status` to flush work.
+Run the outbox in the long-running buyer MCP process or the dedicated backend
+worker. The one-request `supercuts-seam` subprocess exits after a call, so a
+timer inside it is not a durable background worker. Both runners atomically
+claim pending jobs. A stale submitting claim becomes unresolved after five
+minutes; neither runner resubmits it. `deal.get` and `deal.resume` report
+`check_memory` or `reconcile_memory` without repeating the payment. A normal
+agent interaction does not need to call `memory.status` to flush work.
 Use Walrus blob expiry metadata to alert before expiry; renewal needs its own
 owner-authorized storage operation. Never label expired evidence durable.
 
