@@ -149,3 +149,84 @@ buyer profile, manifest, event log, or dashboard. The Testnet
 Seal policy is pinned in `config/seal-policy.testnet.json`. No test-only pool is represented as production-safe. Run the
 repository-level `scripts/phase2-check.sh` and see `phase-2-report.md` for the
 live test evidence and explicit production boundary.
+
+## Protocol memory worker
+
+For a live role home configured with Walrus Memory, run
+`supercuts-memory-worker <role-home>` as a separate process. It drains pending
+verified outcome writes and synchronizes the role's Walrus Memory metadata
+using `listMemories()`. `memory.inventory` performs one metadata sync on demand.
+An uncertain write remains `unresolved` for operator reconciliation; the
+worker does not submit it again automatically.
+
+## Composite deal adapters
+
+The buyer SDK exposes `executeDeal`, `getDeal`, `resumeDeal`,
+`getDealEvidence`, and `getDealDelivery`. The built-in live adapter loads
+owner-only `deal-sellers.json` from the buyer role home. It is a JSON array of
+seller origins, for example `["https://seller.example"]`, mode `0600`. It
+discovers signed capabilities at `/v2/catalog`, fetches the signed manifest
+from Walrus, selects the mandate-approved rail, and uses the buyer role's own
+signer, pool notes, Walrus and Walrus Memory configuration. A missing file
+returns `DEAL_SELLERS_NOT_CONFIGURED`. An owner-only `deal-ports.mjs` exporting
+`createDealPorts(app, mandate)` remains available as an advanced override.
+
+The seller service is `supercuts-seller-live <seller-home> <config.json>`.
+Register each capability first with
+`supercuts-seller-register <seller-home> <spec.json> <registration.json>`.
+The spec contains `capabilityId`, `capability`, `description`, `inputSchema`,
+`outputSchema`, `supportedRails`, `priceBand`, `asset`, `endpoint`, and
+`expiresAt`; Supercuts inserts the seller signer address, validates the schema,
+publishes the manifest to Walrus, and signs its manifest hash and transport
+key. The registration file is created mode `0600`. The endpoint is the
+seller-owned resource prefix, such as
+`https://seller.example/v2/resource/report`. The current wire contract uses
+the signed price band's `minimum` as its exact price.
+
+The seller's owner-only config has this shape:
+
+```json
+{
+  "origin": "https://seller.example",
+  "listenHost": "127.0.0.1",
+  "listenPort": 8788,
+  "facilitatorUrl": "https://facilitator.example",
+  "facilitatorKey": "OWNER_ONLY_FACILITATOR_SECRET",
+  "allowedBuyers": ["0xBUYER_ADDRESS"],
+  "capabilities": [
+    { "registrationFile": "/owner/path/registration.json", "handler": "/owner/path/handler.mjs" }
+  ]
+}
+```
+
+The handler module exports `default async function handle(request)` and
+returns `{ artifact: Uint8Array, contentType: string, metadata: object }`.
+Its `request.input` is decrypted inside the seller role, and `metadata` must
+match the signed output schema. Keep config and handler mode `0600`. Put a TLS
+reverse proxy in front of the local listener when `origin` is public HTTPS.
+The facilitator key stays in the seller config. The x402 resource delivers a
+paid acknowledgment; the buyer then requests the encrypted artifact. For a
+shielded deal, the seller verifies the pinned pool transfer event and recovers
+its note before the handler runs. Both rails require matching finalized Sui and
+Tatum evidence. The service publishes encrypted offer, agreement reply, and
+delivery blobs to Walrus and checks readback.
+
+Issue a buyer `supercuts.mandate.v2` allowing `deal.execute` and the underlying
+planning, agreement, payment, and memory commands. Shielded is the default;
+public x402 additionally requires `allowPublicX402: true`, `allowedRails`
+containing `x402`, and no shielded-only privacy rule. The buyer must have
+Testnet SUI for gas and payment, a v2 pool deposit for shielded settlement,
+proof artifacts, and an owner-only Mainnet Walrus Memory configuration.
+`supercuts-memory-worker` may run separately; `executeDeal` also attempts an
+outcome write before reporting completion. Mock profiles are refused.
+
+The generic live wire has been tested with local Walrus and signed HTTP
+negotiation on both rails, plus simulated Sui and Tatum seller verification.
+On 2026-11-03, separate funded Sui Testnet composite operations reached
+`complete`: shielded digest
+`HxyeTY9ThQoAtz4a1FLcgJhj1vtsSGSB3zyz6A9fyoeq` and public x402 digest
+`CAWTGRYSr5aTzMmToxZbZQmeX4DN2KiZz7ANoZxNsGeM`. Both buyer journals
+show finalized payment, verified Walrus delivery readback, and indexed Walrus
+Memory outcome. The shielded seller recovered its payment note. These are
+live Testnet observations, separate from the recorded `supercuts-demo` event
+stream. The v2 pool remains experimental and Testnet-only.
