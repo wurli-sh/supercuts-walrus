@@ -49,6 +49,9 @@ pnpm --dir backend exec supercuts doctor --home .state/buyer
 SUPERCUTS_HOME=.state/buyer pnpm --dir backend exec supercuts-mcp
 ```
 
+For one-time self-service buyer setup and task-driven Codex deals, see
+[Self-service setup](docs/self-service-setup.md).
+
 Every command writes one `supercuts.v1` JSON value and failures use stable error
 codes with a nonzero exit status. Mutating operations require `--authorize`.
 Buyer, seller, and auditor homes must be separate. `--mock` is deterministic

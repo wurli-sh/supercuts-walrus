@@ -26,6 +26,10 @@ tools allowed by the initialized role. Use separate `SUPERCUTS_HOME` directories
 for buyer, seller, and auditor processes. Development homes initialized with
 `--mock` always label receipts `deterministic-mock-not-funded`.
 
+For a reusable live buyer, run `supercuts setup buyer --home <buyer-home>` and
+follow [the self-service setup guide](../docs/self-service-setup.md). It creates
+a standing v2 policy, signed seller sources, and a Codex MCP configuration.
+
 MCP mutations are authorized by the owner-only `mandate.json` created at
 initialization. Tool schemas reject unknown arguments (including the deprecated
 `authorize` flag), require an operation ID for every mutation, and enforce the

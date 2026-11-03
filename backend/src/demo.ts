@@ -12,6 +12,10 @@ import { fail } from "./errors.js";
 import { validateCapabilityManifest, type CapabilityManifest } from "./capability.js";
 import { deterministicCounteroffer } from "./procurement.js";
 import { BoundedClaude } from "./claude.js";
+import { loadMandate } from "./mandate.js";
+import { LiveDealPorts } from "./live-deal-ports.js";
+import { DealJournal } from "./deal.js";
+import { V2ExitQueue } from "./v2-exits.js";
 
 const [command = "", ...words] = process.argv.slice(2), args = parseArgs(words);
 const value = (name: string, fallback?: string): string => typeof args[name] === "string" ? args[name] : fallback ?? fail("ARGUMENT_REQUIRED", `--${name} is required`);
@@ -58,6 +62,16 @@ async function setup(): Promise<Record<string, unknown>> {
 }
 
 async function doctor(): Promise<Record<string, unknown>> {
+  if (typeof args["buyer-home"] === "string") {
+    const home = resolve(args["buyer-home"]), app = new Phase3App(home);
+    try {
+      if (app.profile.role !== "buyer" || app.profile.mock || app.profile.verifierVersion !== 2) fail("LIVE_PROFILE_REQUIRED", "generic Codex doctor requires a live v2 buyer");
+      const mandate = loadMandate(home), buyer = (await app.execute("doctor", {})).data;
+      const catalog = await new LiveDealPorts(app, mandate).catalog();
+      if (!catalog.length) fail("SELLER_CATALOG_EMPTY", "configured seller origins have no allowed signed v2 capability");
+      return { healthy: true, buyer, sellerCapabilities: catalog.map(({ registration }) => registration.manifest.capabilityId) };
+    } finally { app.close(); }
+  }
   const roles = homes(stateDir()), reports: Record<string, unknown> = {};
   for (const [name, home] of Object.entries(roles)) { const app = new Phase3App(home); try { reports[name] = (await app.execute("doctor", {})).data; } finally { app.close(); } }
   let remote: Record<string, unknown> | undefined;
@@ -88,6 +102,38 @@ async function seedPolicy(): Promise<Record<string, unknown>> {
 }
 
 function check(): Record<string, unknown> {
+  if (typeof args["buyer-home"] === "string") {
+    const home = resolve(args["buyer-home"]), sellerHome = resolve(value("seller-home")), path = resolve(value("events"));
+    if (!existsSync(home) || (statSync(home).mode & 0o077) !== 0 || !existsSync(sellerHome) || (statSync(sellerHome).mode & 0o077) !== 0 || !existsSync(path) || (statSync(path).mode & 0o077) !== 0) fail("DEMO_PERMISSIONS", "generic role homes and event stream must be owner-only");
+    const profile = JSON.parse(readFileSync(join(home, "profile.json"), "utf8")) as { role?: string; mock?: boolean; verifierVersion?: number };
+    if (profile.role !== "buyer" || profile.mock || profile.verifierVersion !== 2) fail("LIVE_PROFILE_REQUIRED", "generic Codex demo requires a live v2 buyer home");
+    const raw = readFileSync(path, "utf8");
+    if (/(?:suiprivkey|BEGIN [A-Z ]*PRIVATE KEY|approval.?token|note.?opening|full.?prompt)/i.test(raw)) fail("SECRET_SCAN_FAILED", "event bundle contains forbidden secret material");
+    const events = readDemoEvents(path), deals = events.filter((event) => event.stage === "deal-lifecycle" && event.status === "complete" && event.publicDetails.state === "complete");
+    const rails = new Map(deals.map((event) => [event.publicDetails.rail, event]));
+    const memories = events.filter((event) => event.stage === "memory" && event.status === "complete" && typeof event.publicDetails.blobId === "string");
+    const recall = events.find((event) => event.stage === "memory-recall" && Array.isArray(event.publicDetails.citations) && event.publicDetails.citations.some((citation) => citation.kind === "privacy_rule" && citation.provenance === "owner_policy"));
+    const privacyPlan = events.find((event) => event.stage === "settlement-plan" && event.publicDetails.rail === "shielded" && Array.isArray(event.publicDetails.reasonCodes) && event.publicDetails.reasonCodes.includes("MEMORY_PRIVACY_APPLIED") && (!recall || event.sequence > recall.sequence));
+    const prefund = events.find((event) => event.stage === "prefunding" && event.status === "complete" && typeof event.publicDetails.transactionDigest === "string");
+    const exit = events.find((event) => event.actor === "confidential-seller" && event.stage === "delayed-exit" && event.status === "complete" && event.publicDetails.state === "queued");
+    if (!prefund || !exit || !recall || !privacyPlan || memories.length < 10 || new Set(memories.map((event) => event.publicDetails.blobId)).size < 10 || memories.some((event) => String(event.publicDetails.blobId).startsWith("mockwalrus_")) || !rails.has("x402") || !rails.has("shielded") || [...rails.values()].some((event) => event.publicDetails.payment !== "finalized" || event.publicDetails.agreement !== "verified" || event.publicDetails.delivery !== "verified" || event.publicDetails.outcomeMemory !== "indexed" || typeof event.publicDetails.paymentDigest !== "string") || prefund.sequence >= Math.min(...deals.map((event) => event.sequence)) || exit.sequence <= rails.get("shielded")!.sequence) fail("DEMO_ACCEPTANCE_INCOMPLETE", "generic Codex stream needs prefunding, ten memories, recalled privacy, both live paid deliveries and indexed outcomes, then a queued seller exit");
+    const buyer = new Phase3App(home), seller = new Phase3App(sellerHome);
+    try {
+      if (seller.profile.role !== "seller" || seller.profile.mock || seller.profile.verifierVersion !== 2) fail("LIVE_PROFILE_REQUIRED", "queued exit must belong to a separate live v2 seller");
+      const journal = new DealJournal(buyer.store);
+      for (const event of rails.values()) {
+        const dealId = String(event.publicDetails.dealId ?? ""), row = buyer.store.db.prepare("SELECT operation_id FROM deal_operations WHERE deal_id=?").get(dealId) as { operation_id: string } | undefined;
+        if (!row) fail("DEMO_EVIDENCE_MISMATCH", "logged deal is absent from buyer journal");
+        const view = journal.get(row!.operation_id), evidence = journal.evidence(dealId);
+        if (view.state !== "complete" || view.rail !== event.publicDetails.rail || view.paymentDigest !== event.publicDetails.paymentDigest || evidence.inventory !== "indexed" || !evidence.paymentFinalized || evidence.ciphertextReadback !== "verified") fail("DEMO_EVIDENCE_MISMATCH", "logged deal differs from verified buyer journal");
+      }
+      const funded = buyer.store.db.prepare("SELECT 1 FROM live_signed_transactions WHERE digest=? AND status='finalized'").get(String(prefund!.publicDetails.transactionDigest));
+      const queued = new V2ExitQueue(seller.store).get(String(exit!.publicDetails.operationId ?? ""));
+      const recovered = queued ? seller.store.db.prepare("SELECT 1 FROM notes WHERE commitment=? AND role='payment'").get(queued.commitment) : undefined;
+      if (!funded || !queued || queued.status !== "queued" || !recovered) fail("DEMO_EVIDENCE_MISMATCH", "prefunding or recovered seller exit is absent from its role journal");
+      return { healthy: true, checked: [home, sellerHome, path], secretScan: "pass", deals: deals.length };
+    } finally { buyer.close(); seller.close(); }
+  }
   const root = stateDir(), roles = homes(root), checked: string[] = [];
   for (const path of [root, ...Object.values(roles)]) { if (!existsSync(path) || (statSync(path).mode & 0o077) !== 0) fail("DEMO_PERMISSIONS", `${path} is missing or not owner-only`); checked.push(path); }
   const runPath = join(root, "run.json"), run = existsSync(runPath) ? JSON.parse(readFileSync(runPath, "utf8")) as { eventPath?: string } : {};
