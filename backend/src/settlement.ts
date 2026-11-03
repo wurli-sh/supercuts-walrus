@@ -29,9 +29,9 @@ export interface SettlementPlanV1 {
   citations: SettlementCitation[]; reasonCodes: SettlementReasonCode[]; approvedFromPlanHash?: string;
 }
 export interface PlanningMandate {
-  version: "supercuts.mandate.v1"; allowedCounterparties: string[]; allowedAssets: string[]; perDealCeiling: string;
+  version: "supercuts.mandate.v1" | "supercuts.mandate.v2"; allowedCounterparties: string[]; allowedAssets: string[]; perDealCeiling: string;
   requiredPrivacy: "any" | "shielded"; expiresAt: number; allowedCapabilityIds?: string[];
-  allowedCapabilityClasses?: string[]; allowedRails?: CapabilityRail[];
+  allowedCapabilityClasses?: string[]; allowedRails?: CapabilityRail[]; allowPublicX402?: boolean;
 }
 export interface RecalledSettlementMemory { blobId: string; distance: number; memory?: SettlementMemoryV1; legacy?: boolean; }
 
@@ -76,7 +76,7 @@ function specificity(scope: SettlementMemoryScope, manifest: CapabilityManifest)
 }
 interface Candidate { manifest: CapabilityManifest; rail: CapabilityRail; reliability: number; quality: number; maximum: bigint; risk: SettlementRisk; citations: SettlementCitation[]; reasons: SettlementReasonCode[]; conflict: boolean; }
 
-export function createSettlementPlan(input: { operationId: string; mandate: PlanningMandate; manifests: CapabilityManifest[]; requestedAmount?: string; privacyHint?: "any" | "shielded"; recalled?: RecalledSettlementMemory[]; maxMemoryDistance?: number; now?: number }): SettlementPlanV1 {
+export function createSettlementPlan(input: { operationId: string; mandate: PlanningMandate; manifests: CapabilityManifest[]; requestedAmount?: string; privacyHint?: "any" | "shielded"; requestedRail?: CapabilityRail; recalled?: RecalledSettlementMemory[]; maxMemoryDistance?: number; now?: number }): SettlementPlanV1 {
   const now = input.now ?? Date.now(), maxDistance = input.maxMemoryDistance ?? 0.35;
   if (!input.operationId || input.operationId.length > 256 || !input.manifests.length) fail("SETTLEMENT_PLAN_INVALID", "planning requires an operation ID and at least one capability");
   if (input.requestedAmount !== undefined && !unsigned(input.requestedAmount)) fail("SETTLEMENT_PLAN_INVALID", "requestedAmount must be canonical unsigned base units");
@@ -99,14 +99,14 @@ export function createSettlementPlan(input: { operationId: string; mandate: Plan
     };
     const policies = latest("privacy_rule"), conflict = policies[0]?.provenance === "owner_policy" && new Set(policies.map((item) => item.signal.requiresShielded)).size > 1;
     const requiresShielded = input.mandate.requiredPrivacy === "shielded" || input.privacyHint === "shielded" || policies.some((item) => item.signal.requiresShielded === true);
-    const rails = manifest.supportedRails.filter((rail) => (!input.mandate.allowedRails || input.mandate.allowedRails.includes(rail)) && (!requiresShielded || rail === "shielded")); if (!rails.length) continue;
+    const rails = manifest.supportedRails.filter((rail) => (!input.mandate.allowedRails || input.mandate.allowedRails.includes(rail)) && (!requiresShielded || rail === "shielded") && (input.mandate.version !== "supercuts.mandate.v2" || rail !== "x402" || input.mandate.allowPublicX402 === true) && (!input.requestedRail || rail === input.requestedRail)); if (!rails.length) continue;
     const budgets = trusted.filter((item) => item.memory!.kind === "budget_limit").map((item) => BigInt(item.memory!.signal.maximumAmount!));
     const maximum = [BigInt(manifest.priceBand.maximum), BigInt(input.mandate.perDealCeiling), ...budgets].reduce((a, b) => a < b ? a : b); if (maximum < BigInt(manifest.priceBand.minimum)) continue;
     const reliability = latest("reliability")[0]?.signal.reliability ?? 0.5, quality = latest("quality")[0]?.signal.quality ?? 0.5, outcome = latest("outcome")[0]?.signal.outcome;
     const risk: SettlementRisk = conflict || outcome === "failed" || outcome === "unresolved" || reliability < 0.5 ? "review_required" : reliability >= 0.8 ? "low" : "medium";
     for (const rail of rails) candidates.push({ manifest, rail, reliability, quality, maximum, risk, citations, conflict, reasons: ["MANDATE_DEFAULTS_APPLIED", ...(policies.length ? ["MEMORY_PRIVACY_APPLIED" as const] : []), ...(budgets.length ? ["MEMORY_BUDGET_APPLIED" as const] : []), ...(outcome ? ["MEMORY_OUTCOME_APPLIED" as const] : []), ...(citations.some((c) => ["agent_observation", "legacy_untrusted"].includes(c.provenance)) ? ["MEMORY_UNTRUSTED_ADVISORY" as const] : []), ...(ignored.length ? ["MEMORY_LOW_RELEVANCE_IGNORED" as const] : [])] });
   }
-  candidates.sort((a, b) => b.reliability - a.reliability || b.quality - a.quality || (a.maximum < b.maximum ? -1 : a.maximum > b.maximum ? 1 : 0) || a.manifest.capabilityId.localeCompare(b.manifest.capabilityId) || (a.rail === b.rail ? 0 : a.rail === "x402" ? -1 : 1));
+  candidates.sort((a, b) => b.reliability - a.reliability || b.quality - a.quality || (a.maximum < b.maximum ? -1 : a.maximum > b.maximum ? 1 : 0) || a.manifest.capabilityId.localeCompare(b.manifest.capabilityId) || (a.rail === b.rail ? 0 : input.mandate.version === "supercuts.mandate.v2" ? a.rail === "shielded" ? -1 : 1 : a.rail === "x402" ? -1 : 1));
   const selected = candidates[0] ?? fail("SETTLEMENT_PLAN_DENIED", "no capability remains within the owner mandate, privacy rules, and price bounds");
   const minimum = BigInt(selected.manifest.priceBand.minimum), desired = input.requestedAmount === undefined ? minimum : BigInt(input.requestedAmount), opening = desired < minimum ? minimum : desired > selected.maximum ? selected.maximum : desired;
   const reasons = [...selected.reasons, ...(selected.conflict ? ["OWNER_POLICY_CONFLICT" as const] : []), ...(opening !== desired ? ["REQUESTED_AMOUNT_CLAMPED" as const] : []), selected.rail === "shielded" ? "RAIL_SHIELDED_SELECTED" as const : "RAIL_X402_SELECTED" as const, selected.risk === "low" ? "RISK_LOW" as const : selected.risk === "medium" ? "RISK_MEDIUM" as const : "RISK_REVIEW_REQUIRED" as const];

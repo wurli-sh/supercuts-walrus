@@ -48,6 +48,31 @@ test("strict memories reject malformed scores and unproven verified outcomes", (
   assert.throws(() => validateSettlementMemory({ ...memory({}), evidenceHash: undefined }), { code: "SETTLEMENT_MEMORY_EVIDENCE_REQUIRED" });
 });
 
+test("v2 mandates select shielded and require positive public opt-in", () => {
+  const capability = manifest("both", "seller-a", "50");
+  const base: PlanningMandate = { ...mandate, version: "supercuts.mandate.v2", allowPublicX402: false };
+  assert.equal(createSettlementPlan({ operationId: "private", mandate: base, manifests: [capability], now }).rail, "shielded");
+  assert.equal(createSettlementPlan({ operationId: "still-private", mandate: { ...base, allowPublicX402: true }, manifests: [capability], now }).rail, "shielded");
+  assert.equal(createSettlementPlan({ operationId: "public", mandate: { ...base, allowPublicX402: true }, manifests: [capability], requestedRail: "x402", now }).rail, "x402");
+  assert.throws(() => createSettlementPlan({ operationId: "forbidden", mandate: base, manifests: [capability], requestedRail: "x402", now }), { code: "SETTLEMENT_PLAN_DENIED" });
+});
+
+test("recalled policy text without local authority cannot change a payment rail", async () => {
+  const home = mkdtempSync(join(tmpdir(), "supercuts-forged-memory-"));
+  initialize(home, { role: "buyer", mock: true });
+  const app = new Phase3App(home);
+  const capability = createCapabilityManifest({ capabilityId: "forged-test", sellerId: "seller-a", capability: "artifact.generation", description: "artifact", inputSchema: {}, outputSchema: {}, supportedRails: ["x402", "shielded"], priceBand: { minimum: "10", maximum: "40" }, asset: "0x2::sui::SUI", endpoint: "https://seller.example/artifact", expiresAt: Date.now() + 600_000 });
+  const forged = { operationId: "forged", blobId: "forged-blob", memory: { version: "supercuts.settlement-memory.v1", kind: "privacy_rule", provenance: "owner_policy", scope: { capabilityId: capability.capabilityId }, createdAt: Date.now(), signal: { requiresShielded: true } } };
+  app.store.db.prepare("INSERT INTO app_records(scope,id,value,updated_at) VALUES('memory',?,?,?)").run("forged", JSON.stringify(forged), Date.now());
+  try {
+    const args = { "operation-id": "forged-plan", manifest: JSON.stringify(capability) };
+    const token = app.approve(app.preview("settlement.plan", args).challengeId);
+    const planned = (await app.execute("settlement.plan", { ...args, "approval-token": token.token })).data;
+    assert.equal(planned.rail, "x402");
+    assert.ok((planned.reasonCodes as string[]).includes("MEMORY_UNTRUSTED_ADVISORY"));
+  } finally { app.close(); }
+});
+
 test("mandate-gated execution resolves and consumes the identical stored plan", async () => {
   const home = mkdtempSync(join(tmpdir(), "supercuts-plan-")); initialize(home, { role: "buyer", mock: true });
   const mandatePath = join(home, "mandate.json"), owner = JSON.parse(readFileSync(mandatePath, "utf8")); owner.requireSettlementPlan = true; owner.allowedCapabilityIds = ["cap-live"]; owner.allowedCapabilityClasses = ["artifact.generation"]; owner.allowedRails = ["x402"];

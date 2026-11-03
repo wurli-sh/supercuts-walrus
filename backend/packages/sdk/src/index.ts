@@ -11,6 +11,11 @@ export type OperationId = string & { readonly __brand: "OperationId" };
 export type SessionId = string & { readonly __brand: "SessionId" };
 export type TransactionDigest = string & { readonly __brand: "TransactionDigest" };
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+export type DealState = "created" | "discovered" | "planned" | "awaiting_approval" | "review_required" | "funding_required" | "negotiating" | "agreed" | "evidence_ready" | "payment_pending" | "paid" | "delivery_pending" | "delivered" | "outcome_pending" | "complete" | "failed" | "unresolved";
+export interface ExecuteDealInput { operationId: string; capabilityId?: string; capabilityClass?: string; input: Record<string, unknown>; budget: { asset: string; maximum: string }; privacyHint?: "any" | "shielded"; requestedRail?: Rail; }
+export interface DealView { version: "supercuts.deal.v2"; dealId: string; operationId: string; state: DealState; rail?: Rail; visibility?: "shielded-direct-payment" | "public-x402"; planHash?: string; paymentDigest?: string; deliveryHash?: string; evidence: { agreement: "pending" | "verified"; payment: "pending" | "finalized"; delivery: "pending" | "verified"; outcomeMemory: "pending" | "indexed" | "unresolved" }; nextAction?: "resume" | "fund_buyer" | "owner_approval" | "owner_review"; }
+export interface DealEvidenceView { version: "supercuts.deal-evidence.v1"; dealId: string; transcriptBlobIds: string[]; agreementBlobId?: string; deliveryBlobId?: string; outcomeMemoryBlobId?: string; ciphertextReadback: "pending" | "verified" | "unresolved"; inventory: "pending" | "indexed" | "missing" | "unresolved"; paymentFinalized: boolean; paymentDigest?: string; }
+export interface DealDelivery { dealId: string; contentType: string; artifactSha256: string; artifact: Uint8Array; }
 
 export interface CapabilityManifest {
   protocol: "supercuts.capability.v1"; capabilityId: string; sellerId: string; capability: string; description: string;
@@ -130,10 +135,15 @@ const exitArgs = (input: { operationId: OperationId; commitment: string; amount:
 
 export class BuyerClient extends RoleClient {
   static async connect(config: SupercutsSdkConfig): Promise<BuyerClient> { const client = new BuyerClient(config); await client.ensureCompatible(); const report = await client.doctor(); if (report.role !== "buyer") throw new SupercutsSdkError("SDK_ROLE_MISMATCH", `expected buyer profile, found ${report.role}`, false); return client; }
+  async executeDeal(input: ExecuteDealInput): Promise<DealView> { return this.seam.call("deal.execute", { input }); }
+  async getDeal(operationId: string): Promise<DealView> { return this.seam.call("deal.get", { operationId }); }
+  async resumeDeal(operationId: string): Promise<DealView> { return this.seam.call("deal.resume", { operationId }); }
+  async getDealEvidence(dealId: string): Promise<DealEvidenceView> { return this.seam.call("deal.evidence", { dealId }); }
+  async getDealDelivery(dealId: string): Promise<DealDelivery> { const value = await this.seam.call<Omit<DealDelivery, "artifact"> & { artifact: string }>("deal.delivery", { dealId }); return { ...value, artifact: Buffer.from(value.artifact, "base64") }; }
   async discoverSellers(capabilities: Capability[]): Promise<Capability[]> { const value = await this.read<{ capabilities: Capability[] }>("capability.discover", { capabilities }); return value.capabilities; }
   async discoverCapabilities(manifests: CapabilityManifest[]): Promise<CapabilityManifest[]> { const value = await this.read<{ capabilities: CapabilityManifest[] }>("capability.discover", { capabilities: manifests }); return value.capabilities; }
   async discoverCapabilityBlobs(blobIds: string[]): Promise<Array<CapabilityManifest & { blobId: string }>> { const value = await this.read<{ capabilities: Array<CapabilityManifest & { blobId: string }> }>("capability.discover", { "blob-ids": blobIds }); return value.capabilities; }
-  async planSettlement(input: { operationId: OperationId; manifest: CapabilityManifest; alternatives?: CapabilityManifest[]; requestedAmount?: bigint; privacyHint?: "any" | "shielded" }): Promise<SettlementPlanV1> { return this.mutate("settlement.plan", { "operation-id": input.operationId, manifest: input.manifest, ...(input.alternatives ? { alternatives: input.alternatives } : {}), ...(input.requestedAmount !== undefined ? { "requested-amount": input.requestedAmount.toString() } : {}), ...(input.privacyHint ? { "privacy-hint": input.privacyHint } : {}) }); }
+  async planSettlement(input: { operationId: OperationId; manifest: CapabilityManifest; alternatives?: CapabilityManifest[]; requestedAmount?: bigint; privacyHint?: "any" | "shielded"; requestedRail?: Rail }): Promise<SettlementPlanV1> { return this.mutate("settlement.plan", { "operation-id": input.operationId, manifest: input.manifest, ...(input.alternatives ? { alternatives: input.alternatives } : {}), ...(input.requestedAmount !== undefined ? { "requested-amount": input.requestedAmount.toString() } : {}), ...(input.privacyHint ? { "privacy-hint": input.privacyHint } : {}), ...(input.requestedRail ? { "requested-rail": input.requestedRail } : {}) }); }
   async deposit(amount: bigint, id: OperationId = operationId(randomUUID())): Promise<TransactionReceipt> { const value = await this.mutate<any>("wallet.deposit", { amount: amount.toString(), "operation-id": id }); return { ...value, amount: BigInt(value.amount) }; }
   async balance(): Promise<WalletBalance> { const value = await this.read<any>("wallet.balance"); return { ...value, available: BigInt(value.available) }; }
   async recover(): Promise<{ recovered: number; source: string }> { return this.mutate("wallet.recover", {}); }
@@ -158,6 +168,7 @@ export class BuyerClient extends RoleClient {
   async rememberSettlement(operationId: OperationId, memory: Omit<SettlementMemoryV1, "provenance">): Promise<{ operationId: string; namespace: string; blobId: string; status: string; provenance: "agent_observation" }> { return this.mutate("memory.remember", { "operation-id": operationId, memory }); }
   async recall(query: string): Promise<{ namespace: string; citations: SettlementCitation[]; effect: string }> { return this.read("memory.recall", { query }); }
   async memoryStatus(): Promise<MemoryStatus> { return this.read("memory.status"); }
+  async syncMemoryInventory(blobId?: string): Promise<{ namespace: string; indexed: number; deleted: number; cursor: string | null; blobId?: string; present?: boolean; expiresAt?: string }> { return this.read("memory.inventory", blobId ? { "blob-id": blobId } : {}); }
   async requestDisclosure(input: { dealId: string; auditor: string; paymentDigest: TransactionDigest; transcriptRoot: string }): Promise<DisclosureReference> { return this.mutate("disclose", { "deal-id": input.dealId, auditor: input.auditor, "payment-digest": input.paymentDigest, "transcript-root": input.transcriptRoot }); }
 }
 
@@ -180,6 +191,7 @@ export class SellerClient extends RoleClient {
   async remember(operationId: OperationId, fact: string): Promise<{ operationId: string; namespace: string; blobId: string; status: string }> { return this.mutate("memory.remember", { "operation-id": operationId, fact }); }
   async recall(query: string): Promise<{ namespace: string; citations: SettlementCitation[]; effect: string }> { return this.read("memory.recall", { query }); }
   async memoryStatus(): Promise<MemoryStatus> { return this.read("memory.status"); }
+  async syncMemoryInventory(blobId?: string): Promise<{ namespace: string; indexed: number; deleted: number; cursor: string | null; blobId?: string; present?: boolean; expiresAt?: string }> { return this.read("memory.inventory", blobId ? { "blob-id": blobId } : {}); }
 }
 
 export class AuditorClient extends RoleClient {

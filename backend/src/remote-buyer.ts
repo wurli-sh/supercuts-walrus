@@ -2,7 +2,7 @@ import { createDecipheriv, createHash, createPrivateKey, createPublicKey, diffie
 import { isValidPersonalMessageSignature } from "@mysten/sui/verify";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
-import { validateCapabilityManifest, type CapabilityManifest } from "./capability.js";
+import { validateCapabilityManifest, verifySignedCapability, type CapabilityManifest } from "./capability.js";
 import { fail } from "./errors.js";
 import { executeMandated, type AgentMandate } from "./mandate.js";
 import type { Phase3App } from "./phase3.js";
@@ -42,7 +42,7 @@ export class RemoteBuyer {
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i]!; validateCapabilityManifest(entry.manifest);
       if (entry.manifest.manifestHash !== discovered[i]!.manifestHash || entry.blobId !== discovered[i]!.blobId || !this.mandate.allowedCounterparties.includes(entry.manifest.sellerId)) fail("SELLER_CATALOG_INVALID", "catalog differs from Walrus or owner allowlist");
-      if (!(await isValidPersonalMessageSignature(Buffer.from(`${entry.manifest.manifestHash}:${entry.transportPublicKey}`), entry.signature, { address: entry.manifest.sellerId }))) fail("SELLER_SIGNATURE_INVALID", "seller did not sign its capability and transport key");
+      await verifySignedCapability({ manifest: entry.manifest, manifestBlobId: entry.blobId, transportPublicKey: entry.transportPublicKey, sellerSignature: entry.signature });
     }
     return { capabilities: entries };
   }

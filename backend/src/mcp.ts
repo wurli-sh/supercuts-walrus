@@ -4,6 +4,8 @@ import { Phase3App, errorOutput, homePath } from "./phase3.js";
 import { executeMandated, loadMandate, toolSchema } from "./mandate.js";
 import { RemoteBuyer } from "./remote-buyer.js";
 import { DemoEventLog } from "./events.js";
+import { DealJournal, type ExecuteDealInput } from "./deal.js";
+import { createConfiguredDealEngine } from "./deal-adapter.js";
 
 const home = homePath({});
 const app = new Phase3App(home);
@@ -12,7 +14,7 @@ const remote = app.profile.role === "buyer" && !app.profile.mock && process.env.
 const eventLog = remote && process.env.SUPERCUTS_EVENT_PATH && process.env.SUPERCUTS_RUN_ID ? new DemoEventLog(process.env.SUPERCUTS_EVENT_PATH, process.env.SUPERCUTS_RUN_ID) : undefined;
 if (eventLog) eventLog.append({ actor: "operator", stage: "run", status: "started", publicDetails: { flow: "codex-remote" }, evidenceHashes: [], explorerLinks: [] });
 const tools: Record<string, string> = {
-  buyer: "status,doctor,capability.discover,settlement.plan,wallet.deposit,wallet.balance,wallet.recover,wallet.withdraw,wallet.exit.queue,wallet.exit.status,wallet.exit.finalize,offer.open,offer.propose,offer.accept,offer.show,pay.quote,pay.shielded,pay.x402,pay.status,resource.fetch,memory.remember,memory.recall,memory.status,remote.catalog,remote.rank-briefs,remote.negotiate,remote.quote,remote.purchase-brief,remote.agreement,remote.settle-analysis,remote.delivery,remote.events,disclose",
+  buyer: "status,doctor,deal.execute,deal.get,deal.resume,capability.discover,settlement.plan,wallet.deposit,wallet.balance,wallet.recover,wallet.withdraw,wallet.exit.queue,wallet.exit.status,wallet.exit.finalize,offer.open,offer.propose,offer.accept,offer.show,pay.quote,pay.shielded,pay.x402,pay.status,resource.fetch,memory.remember,memory.recall,memory.status,memory.inventory,remote.catalog,remote.rank-briefs,remote.negotiate,remote.quote,remote.purchase-brief,remote.agreement,remote.settle-analysis,remote.delivery,remote.events,disclose",
   seller: "status,doctor,capability.publish,wallet.balance,wallet.recover,wallet.withdraw,wallet.exit.queue,wallet.exit.status,wallet.exit.finalize,offer.counter,offer.show,pay.status,resource.serve,resource.fetch,memory.remember,memory.recall,memory.status",
   auditor: "status,doctor,audit.verify",
 };
@@ -51,7 +53,16 @@ rl.on("line", (line) => { queue = queue.then(async () => {
     if (request.method === "tools/call") {
       const name = String(request.params?.name ?? ""), raw = (request.params?.arguments ?? {}) as Record<string, unknown>;
       let data: Record<string, unknown>;
-      if (name.startsWith("remote.")) {
+      if (name.startsWith("deal.")) {
+        const spec = toolSchema(name); const { validateToolArguments } = await import("./mandate.js"); validateToolArguments(spec, raw);
+        if (mandate.version !== "supercuts.mandate.v2" || Date.now() > mandate.expiresAt || !mandate.allowedCommands.includes(name)) throw new Error("deal tool is not authorized by an active v2 mandate");
+        if (name === "deal.execute") {
+          const input = raw.input as ExecuteDealInput;
+          if (raw["operation-id"] !== input?.operationId) throw new Error("deal operation ID does not match its input");
+          data = await (await createConfiguredDealEngine(app)).execute(input) as unknown as Record<string, unknown>;
+        } else if (name === "deal.resume") data = await (await createConfiguredDealEngine(app)).resume(String(raw.operationId)) as unknown as Record<string, unknown>;
+        else data = new DealJournal(app.store).get(String(raw.operationId)) as unknown as Record<string, unknown>;
+      } else if (name.startsWith("remote.")) {
         if (!remote || !mandate.allowedCommands.includes(name) || Date.now() > mandate.expiresAt) throw new Error("remote buyer tool is not authorized or configured");
         const spec = toolSchema(name); const { validateToolArguments } = await import("./mandate.js"); validateToolArguments(spec, raw);
         if (process.env.SUPERCUTS_RUN_ID && name !== "remote.catalog" && name !== "remote.rank-briefs" && raw.runId !== undefined && raw.runId !== process.env.SUPERCUTS_RUN_ID) throw new Error("remote tool run ID differs from this buyer demo run");

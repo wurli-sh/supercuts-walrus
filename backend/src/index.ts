@@ -1,4 +1,7 @@
 export * from "./config.js";
+export * from "./deal.js";
+export * from "./deal-engine.js";
+export * from "./deal-adapter.js";
 export * from "./capability.js";
 export * from "./claude.js";
 export * from "./events.js";
@@ -11,6 +14,8 @@ export * from "./errors.js";
 export * from "./indexer.js";
 export * from "./memory.js";
 export * from "./settlement.js";
+export * from "./seller-runtime.js";
+export * from "./seller-stdio.js";
 export * from "./live-index.js";
 export * from "./live-runtime.js";
 export * from "./protocol-engine.js";

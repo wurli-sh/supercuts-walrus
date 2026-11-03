@@ -1,8 +1,36 @@
 import { createHash } from "node:crypto";
+import { isValidPersonalMessageSignature } from "@mysten/sui/verify";
+import { Ajv, type ValidateFunction } from "ajv";
 import { fail } from "./errors.js";
 
 export type CapabilityRail = "x402" | "shielded";
 export type JsonSchema = Readonly<Record<string, unknown>>;
+const schemaCompiler = new Ajv({ strict: true, allErrors: false });
+const compiledSchemas = new Map<string, { input: ValidateFunction; output: ValidateFunction }>();
+
+export function validateCapabilityPayload(manifest: CapabilityManifest, direction: "input" | "output", value: unknown): void {
+  validateCapabilityManifest(manifest);
+  let compiled = compiledSchemas.get(manifest.manifestHash);
+  if (!compiled) {
+    try { compiled = { input: schemaCompiler.compile(manifest.inputSchema), output: schemaCompiler.compile(manifest.outputSchema) }; }
+    catch (error) { return fail("CAPABILITY_SCHEMA_INVALID", "signed capability contains an invalid JSON Schema", error); }
+    compiledSchemas.set(manifest.manifestHash, compiled);
+  }
+  if (!compiled[direction](value)) fail("CAPABILITY_PAYLOAD_INVALID", `${direction} does not match the signed capability schema`);
+}
+export interface SignedCapabilityRegistration {
+  manifest: CapabilityManifest;
+  manifestBlobId: string;
+  transportPublicKey: string;
+  sellerSignature: string;
+}
+
+export async function verifySignedCapability(registration: SignedCapabilityRegistration): Promise<void> {
+  validateCapabilityManifest(registration.manifest);
+  if (typeof registration.manifestBlobId !== "string" || !registration.manifestBlobId || typeof registration.transportPublicKey !== "string" || !registration.transportPublicKey || typeof registration.sellerSignature !== "string" || !registration.sellerSignature) fail("SELLER_SIGNATURE_INVALID", "signed capability registration is incomplete");
+  const signed = Buffer.from(`${registration.manifest.manifestHash}:${registration.transportPublicKey}`);
+  if (!(await isValidPersonalMessageSignature(signed, registration.sellerSignature, { address: registration.manifest.sellerId }))) fail("SELLER_SIGNATURE_INVALID", "seller did not sign the capability and transport key");
+}
 
 /** Framework-neutral service advertisement. This is not an A2A protocol claim. */
 export interface CapabilityManifest {

@@ -99,9 +99,14 @@ export class LiveRuntime {
     catch { try { await this.tatum.getTransaction(signed.digest); } catch (cause) { fail("BROADCAST_UNRESOLVED", "broadcast outcome is ambiguous; exact signed bytes remain journaled for retry", cause); } }
     const finalized = await this.client.waitForTransaction({ digest: signed.digest, timeout: 60_000, include: { effects: true, events: true } });
     const tx = finalized.Transaction ?? finalized.FailedTransaction; if (!tx?.status.success || !tx.checkpoint) fail("TRANSACTION_FINALITY_FAILED", "transaction was not finalized successfully");
-    const tatum = await this.tatum.getTransaction(signed.digest);
+    await this.confirmTatum(signed.digest, String(tx.checkpoint));
     this.store.db.prepare("UPDATE live_signed_transactions SET status='finalized',updated_at=? WHERE operation_id=?").run(Date.now(), operationId);
-    return { transactionDigest: signed.digest, checkpoint: tx.checkpoint, finalized: true, evidence: { sui: "effects-and-checkpoint", tatum: Boolean(tatum), broadcastResult: Boolean(result) } };
+    return { transactionDigest: signed.digest, checkpoint: tx.checkpoint, finalized: true, evidence: { sui: "effects-and-checkpoint", tatum: true, broadcastResult: Boolean(result) } };
+  }
+  private async confirmTatum(digest: string, checkpoint: string): Promise<void> {
+    const read = await this.tatum.getTransaction(digest) as { transaction?: { digest?: string; checkpoint?: bigint | { sequenceNumber?: bigint }; effects?: { status?: { success?: boolean } } } };
+    const observed = typeof read.transaction?.checkpoint === "object" ? read.transaction.checkpoint.sequenceNumber : read.transaction?.checkpoint;
+    if (read.transaction?.digest !== digest || String(observed) !== checkpoint || read.transaction.effects?.status?.success !== true) fail("TATUM_TRANSACTION_MISMATCH", "Tatum did not confirm the same successful finalized transaction");
   }
   async deposit(amount: bigint, operationId: string): Promise<Record<string, unknown>> {
     if (this.profile.role !== "buyer") fail("ROLE_FORBIDDEN", "only a buyer role can deposit");
@@ -308,7 +313,7 @@ export class LiveRuntime {
     let settlement: Record<string, unknown>; try { settlement = JSON.parse(Buffer.from(settlementHeader, "base64").toString()) as Record<string, unknown>; } catch (error) { return fail("X402_SETTLEMENT_INVALID", "payment-response is not base64 JSON", error); }
     if (settlement.success !== true || settlement.transaction !== signed.digest || settlement.network !== "sui:testnet") fail("X402_SETTLEMENT_INVALID", "resource reported a different or unsuccessful settlement");
     const finalized = await this.client.waitForTransaction({ digest: signed.digest, timeout: 60_000, include: { effects: true } }), finalTx = finalized.Transaction ?? finalized.FailedTransaction;
-    if (!finalTx?.status.success || !finalTx.checkpoint) fail("TRANSACTION_FINALITY_FAILED", "x402 payment was not finalized successfully"); await this.tatum.getTransaction(signed.digest);
+    if (!finalTx?.status.success || !finalTx.checkpoint) fail("TRANSACTION_FINALITY_FAILED", "x402 payment was not finalized successfully"); await this.confirmTatum(signed.digest, String(finalTx.checkpoint));
     const receipt = { operationId, status: "finalized", rail: "x402", amount: amount.toString(), counterparty: payTo, asset, requestId, requirementsHash: String(extra?.requirementsHash), transactionDigest: signed.digest, policyDecision: "allowed", tatumVerified: true, visibility: "public-transfer", finalized: true, checkpoint: finalTx.checkpoint, responseSha256: hash(response) };
     this.store.db.prepare("INSERT INTO live_x402_deliveries(operation_id,resource_url,receipt,response,updated_at) VALUES(?,?,?,?,?)").run(operationId, resourceUrl, JSON.stringify(receipt), response, Date.now());
     this.store.db.prepare("UPDATE live_signed_transactions SET status='finalized',updated_at=? WHERE operation_id=?").run(Date.now(), operationId); return { ...receipt, response: response.toString("base64") };

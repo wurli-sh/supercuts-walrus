@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { Phase3App, errorOutput, homePath, initialize, type Role } from "./phase3.js";
+import { DealJournal } from "./deal.js";
+import { createConfiguredDealEngine } from "./deal-adapter.js";
 
 const PROTOCOL = 1;
 interface SeamRequest { protocol: number; requestId: string; method: string; home?: string; params?: Record<string, unknown>; }
@@ -35,6 +37,24 @@ process.stdin.on("end", async () => {
     }
     const app = new Phase3App(home);
     try {
+      if (request.method.startsWith("deal.")) {
+        if (app.profile.role !== "buyer") throw Object.assign(new Error("deal methods require a buyer role home"), { code: "ROLE_FORBIDDEN" });
+        const journal = new DealJournal(app.store);
+        if (request.method === "deal.execute") {
+          const engine = await createConfiguredDealEngine(app);
+          return write(envelope(request.requestId, { ok: true, result: await engine.execute(request.params?.input as never) }));
+        }
+        if (request.method === "deal.resume") {
+          const engine = await createConfiguredDealEngine(app);
+          return write(envelope(request.requestId, { ok: true, result: await engine.resume(String(request.params?.operationId ?? "")) }));
+        }
+        if (request.method === "deal.get") return write(envelope(request.requestId, { ok: true, result: journal.get(String(request.params?.operationId ?? "")) }));
+        if (request.method === "deal.evidence") return write(envelope(request.requestId, { ok: true, result: journal.evidence(String(request.params?.dealId ?? "")) }));
+        if (request.method === "deal.delivery") {
+          const delivery = journal.delivery(String(request.params?.dealId ?? ""));
+          return write(envelope(request.requestId, { ok: true, result: { ...delivery, artifact: Buffer.from(delivery.artifact).toString("base64") } }));
+        }
+      }
       if (request.method === "authorization.preview") {
         const command = String(request.params?.command ?? ""), commandArgs = asArgs(request.params?.arguments as Record<string, unknown> | undefined);
         return write(envelope(request.requestId, { ok: true, result: app.preview(command, commandArgs) as unknown as Record<string, unknown> }));

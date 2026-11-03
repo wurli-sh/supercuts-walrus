@@ -14,9 +14,15 @@
     "supercuts-seller-catalog": "dist/seller-catalog-generate.js",
     "supercuts-facilitator": "dist/facilitator.js",
     "supercuts-seam": "dist/seam.js",
-    "supercuts-v2-relayer": "dist/v2-relayer-cli.js"
+    "supercuts-v2-relayer": "dist/v2-relayer-cli.js",
+    "supercuts-memory-worker": "dist/memory-worker.js",
+    "supercuts-seller-live": "dist/seller-live-cli.js",
+    "supercuts-seller-register": "dist/seller-register-cli.js"
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "engines": {
     "node": ">=22.13"
   },
@@ -34,6 +40,7 @@
     "@mysten/seal": "1.5.2",
     "@mysten/sui": "2.38.0",
     "@mysten/walrus": "1.2.37",
+    "ajv": "8.17.1",
     "circomlibjs": "0.1.7"
   },
   "devDependencies": {

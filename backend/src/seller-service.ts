@@ -8,7 +8,7 @@ import { BoundedClaude } from "./claude.js";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { isValidPersonalMessageSignature } from "@mysten/sui/verify";
-import { validateCapabilityManifest, type CapabilityManifest } from "./capability.js";
+import { validateCapabilityManifest, verifySignedCapability, type CapabilityManifest } from "./capability.js";
 import { fail, SupercutsError } from "./errors.js";
 import { executeMandated, loadMandate } from "./mandate.js";
 import { Phase3App } from "./phase3.js";
@@ -44,6 +44,7 @@ export class SellerService {
     for (const row of rows) {
       validateCapabilityManifest(row.manifest);
       if (row.manifest.capabilityId !== row.capability_id || row.manifest.sellerId !== row.seller_id || !row.blob_id || !row.signature || !row.transport_public_key) fail("SELLER_CATALOG_INVALID", "catalog entry does not match its manifest");
+      await verifySignedCapability({ manifest: row.manifest, manifestBlobId: row.blob_id, transportPublicKey: row.transport_public_key, sellerSignature: row.signature });
       service.#catalog.set(row.capability_id, row);
     }
     for (const sellerId of new Set(rows.map((row) => row.seller_id))) {

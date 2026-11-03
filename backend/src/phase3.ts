@@ -34,8 +34,8 @@ const V2_RELAYER = "0x405f473ed1f7f609b16d3d7dabc7cd04831cfc73b4a7fcebe9fa502d72
 const COIN = "0x2::sui::SUI";
 const WRITE = new Set(["wallet.deposit", "wallet.recover", "wallet.withdraw", "wallet.exit.queue", "wallet.exit.finalize", "offer.open", "offer.propose", "offer.counter", "offer.accept", "pay.shielded", "pay.x402", "resource.serve", "memory.remember", "disclose", "capability.publish", "settlement.plan", "settlement.approve-review", "memory.policy"]);
 const ROLE_COMMANDS: Record<Role, ReadonlySet<string>> = {
-  buyer: new Set(["status", "doctor", "capability.discover", "settlement.plan", "settlement.approve-review", "memory.policy", "wallet.deposit", "wallet.balance", "wallet.recover", "wallet.withdraw", "wallet.exit.queue", "wallet.exit.status", "wallet.exit.finalize", "offer.open", "offer.propose", "offer.accept", "offer.show", "pay.quote", "pay.shielded", "pay.x402", "pay.status", "resource.fetch", "memory.remember", "memory.recall", "memory.status", "remote.catalog", "remote.rank-briefs", "remote.negotiate", "remote.quote", "remote.purchase-brief", "remote.agreement", "remote.settle-analysis", "remote.delivery", "remote.events", "disclose"]),
-  seller: new Set(["status", "doctor", "capability.publish", "wallet.balance", "wallet.recover", "wallet.withdraw", "wallet.exit.queue", "wallet.exit.status", "wallet.exit.finalize", "offer.counter", "offer.show", "pay.status", "resource.serve", "resource.fetch", "memory.remember", "memory.recall", "memory.status"]),
+  buyer: new Set(["status", "doctor", "capability.discover", "settlement.plan", "settlement.approve-review", "memory.policy", "wallet.deposit", "wallet.balance", "wallet.recover", "wallet.withdraw", "wallet.exit.queue", "wallet.exit.status", "wallet.exit.finalize", "offer.open", "offer.propose", "offer.accept", "offer.show", "pay.quote", "pay.shielded", "pay.x402", "pay.status", "resource.fetch", "memory.remember", "memory.recall", "memory.status", "memory.inventory", "remote.catalog", "remote.rank-briefs", "remote.negotiate", "remote.quote", "remote.purchase-brief", "remote.agreement", "remote.settle-analysis", "remote.delivery", "remote.events", "disclose"]),
+  seller: new Set(["status", "doctor", "capability.publish", "wallet.balance", "wallet.recover", "wallet.withdraw", "wallet.exit.queue", "wallet.exit.status", "wallet.exit.finalize", "offer.counter", "offer.show", "pay.status", "resource.serve", "resource.fetch", "memory.remember", "memory.recall", "memory.status", "memory.inventory"]),
   auditor: new Set(["status", "doctor", "audit.verify"]),
 };
 
@@ -265,7 +265,7 @@ export class Phase3App {
       try { raw = JSON.parse(readFileSync(join(this.home, "mandate.json"), "utf8")); } catch (error) { return fail("MANDATE_INVALID", "owner mandate could not be loaded", error); }
     }
     const mandate = raw as PlanningMandate;
-    if (!mandate || mandate.version !== "supercuts.mandate.v1" || !Array.isArray(mandate.allowedCounterparties) || !Array.isArray(mandate.allowedAssets) || !/^(?:0|[1-9][0-9]*)$/.test(mandate.perDealCeiling) || !Number.isSafeInteger(mandate.expiresAt)) fail("MANDATE_INVALID", "planning mandate has an invalid shape");
+    if (!mandate || !["supercuts.mandate.v1", "supercuts.mandate.v2"].includes(mandate.version) || !Array.isArray(mandate.allowedCounterparties) || !Array.isArray(mandate.allowedAssets) || !/^(?:0|[1-9][0-9]*)$/.test(mandate.perDealCeiling) || !Number.isSafeInteger(mandate.expiresAt) || mandate.version === "supercuts.mandate.v2" && mandate.allowPublicX402 !== undefined && typeof mandate.allowPublicX402 !== "boolean") fail("MANDATE_INVALID", "planning mandate has an invalid shape");
     return mandate;
   }
 
@@ -291,9 +291,22 @@ export class Phase3App {
 
   private recalledMockMemories(): RecalledSettlementMemory[] {
     return [...all<Record<string, unknown>>(this.store, "memory"), ...all<Record<string, unknown>>(this.store, "verified-memory")].map((item) => {
-      if (item.memory && typeof item.memory === "object") return { blobId: String(item.blobId), distance: 0, memory: item.memory as SettlementMemoryV1 };
+      if (item.memory && typeof item.memory === "object") return { blobId: String(item.blobId), distance: 0, memory: this.authenticatedMemory(String(item.blobId), item.memory as SettlementMemoryV1) };
       return { blobId: String(item.blobId), distance: 0, legacy: true };
     });
+  }
+
+  private authenticatedMemory(blobId: string, memory: SettlementMemoryV1): SettlementMemoryV1 {
+    if (memory.provenance !== "owner_policy" && memory.provenance !== "verified_outcome") return memory;
+    const authority = this.store.db.prepare("SELECT fact_hash,provenance,evidence_hash FROM memory_authority WHERE blob_id=?").get(blobId) as { fact_hash: string; provenance: string; evidence_hash: string | null } | undefined;
+    if (authority?.fact_hash === hash(canonicalJson(memory)) && authority.provenance === memory.provenance && (memory.provenance !== "verified_outcome" || authority.evidence_hash === memory.evidenceHash)) return memory;
+    return { ...memory, provenance: "legacy_untrusted" };
+  }
+
+  private registerMemoryAuthority(blobId: string, memory: SettlementMemoryV1): void {
+    if (memory.provenance !== "owner_policy" && memory.provenance !== "verified_outcome") return;
+    this.store.db.prepare("INSERT INTO memory_authority(blob_id,fact_hash,provenance,evidence_hash,created_at) VALUES(?,?,?,?,?) ON CONFLICT(blob_id) DO NOTHING")
+      .run(blobId, hash(canonicalJson(memory)), memory.provenance, memory.evidenceHash ?? null, Date.now());
   }
 
   private async planSettlement(args: Record<string, string | boolean>): Promise<Record<string, unknown>> {
@@ -307,9 +320,9 @@ export class Phase3App {
     if (!this.profile.mock && this.store.getSecret("live:memory-config")) {
       const encoded = this.store.getSecret("live:memory-config")!; let config: ManualMemoryConfig; try { config = JSON.parse(encoded.toString()) as ManualMemoryConfig; } catch (error) { return fail("LIVE_MEMORY_CONFIG_INVALID", "encrypted memory config is invalid", error); }
       const manual = new ManualMemory(this.store, config);
-      try { recalled = (await manual.recall(`${primary.capabilityId} ${primary.capability} ${primary.sellerId}`, 20)).map((item) => { let memory: SettlementMemoryV1 | undefined; try { const value = JSON.parse(item.text) as unknown; validateSettlementMemory(value); memory = value; } catch { /* malformed or legacy memory remains advisory */ } return { blobId: item.blobId, distance: item.distance, ...(memory ? { memory } : { legacy: true }) }; }); } finally { manual.destroy(); }
+      try { recalled = (await manual.recall(`${primary.capabilityId} ${primary.capability} ${primary.sellerId}`, 20)).map((item) => { let memory: SettlementMemoryV1 | undefined; try { const value = JSON.parse(item.text) as unknown; validateSettlementMemory(value); memory = this.authenticatedMemory(item.blobId, value); } catch { /* malformed or legacy memory remains advisory */ } return { blobId: item.blobId, distance: item.distance, ...(memory ? { memory } : { legacy: true }) }; }); } finally { manual.destroy(); }
     }
-    const plan = createSettlementPlan({ operationId: required(args, "operation-id"), mandate: this.planningMandate(args), manifests: [primary, ...alternatives], ...(typeof args["requested-amount"] === "string" ? { requestedAmount: args["requested-amount"] } : {}), ...(args["privacy-hint"] === "shielded" ? { privacyHint: "shielded" as const } : {}), recalled, maxMemoryDistance: this.profile.policy.maxMemoryDistance ?? 0.35 });
+    const plan = createSettlementPlan({ operationId: required(args, "operation-id"), mandate: this.planningMandate(args), manifests: [primary, ...alternatives], ...(typeof args["requested-amount"] === "string" ? { requestedAmount: args["requested-amount"] } : {}), ...(args["privacy-hint"] === "shielded" ? { privacyHint: "shielded" as const } : {}), ...(args["requested-rail"] === "x402" || args["requested-rail"] === "shielded" ? { requestedRail: args["requested-rail"] } : {}), recalled, maxMemoryDistance: this.profile.policy.maxMemoryDistance ?? 0.35 });
     return this.persistPlan(plan) as unknown as Record<string, unknown>;
   }
 
@@ -325,7 +338,7 @@ export class Phase3App {
     if (this.profile.mock) {
       const blobId = `mockwalrus_${hash(canonicalJson({ operationId, memory })).slice(0, 40)}`, item = { operationId, namespace: `supercuts:${this.profile.role}`, blobId, memory, status: "complete" };
       const existing = get<Record<string, unknown>>(this.store, "memory", operationId); if (existing && canonicalJson(existing.memory) !== canonicalJson(memory)) fail("MEMORY_OPERATION_CONFLICT", "memory operation ID identifies another envelope");
-      record(this.store, "memory", operationId, item); return { operationId, namespace: item.namespace, blobId, status: "complete", kind: memory.kind, provenance };
+      record(this.store, "memory", operationId, item); this.registerMemoryAuthority(blobId, memory); return { operationId, namespace: item.namespace, blobId, status: "complete", kind: memory.kind, provenance };
     }
     const encoded = this.store.getSecret("live:memory-config") ?? fail("LIVE_MEMORY_CONFIG_MISSING", "live Mainnet memory requires an owner-only --memory-config-file"); let config: ManualMemoryConfig;
     try { config = JSON.parse(encoded.toString()) as ManualMemoryConfig; } catch (error) { return fail("LIVE_MEMORY_CONFIG_INVALID", "encrypted memory config is invalid", error); }
@@ -334,18 +347,36 @@ export class Phase3App {
       const factHash = hash(canonicalJson(memory)), existing = this.store.db.prepare("SELECT fact_hash,blob_id,status FROM memory_jobs WHERE operation_id=?").get(operationId) as { fact_hash: string; blob_id: string | null; status: string } | undefined;
       if (existing) { if (existing.fact_hash !== factHash) fail("MEMORY_OPERATION_CONFLICT", "memory operation ID identifies another envelope"); if (existing.status === "complete" && existing.blob_id) return { operationId, namespace: config.namespace, blobId: existing.blob_id, status: "complete", kind: memory.kind, provenance }; return fail("MEMORY_JOB_PENDING", "memory job is not complete"); }
       this.store.db.prepare("INSERT INTO memory_jobs(operation_id,kind,fact_hash,blob_id,status,created_at) VALUES(?,?,?,NULL,'pending',?)").run(operationId, memory.kind, factHash, Date.now());
-      try { const blobId = await manual.remember(memory); this.store.db.prepare("UPDATE memory_jobs SET blob_id=?,status='complete' WHERE operation_id=?").run(blobId, operationId); return { operationId, namespace: config.namespace, blobId, status: "complete", kind: memory.kind, provenance }; }
+      try { const blobId = await manual.remember(memory); this.store.db.prepare("UPDATE memory_jobs SET blob_id=?,status='complete' WHERE operation_id=?").run(blobId, operationId); this.registerMemoryAuthority(blobId, memory); return { operationId, namespace: config.namespace, blobId, status: "complete", kind: memory.kind, provenance }; }
       catch (error) { this.store.db.prepare("UPDATE memory_jobs SET status='unresolved' WHERE operation_id=?").run(operationId); throw error; }
     } finally { manual.destroy(); }
   }
 
   private enqueueVerifiedOutcome(event: string, operationId: string, evidence: Record<string, unknown>, planHash?: string, fallback?: { counterparty?: string; asset?: string }): void {
     const plan = planHash ? this.storedPlan(planHash) : undefined, jobId = `verified:${event}:${operationId}`, evidenceHash = hash(canonicalJson(evidence));
+    const prior = this.store.getSecret(`memory-outbox:${jobId}`);
+    if (prior) {
+      const saved = JSON.parse(prior.toString()) as SettlementMemoryV1;
+      validateSettlementMemory(saved, "verified_outcome");
+      if (saved.evidenceHash !== evidenceHash || plan && (saved.scope.capabilityId !== plan.capabilityId || saved.scope.counterparty !== plan.sellerId || saved.scope.asset !== plan.asset)) fail("MEMORY_OPERATION_CONFLICT", "verified outcome ID identifies different evidence or scope");
+      return;
+    }
     const memory: SettlementMemoryV1 = { version: "supercuts.settlement-memory.v1", kind: "outcome", provenance: "verified_outcome", scope: { ...(plan ? { capabilityId: plan.capabilityId, capabilityClass: plan.capabilityClass, counterparty: plan.sellerId, network: plan.network, asset: plan.asset } : { ...(fallback?.counterparty ? { counterparty: fallback.counterparty } : {}), ...(fallback?.asset ? { asset: fallback.asset } : {}), network: "sui:testnet" as const }) }, createdAt: Date.now(), evidenceHash, signal: { outcome: String(evidence.status ?? "") === "unresolved" ? "unresolved" : String(evidence.status ?? "") === "failed" ? "failed" : "succeeded" } };
     validateSettlementMemory(memory, "verified_outcome"); const factHash = hash(canonicalJson(memory));
-    if (this.profile.mock) { const blobId = `mockwalrus_${factHash.slice(0, 40)}`; record(this.store, "verified-memory", jobId, { operationId: jobId, namespace: `supercuts:${this.profile.role}`, blobId, memory, status: "complete" }); return; }
+    if (this.profile.mock) { const blobId = `mockwalrus_${factHash.slice(0, 40)}`; record(this.store, "verified-memory", jobId, { operationId: jobId, namespace: `supercuts:${this.profile.role}`, blobId, memory, status: "complete" }); this.registerMemoryAuthority(blobId, memory); return; }
     this.store.putSecretOnce(`memory-outbox:${jobId}`, Buffer.from(canonicalJson(memory)));
     this.store.db.prepare("INSERT OR IGNORE INTO memory_jobs(operation_id,kind,fact_hash,blob_id,status,created_at) VALUES(?,?,?,NULL,'pending',?)").run(jobId, memory.kind, factHash, Date.now());
+  }
+
+  async recordVerifiedDealOutcome(operationId: string, planHash: string, paymentDigest: string, artifactSha256: string): Promise<{ payloadHash: string; blobId: string }> {
+    if (this.profile.mock || this.profile.role !== "buyer") fail("DEAL_LIVE_REQUIRED", "verified deal outcome requires a live buyer role");
+    const jobId = `verified:deal:${operationId}`;
+    this.enqueueVerifiedOutcome("deal", operationId, { status: "succeeded", paymentDigest, artifactSha256 }, planHash);
+    await this.execute("memory.status", { "operation-id": jobId });
+    const row = this.store.db.prepare("SELECT blob_id,status FROM memory_jobs WHERE operation_id=?").get(jobId) as { blob_id: string | null; status: string } | undefined;
+    if (row?.status !== "complete" || !row.blob_id) return fail(row?.status === "unresolved" ? "DEAL_MEMORY_UNRESOLVED" : "DEAL_MEMORY_PENDING", "verified deal memory has not completed");
+    const payload = this.store.getSecret(`memory-outbox:${jobId}`) ?? fail("DEAL_MEMORY_INVALID", "verified outcome payload is missing");
+    return { payloadHash: hash(payload), blobId: row.blob_id };
   }
 
   private approveReview(args: Record<string, string | boolean>): Record<string, unknown> {
@@ -394,6 +425,20 @@ export class Phase3App {
     if (command === "settlement.plan") return output(command, await this.planSettlement(args));
     if (command === "settlement.approve-review") return output(command, this.approveReview(args));
     if (command === "memory.policy") return output(command, await this.rememberTyped(args, "owner_policy"));
+    if (command === "memory.inventory") {
+      const encoded = this.store.getSecret("live:memory-config") ?? fail("LIVE_MEMORY_CONFIG_MISSING", "live Mainnet memory requires an owner-only memory configuration");
+      const config = JSON.parse(encoded.toString()) as ManualMemoryConfig;
+      const manual = new ManualMemory(this.store, config);
+      try {
+        const synced = await manual.listMetadata(config);
+        const blobId = typeof args["blob-id"] === "string" ? args["blob-id"] : undefined;
+        if (blobId && !/^[A-Za-z0-9_-]{1,256}$/.test(blobId)) fail("MEMORY_BLOB_ID_INVALID", "memory blob ID is invalid");
+        const row = blobId ? this.store.db.prepare("SELECT m.blob_id AS blobId,m.status AS status,m.expires_at AS expiresAt,m.deleted AS deleted FROM memory_inventory m JOIN memory_jobs j ON j.blob_id=m.blob_id WHERE m.blob_id=? AND m.namespace=?").get(blobId, config.namespace) as { blobId: string; status: string; expiresAt: string | null; deleted: number } | undefined : undefined;
+        const present = Boolean(row && !row.deleted && row.status !== "deleted" && (!row.expiresAt || Date.parse(row.expiresAt) > Date.now()));
+        return output(command, { namespace: config.namespace, ...synced, ...(blobId ? { blobId, present, ...(row?.expiresAt ? { expiresAt: row.expiresAt } : {}) } : {}) });
+      } finally { manual.destroy(); }
+    }
+    if (command === "memory.remember" || command === "memory.recall" || command === "memory.status") return output(command, await this.liveMemory(command, args));
     const runtime = await LiveRuntime.create(this.profile as LiveRuntimeProfile, this.store);
     if (command === "doctor") return output(command, await runtime.doctor());
     if (command === "status") return output(command, { role: this.profile.role, network: this.profile.network, mock: false, runtime: "testnet-live" });
@@ -427,7 +472,6 @@ export class Phase3App {
     if (command === "offer.counter") return output(command, typeof args.agreement === "string" ? runtime.prepareSellerAgreement(required(args, "session"), args.agreement) : this.localOffer(command, args));
     if (command === "pay.shielded") { const receipt = await runtime.settleShielded(required(args, "session"), required(args, "operation-id"), (actual) => { this.bindSettlementPlan(command, args, actual); }); this.enqueueVerifiedOutcome("settlement", required(args, "operation-id"), receipt, typeof args["plan-hash"] === "string" ? args["plan-hash"] : undefined, { counterparty: String(receipt.counterparty), asset: String(receipt.asset) }); return output(command, receipt); }
     if (command === "pay.x402") { const receipt = await runtime.payX402Resource(required(args, "operation-id"), required(args, "resource-url"), (actual) => { this.bindSettlementPlan(command, args, actual); }); const { response: _response, ...evidence } = receipt; this.enqueueVerifiedOutcome("settlement", required(args, "operation-id"), evidence, typeof args["plan-hash"] === "string" ? args["plan-hash"] : undefined, { counterparty: String(receipt.counterparty), asset: String(receipt.asset) }); return output(command, receipt); }
-    if (command === "memory.remember" || command === "memory.recall" || command === "memory.status") return output(command, await this.liveMemory(command, args));
     if (command === "resource.serve") {
       const requestId = required(args, "request-id"), body = required(args, "body"), resource = { requestId, responseHash: hash(Buffer.from(body, "base64")), body, deliveryStatus: "ready" }; record(this.store, "resource", requestId, resource); return output(command, { requestId, responseHash: resource.responseHash, deliveryStatus: resource.deliveryStatus });
     }
@@ -499,12 +543,14 @@ export class Phase3App {
       }
       if (command === "memory.recall") {
         const recalled = await manual.recall(required(args, "query"));
-        const citations = recalled.filter((item) => item.distance <= (this.profile.policy.maxMemoryDistance ?? 0.35)).map((item) => { try { const memory = JSON.parse(item.text) as unknown; validateSettlementMemory(memory); return { blobId: item.blobId, kind: memory.kind, provenance: memory.provenance, distance: item.distance }; } catch { return { blobId: item.blobId, kind: "legacy", provenance: "legacy_untrusted", distance: item.distance }; } });
+        const citations = recalled.filter((item) => item.distance <= (this.profile.policy.maxMemoryDistance ?? 0.35)).map((item) => { try { const memory = JSON.parse(item.text) as unknown; validateSettlementMemory(memory); const trusted = this.authenticatedMemory(item.blobId, memory); return { blobId: item.blobId, kind: trusted.kind, provenance: trusted.provenance, distance: item.distance }; } catch { return { blobId: item.blobId, kind: "legacy", provenance: "legacy_untrusted", distance: item.distance }; } });
         return { namespace: config.namespace, citations, effect: citations.length ? "candidate-preference-adjusted" : "no-policy-change" };
       }
-      for (const row of this.store.db.prepare("SELECT operation_id FROM memory_jobs WHERE status IN ('pending','unresolved') ORDER BY created_at").all() as Array<{ operation_id: string }>) {
+      const target = typeof args["operation-id"] === "string" ? args["operation-id"] : undefined;
+      for (const row of (target ? this.store.db.prepare("SELECT operation_id FROM memory_jobs WHERE status='pending' AND operation_id=? ORDER BY created_at").all(target) : this.store.db.prepare("SELECT operation_id FROM memory_jobs WHERE status='pending' ORDER BY created_at").all()) as Array<{ operation_id: string }>) {
         const queued = this.store.getSecret(`memory-outbox:${row.operation_id}`); if (!queued) continue;
-        try { const memory = JSON.parse(queued.toString()) as unknown; validateSettlementMemory(memory, "verified_outcome"); this.store.db.prepare("UPDATE memory_jobs SET status='pending' WHERE operation_id=?").run(row.operation_id); const blobId = await manual.remember(memory); this.store.db.prepare("UPDATE memory_jobs SET blob_id=?,status='complete' WHERE operation_id=?").run(blobId, row.operation_id); }
+        if (this.store.db.prepare("UPDATE memory_jobs SET status='submitting' WHERE operation_id=? AND status='pending'").run(row.operation_id).changes !== 1) continue;
+        try { const memory = JSON.parse(queued.toString()) as unknown; validateSettlementMemory(memory, "verified_outcome"); const blobId = await manual.remember(memory); this.store.db.prepare("UPDATE memory_jobs SET blob_id=?,status='complete' WHERE operation_id=?").run(blobId, row.operation_id); this.registerMemoryAuthority(blobId, memory); }
         catch { this.store.db.prepare("UPDATE memory_jobs SET status='unresolved' WHERE operation_id=?").run(row.operation_id); }
       }
       const jobs = new WorkflowMemory(this.store, manual).completed(); return { namespace: config.namespace, completed: jobs.length, jobs: jobs.map((item) => ({ ...item, status: "complete" })) };

@@ -5,7 +5,7 @@ import { fail } from "./errors.js";
 import type { Phase3App, Role } from "./phase3.js";
 
 export interface AgentMandate {
-  version: "supercuts.mandate.v1";
+  version: "supercuts.mandate.v1" | "supercuts.mandate.v2";
   owner: string;
   role: Role;
   allowedCommands: string[];
@@ -19,6 +19,7 @@ export interface AgentMandate {
   allowedCapabilityIds?: string[];
   allowedCapabilityClasses?: string[];
   allowedRails?: Array<"x402" | "shielded">;
+  allowPublicX402?: boolean;
 }
 
 export interface ToolSchema {
@@ -54,10 +55,14 @@ const definitions: Record<string, ReturnType<typeof object>> = {
   "pay.status": object({ "operation-id": string("Payment operation identity."), reconcile: boolean("Reconcile an ambiguous broadcast.") }, ["operation-id"], false, "Read or reconcile a previously journaled payment."),
   "resource.serve": object({ "request-id": string("Unique request identity."), body: string("Base64-encoded artifact bytes.") }, ["request-id", "body"], true, "Bind one generated artifact to one request."),
   "resource.fetch": object({ "request-id": string("Bound request identity."), "operation-id": string("Finalized payment operation."), response: string("Base64-encoded paid response.") }, ["request-id", "operation-id", "response"], false, "Record delivery separately from payment evidence."),
-  "settlement.plan": object({ manifest: { type: "object", description: "Primary supercuts.capability.v1 manifest." }, alternatives: { type: "array", description: "Optional alternative manifests.", items: { type: "object" } }, "requested-amount": string("Desired opening amount in base units.", { pattern: "^(?:0|[1-9][0-9]*)$" }), "privacy-hint": string("Agent hint that may only increase privacy.", { enum: ["any", "shielded"] }) }, ["manifest"], true, "Create and persist a deterministic mandate- and memory-bound settlement plan."),
+  "settlement.plan": object({ manifest: { type: "object", description: "Primary supercuts.capability.v1 manifest." }, alternatives: { type: "array", description: "Optional alternative manifests.", items: { type: "object" } }, "requested-amount": string("Desired opening amount in base units.", { pattern: "^(?:0|[1-9][0-9]*)$" }), "privacy-hint": string("Agent hint that may only increase privacy.", { enum: ["any", "shielded"] }), "requested-rail": string("Explicit settlement rail request.", { enum: ["x402", "shielded"] }) }, ["manifest"], true, "Create and persist a deterministic mandate- and memory-bound settlement plan."),
   "memory.remember": object({ fact: string("Legacy advisory fact, never a secret or full transcript.", { maxLength: 4096 }), memory: { type: "object", description: "Typed settlement memory; provenance is assigned as agent_observation." } }, [], true, "Write one advisory Mainnet Walrus memory without granting authority."),
   "memory.recall": object({ query: string("Policy or experience query.", { maxLength: 1024 }) }, ["query"], false, "Recall relevant prior experience and privacy rules."),
-  "memory.status": object({}, [], false, "List completed memory blob identities."),
+  "memory.status": object({ "operation-id": string("Optional memory job ID to reconcile without draining unrelated jobs.") }, [], false, "List completed memory blob identities or reconcile one job."),
+  "memory.inventory": object({ "blob-id": string("Optional role-owned outcome memory blob ID.") }, [], false, "Synchronize Walrus Memory metadata for this role and namespace."),
+  "deal.execute": object({ input: { type: "object", description: "Versioned composite deal input." } }, ["input"], true, "Execute a protocol deal under the owner v2 mandate and configured seller adapter."),
+  "deal.get": object({ operationId: string("Existing deal operation ID.") }, ["operationId"], false, "Read a redacted composite deal status."),
+  "deal.resume": object({ operationId: string("Existing deal operation ID.") }, ["operationId"], false, "Resume the same journaled deal without changing task or payment intent."),
   "remote.catalog": object({}, [], false, "Discover the signed remote seller catalog through Walrus."),
   "remote.rank-briefs": object({ budget: string("Total budget in MIST.", { pattern: "^[1-9][0-9]*$" }), topic: string("Sui research topic.", { maxLength: 256 }) }, ["budget", "topic"], false, "Compare eligible market briefs with a visible quality and price rubric."),
   "remote.negotiate": object({ capabilityId: string("Selected capability ID."), sessionId: string("Stable negotiation session ID."), runId: string("Demo run ID."), task: string("Private task summary.", { maxLength: 512 }), opening: string("Opening amount in MIST.", { pattern: "^[1-9][0-9]*$" }), maximum: string("Maximum amount in MIST.", { pattern: "^[1-9][0-9]*$" }), briefHash: string("Purchased brief SHA-256 if analyzing it.", { pattern: "^[0-9a-f]{64}$" }) }, ["capabilityId", "sessionId", "runId", "task", "opening", "maximum"], false, "Exchange an encrypted buyer offer and seller response through Walrus."),
@@ -96,7 +101,8 @@ export function loadMandate(home: string): AgentMandate {
   if (!existsSync(path)) fail("MANDATE_NOT_FOUND", "MCP requires an owner-issued mandate.json");
   if ((statSync(path).mode & 0o077) !== 0) fail("MANDATE_PERMISSIONS", "mandate.json must be owner-only");
   let mandate: AgentMandate; try { mandate = JSON.parse(readFileSync(path, "utf8")) as AgentMandate; } catch (error) { return fail("MANDATE_INVALID", "mandate.json is not valid JSON", error); }
-  if (mandate.version !== "supercuts.mandate.v1" || !mandate.owner || !Array.isArray(mandate.allowedCommands) || !Array.isArray(mandate.allowedCounterparties) || !Array.isArray(mandate.allowedAssets) || !/^(?:0|[1-9][0-9]*)$/.test(mandate.perDealCeiling) || !/^(?:0|[1-9][0-9]*)$/.test(mandate.totalRunBudget) || !Number.isSafeInteger(mandate.expiresAt)) fail("MANDATE_INVALID", "mandate.json has an invalid shape");
+  if (!["supercuts.mandate.v1", "supercuts.mandate.v2"].includes(mandate.version) || !mandate.owner || !Array.isArray(mandate.allowedCommands) || !Array.isArray(mandate.allowedCounterparties) || !Array.isArray(mandate.allowedAssets) || !/^(?:0|[1-9][0-9]*)$/.test(mandate.perDealCeiling) || !/^(?:0|[1-9][0-9]*)$/.test(mandate.totalRunBudget) || !Number.isSafeInteger(mandate.expiresAt)) fail("MANDATE_INVALID", "mandate.json has an invalid shape");
+  if (mandate.version === "supercuts.mandate.v1" && mandate.allowPublicX402 !== undefined || mandate.version === "supercuts.mandate.v2" && mandate.allowPublicX402 !== undefined && typeof mandate.allowPublicX402 !== "boolean") fail("MANDATE_INVALID", "public x402 permission has an invalid version or value");
   if (mandate.requireSettlementPlan !== undefined && typeof mandate.requireSettlementPlan !== "boolean") fail("MANDATE_INVALID", "requireSettlementPlan must be boolean");
   for (const list of [mandate.allowedCapabilityIds, mandate.allowedCapabilityClasses, mandate.allowedRails]) if (list !== undefined && (!Array.isArray(list) || list.some((item) => typeof item !== "string" || !item))) fail("MANDATE_INVALID", "mandate allowlists must contain non-empty strings");
   if (mandate.allowedRails?.some((rail) => rail !== "x402" && rail !== "shielded")) fail("MANDATE_INVALID", "mandate contains an unsupported rail");
@@ -129,6 +135,7 @@ export async function executeMandated(app: Phase3App, mandate: AgentMandate, com
   if (typeof raw.counterparty === "string" && !mandate.allowedCounterparties.includes(raw.counterparty)) fail("MANDATE_COUNTERPARTY_FORBIDDEN", "counterparty is outside the owner mandate");
   if (typeof raw.asset === "string" && !mandate.allowedAssets.includes(raw.asset)) fail("MANDATE_ASSET_FORBIDDEN", "asset is outside the owner mandate");
   if (mandate.requiredPrivacy === "shielded" && command === "pay.x402") fail("MANDATE_PRIVACY_REQUIRED", "owner mandate requires shielded settlement");
+  if (mandate.version === "supercuts.mandate.v2" && command === "pay.x402" && mandate.allowPublicX402 !== true) fail("DEAL_PUBLIC_RAIL_FORBIDDEN", "owner mandate did not opt into public x402");
   const rail = command === "pay.x402" ? "x402" : command === "pay.shielded" ? "shielded" : undefined;
   if (rail && mandate.allowedRails && !mandate.allowedRails.includes(rail)) fail("MANDATE_RAIL_FORBIDDEN", "settlement rail is outside the owner mandate");
   if (rail && mandate.requireSettlementPlan && typeof raw["plan-hash"] !== "string") fail("SETTLEMENT_PLAN_REQUIRED", "owner mandate requires an approved settlement plan");

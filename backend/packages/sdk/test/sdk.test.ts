@@ -3,6 +3,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { Phase3App } from "../../../src/phase3.js";
+import { DealJournal } from "../../../src/deal.js";
 import {
   AuditorClient, BuyerClient, SellerClient, SupercutsSdkError, initializeProfile,
   type ApprovalProvider, type AuthorizationIntent, type OperationId, type SessionId,
@@ -52,4 +54,16 @@ test("operation authorization survives an exact retry but rejects changed payloa
   const second = await buyer.payX402({ operationId: "sdk-retry" as OperationId, amount: 5n, counterparty: "seller-a" });
   assert.equal(second.transactionDigest, first.transactionDigest);
   await assert.rejects(() => buyer.payX402({ operationId: "sdk-retry" as OperationId, amount: 6n, counterparty: "seller-a" }), (error: unknown) => error instanceof SupercutsSdkError && error.code === "OPERATION_ID_CONFLICT");
+});
+
+test("deal status crosses the SDK seam without exposing encrypted task input", async () => {
+  const app = new Phase3App(homes.buyer);
+  const created = new DealJournal(app.store).create({ operationId: "sdk-composite", capabilityClass: "artifact.generation", input: { privateTask: "not in status" }, budget: { asset: "0x2::sui::SUI", maximum: "10" } });
+  app.close();
+  const buyer = await BuyerClient.connect({ home: homes.buyer, approvalProvider: provider });
+  const received = await buyer.getDeal("sdk-composite");
+  assert.equal(received.dealId, created.dealId);
+  assert.equal(received.state, "created");
+  assert.equal(JSON.stringify(received).includes("not in status"), false);
+  await assert.rejects(() => buyer.executeDeal({ operationId: "sdk-live-only", capabilityClass: "artifact.generation", input: {}, budget: { asset: "0x2::sui::SUI", maximum: "10" } }), (error: unknown) => error instanceof SupercutsSdkError && error.code === "DEAL_LIVE_REQUIRED");
 });
