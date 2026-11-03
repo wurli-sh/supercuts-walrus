@@ -15,8 +15,20 @@ const mandate = loadMandate(home);
 const remote = app.profile.role === "buyer" && !app.profile.mock && process.env.SUPERCUTS_SELLER_URL ? new RemoteBuyer(app, mandate, process.env.SUPERCUTS_SELLER_URL) : undefined;
 const eventLog = process.env.SUPERCUTS_EVENT_PATH && process.env.SUPERCUTS_RUN_ID ? new DemoEventLog(process.env.SUPERCUTS_EVENT_PATH, process.env.SUPERCUTS_RUN_ID) : undefined;
 if (eventLog) eventLog.append({ actor: "operator", stage: "run", status: "started", publicDetails: { flow: remote ? "codex-remote" : "codex-deal-v2" }, evidenceHashes: [], explorerLinks: [] });
+let memoryTickRunning = false;
+const memoryTick = async () => {
+  if (memoryTickRunning) return;
+  memoryTickRunning = true;
+  try { await app.processMemoryOutbox(); }
+  catch (error) { process.stderr.write(`${error && typeof error === "object" && "code" in error ? String(error.code) : "MEMORY_WORKER_ERROR"}\n`); }
+  finally { memoryTickRunning = false; }
+};
+const memoryConfigured = app.profile.role === "buyer" && !app.profile.mock && Boolean(app.store.getSecret("live:memory-config"));
+if (memoryConfigured) app.recoverStaleMemorySubmissions();
+const memoryTimer = memoryConfigured ? setInterval(() => { void memoryTick(); }, 30_000) : undefined;
+if (memoryTimer) { memoryTimer.unref(); void memoryTick(); }
 const tools: Record<string, string> = {
-  buyer: "status,doctor,deal.catalog,deal.policy,deal.execute,deal.get,deal.resume,deal.evidence,deal.delivery,capability.discover,settlement.plan,wallet.deposit,wallet.balance,wallet.recover,wallet.withdraw,wallet.exit.queue,wallet.exit.status,wallet.exit.finalize,offer.open,offer.propose,offer.accept,offer.show,pay.quote,pay.shielded,pay.x402,pay.status,resource.fetch,memory.remember,memory.recall,memory.status,memory.inventory,remote.catalog,remote.rank-briefs,remote.negotiate,remote.quote,remote.purchase-brief,remote.agreement,remote.settle-analysis,remote.delivery,remote.events,disclose",
+  buyer: "status,doctor,deal.catalog,deal.policy,deal.execute,deal.get,deal.resume,deal.reconcile,deal.evidence,deal.delivery,capability.discover,settlement.plan,wallet.deposit,wallet.balance,wallet.recover,wallet.withdraw,wallet.exit.queue,wallet.exit.status,wallet.exit.finalize,offer.open,offer.propose,offer.accept,offer.show,pay.quote,pay.shielded,pay.x402,pay.status,resource.fetch,memory.remember,memory.recall,memory.status,memory.inventory,remote.catalog,remote.rank-briefs,remote.negotiate,remote.quote,remote.purchase-brief,remote.agreement,remote.settle-analysis,remote.delivery,remote.events,disclose",
   seller: "status,doctor,capability.publish,wallet.balance,wallet.recover,wallet.withdraw,wallet.exit.queue,wallet.exit.status,wallet.exit.finalize,offer.counter,offer.show,pay.status,resource.serve,resource.fetch,memory.remember,memory.recall,memory.status",
   auditor: "status,doctor,audit.verify",
 };
@@ -44,7 +56,7 @@ function logTool(name: string, data: Record<string, unknown>): void {
   }
   if (name === "remote.settle-analysis") append("buyer", "private-settlement", { rail: "shielded", transactionDigest: data.transactionDigest, checkpoint: data.checkpoint, planHash: data.planHash, visibility: data.visibility }, typeof data.dealCommitment === "string" ? [data.dealCommitment] : []);
   if (name === "remote.delivery" && data.status === "delivered") append("buyer", "artifact-delivery", { kind: "competitor-analysis", artifactSha256: data.artifactSha256, sessionId: data.sessionId }, typeof data.artifactSha256 === "string" ? [data.artifactSha256] : []);
-  if ((name === "deal.execute" || name === "deal.resume") && typeof data.dealId === "string") {
+  if ((name === "deal.execute" || name === "deal.resume" || name === "deal.get") && typeof data.dealId === "string") {
     const journal = new DealJournal(app.store), evidence = journal.evidence(data.dealId);
     const plan = journal.step<SettlementPlanV1>(String(data.operationId), "planning");
     if (plan) append("supercuts", "settlement-plan", { phase: "after-memory", planHash: plan.planHash, capabilityId: plan.capabilityId, rail: plan.rail, openingAmount: plan.openingAmount, maximumAmount: plan.maximumAmount, riskLevel: plan.riskLevel, reasonCodes: plan.reasonCodes, blobIds: plan.citations.map((item) => item.blobId) });
@@ -65,7 +77,7 @@ rl.on("line", (line) => { queue = queue.then(async () => {
       let data: Record<string, unknown>;
       if (name.startsWith("deal.")) {
         const spec = toolSchema(name); const { validateToolArguments } = await import("./mandate.js"); validateToolArguments(spec, raw);
-        if (mandate.version !== "supercuts.mandate.v2" || !mandate.allowedCommands.includes(name) || (name === "deal.execute" || name === "deal.resume") && Date.now() > mandate.expiresAt) throw new Error("deal tool is not authorized by an active v2 mandate");
+        if (mandate.version !== "supercuts.mandate.v2" || !mandate.allowedCommands.includes(name === "deal.reconcile" ? "deal.resume" : name) || (name === "deal.execute" || name === "deal.resume") && Date.now() > mandate.expiresAt) throw new Error("deal tool is not authorized by an active v2 mandate");
         if (name === "deal.catalog") data = { capabilities: (await new LiveDealPorts(app, mandate).catalog()).map(({ origin, registration }) => ({ origin, manifest: registration.manifest, manifestBlobId: registration.manifestBlobId })) };
         else if (name === "deal.policy") {
           const hasTable = Boolean(app.store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mandate_operations'").get());
@@ -73,6 +85,7 @@ rl.on("line", (line) => { queue = queue.then(async () => {
           data = { perDealCeiling: mandate.perDealCeiling, totalBudget: mandate.totalRunBudget, remainingBudget: (BigInt(mandate.totalRunBudget) - reserved).toString(), expiresAt: mandate.expiresAt, defaultRail: "shielded", allowPublicX402: mandate.allowPublicX402 === true, allowedAssets: mandate.allowedAssets, allowedCapabilityIds: mandate.allowedCapabilityIds, allowedCapabilityClasses: mandate.allowedCapabilityClasses };
         }
         else if (name === "deal.evidence") data = new DealJournal(app.store).evidence(String(raw.dealId)) as unknown as Record<string, unknown>;
+        else if (name === "deal.reconcile") data = await app.reconcileDealOutcome(String(raw.operationId)) as unknown as Record<string, unknown>;
         else if (name === "deal.delivery") {
           const delivery = new DealJournal(app.store).delivery(String(raw.dealId));
           data = { dealId: delivery.dealId, contentType: delivery.contentType, artifactSha256: delivery.artifactSha256, artifactBase64: Buffer.from(delivery.artifact).toString("base64") };
@@ -104,5 +117,5 @@ rl.on("line", (line) => { queue = queue.then(async () => {
     return send({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: "Method not found" } });
   } catch (error) { return send({ jsonrpc: "2.0", id: request.id, result: { isError: true, content: [{ type: "text", text: JSON.stringify(errorOutput(error)) }], structuredContent: errorOutput(error) } }); }
   }).catch((error) => send({ jsonrpc: "2.0", error: { code: -32603, message: error instanceof Error ? error.message : "Internal error" }, id: null })); });
-const close = () => { app.close(); process.exit(0); };
+const close = () => { if (memoryTimer) clearInterval(memoryTimer); app.close(); process.exit(0); };
 process.on("SIGINT", close); process.on("SIGTERM", close);

@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { loadStateKey } from "./config.js";
 import { fail, SupercutsError } from "./errors.js";
 import { RoleStore } from "./store.js";
+import { DealJournal } from "./deal.js";
 import { LiveRuntime, type LiveRuntimeProfile } from "./live-runtime.js";
 import { V2ExitQueue } from "./v2-exits.js";
 import { validateCapabilityManifest, type CapabilityManifest } from "./capability.js";
@@ -368,15 +369,82 @@ export class Phase3App {
     this.store.db.prepare("INSERT OR IGNORE INTO memory_jobs(operation_id,kind,fact_hash,blob_id,status,created_at) VALUES(?,?,?,NULL,'pending',?)").run(jobId, memory.kind, factHash, Date.now());
   }
 
-  async recordVerifiedDealOutcome(operationId: string, planHash: string, paymentDigest: string, artifactSha256: string): Promise<{ payloadHash: string; blobId: string }> {
+  recordVerifiedDealOutcome(operationId: string, planHash: string, paymentDigest: string, artifactSha256: string): { payloadHash: string; queued: true } {
     if (this.profile.mock || this.profile.role !== "buyer") fail("DEAL_LIVE_REQUIRED", "verified deal outcome requires a live buyer role");
     const jobId = `verified:deal:${operationId}`;
     this.enqueueVerifiedOutcome("deal", operationId, { status: "succeeded", paymentDigest, artifactSha256 }, planHash);
-    await this.execute("memory.status", { "operation-id": jobId });
-    const row = this.store.db.prepare("SELECT blob_id,status FROM memory_jobs WHERE operation_id=?").get(jobId) as { blob_id: string | null; status: string } | undefined;
-    if (row?.status !== "complete" || !row.blob_id) return fail(row?.status === "unresolved" ? "DEAL_MEMORY_UNRESOLVED" : "DEAL_MEMORY_PENDING", "verified deal memory has not completed");
     const payload = this.store.getSecret(`memory-outbox:${jobId}`) ?? fail("DEAL_MEMORY_INVALID", "verified outcome payload is missing");
-    return { payloadHash: hash(payload), blobId: row.blob_id };
+    return { payloadHash: hash(payload), queued: true };
+  }
+
+  recoverStaleMemorySubmissions(): void {
+    if (this.profile.mock || this.profile.role !== "buyer") return;
+    this.store.db.prepare("UPDATE memory_jobs SET status='unresolved' WHERE status='submitting' AND (claimed_at IS NULL OR claimed_at<?)").run(Date.now() - 300_000);
+    this.syncDealOutcomeJobs();
+  }
+
+  syncDealOutcomeJobs(): void {
+    if (this.profile.mock || this.profile.role !== "buyer") return;
+    const journal = new DealJournal(this.store);
+    const rows = this.store.db.prepare("SELECT d.operation_id,d.payload_hash,d.blob_id,j.blob_id AS job_blob_id,j.status AS job_status,j.created_at FROM deal_memory_outbox d JOIN memory_jobs j ON j.operation_id='verified:deal:' || d.operation_id WHERE d.event_kind='outcome' AND d.status!='indexed'").all() as Array<{ operation_id: string; payload_hash: string; blob_id: string | null; job_blob_id: string | null; job_status: string; created_at: number }>;
+    for (const row of rows) {
+      const view = journal.get(row.operation_id);
+      if (view.evidence.payment !== "finalized" || view.evidence.delivery !== "verified") fail("DEAL_OUTCOME_INVARIANT", "outcome job lacks verified payment or delivery");
+      if (row.job_status === "unresolved") { journal.setOutcomeUnresolved(row.operation_id); continue; }
+      if (row.job_status !== "complete" || !row.job_blob_id) continue;
+      if (row.blob_id && row.blob_id !== row.job_blob_id) fail("DEAL_MEMORY_CONFLICT", "outcome memory blob differs from the job");
+      const encoded = this.store.getSecret("live:memory-config") ?? fail("LIVE_MEMORY_CONFIG_MISSING", "buyer memory configuration is missing");
+      const namespace = (JSON.parse(encoded.toString()) as ManualMemoryConfig).namespace;
+      const inventory = this.store.db.prepare("SELECT status,deleted,expires_at FROM memory_inventory WHERE blob_id=? AND namespace=?").get(row.job_blob_id, namespace) as { status: string; deleted: number; expires_at: string | null } | undefined;
+      const indexed = Boolean(inventory && !inventory.deleted && inventory.status === "active" && (!inventory.expires_at || Date.parse(inventory.expires_at) > Date.now()));
+      journal.recordOutcome(row.operation_id, row.payload_hash, row.job_blob_id, indexed);
+      if (indexed) {
+        journal.recordTiming(row.operation_id, "memory_index", Date.now() - row.created_at);
+        if (journal.get(row.operation_id).state === "outcome_pending") journal.advance(row.operation_id, "outcome_pending", "complete");
+      }
+    }
+  }
+
+  async processMemoryOutbox(): Promise<void> {
+    if (this.profile.mock || this.profile.role !== "buyer") return;
+    this.recoverStaleMemorySubmissions();
+    await this.execute("memory.status", {});
+    await this.execute("memory.inventory", {});
+    this.syncDealOutcomeJobs();
+  }
+
+  async reconcileDealOutcome(operationId: string): Promise<{ resolved: boolean; state: string; blobId?: string }> {
+    if (this.profile.mock || this.profile.role !== "buyer") fail("DEAL_LIVE_REQUIRED", "deal memory reconciliation requires a live buyer role");
+    const journal = new DealJournal(this.store), view = journal.get(operationId);
+    if (view.evidence.payment !== "finalized" || view.evidence.delivery !== "verified") fail("DEAL_DELIVERY_UNVERIFIED", "deal must have verified payment and delivery");
+    if (view.state === "complete") return { resolved: true, state: "complete", ...(journal.outcomeStatus(operationId)?.blobId ? { blobId: journal.outcomeStatus(operationId)!.blobId! } : {}) };
+    const jobId = `verified:deal:${operationId}`;
+    const row = (this.store.db.prepare("SELECT fact_hash,status FROM memory_jobs WHERE operation_id=?").get(jobId) as { fact_hash: string; status: string } | undefined) ?? fail("DEAL_MEMORY_INVALID", "verified outcome job is missing");
+    const encoded = this.store.getSecret(`memory-outbox:${jobId}`) ?? fail("DEAL_MEMORY_INVALID", "verified outcome payload is missing");
+    const memory = JSON.parse(encoded.toString()) as SettlementMemoryV1;
+    validateSettlementMemory(memory, "verified_outcome");
+    if (row.fact_hash !== hash(canonicalJson(memory))) fail("DEAL_MEMORY_CONFLICT", "outcome job differs from its saved payload");
+    journal.queueOutcome(operationId, hash(encoded));
+    this.syncDealOutcomeJobs();
+    if (row.status !== "unresolved") return { resolved: false, state: row.status };
+    const configBytes = this.store.getSecret("live:memory-config") ?? fail("LIVE_MEMORY_CONFIG_MISSING", "buyer memory configuration is missing");
+    const config = JSON.parse(configBytes.toString()) as ManualMemoryConfig;
+    const manual = new ManualMemory(this.store, config);
+    let blobId: string | undefined;
+    try {
+      const query = [memory.scope.capabilityId, memory.scope.counterparty, memory.signal.outcome].filter(Boolean).join(" ");
+      const recalled = await manual.recall(query, 100);
+      blobId = recalled.find((item) => { try { return canonicalJson(JSON.parse(item.text)) === canonicalJson(memory); } catch { return false; } })?.blobId;
+      if (blobId) await manual.listMetadata(config);
+    } finally { manual.destroy(); }
+    if (!blobId) return { resolved: false, state: "unresolved" };
+    this.store.db.prepare("UPDATE memory_jobs SET blob_id=?,status='complete' WHERE operation_id=? AND status='unresolved'").run(blobId, jobId);
+    this.registerMemoryAuthority(blobId, memory);
+    const outcome = journal.outcomeStatus(operationId) ?? fail("DEAL_MEMORY_INVALID", "deal outcome journal is missing");
+    if (outcome.payloadHash !== hash(encoded)) fail("DEAL_MEMORY_CONFLICT", "deal outcome differs from its saved payload");
+    journal.recordOutcome(operationId, outcome.payloadHash, blobId, false);
+    this.syncDealOutcomeJobs();
+    return { resolved: journal.get(operationId).state === "complete", state: journal.get(operationId).state, blobId };
   }
 
   private approveReview(args: Record<string, string | boolean>): Record<string, unknown> {
@@ -434,7 +502,7 @@ export class Phase3App {
         const blobId = typeof args["blob-id"] === "string" ? args["blob-id"] : undefined;
         if (blobId && !/^[A-Za-z0-9_-]{1,256}$/.test(blobId)) fail("MEMORY_BLOB_ID_INVALID", "memory blob ID is invalid");
         const row = blobId ? this.store.db.prepare("SELECT m.blob_id AS blobId,m.status AS status,m.expires_at AS expiresAt,m.deleted AS deleted FROM memory_inventory m JOIN memory_jobs j ON j.blob_id=m.blob_id WHERE m.blob_id=? AND m.namespace=?").get(blobId, config.namespace) as { blobId: string; status: string; expiresAt: string | null; deleted: number } | undefined : undefined;
-        const present = Boolean(row && !row.deleted && row.status !== "deleted" && (!row.expiresAt || Date.parse(row.expiresAt) > Date.now()));
+        const present = Boolean(row && !row.deleted && row.status === "active" && (!row.expiresAt || Date.parse(row.expiresAt) > Date.now()));
         return output(command, { namespace: config.namespace, ...synced, ...(blobId ? { blobId, present, ...(row?.expiresAt ? { expiresAt: row.expiresAt } : {}) } : {}) });
       } finally { manual.destroy(); }
     }
@@ -549,7 +617,7 @@ export class Phase3App {
       const target = typeof args["operation-id"] === "string" ? args["operation-id"] : undefined;
       for (const row of (target ? this.store.db.prepare("SELECT operation_id FROM memory_jobs WHERE status='pending' AND operation_id=? ORDER BY created_at").all(target) : this.store.db.prepare("SELECT operation_id FROM memory_jobs WHERE status='pending' ORDER BY created_at").all()) as Array<{ operation_id: string }>) {
         const queued = this.store.getSecret(`memory-outbox:${row.operation_id}`); if (!queued) continue;
-        if (this.store.db.prepare("UPDATE memory_jobs SET status='submitting' WHERE operation_id=? AND status='pending'").run(row.operation_id).changes !== 1) continue;
+        if (this.store.db.prepare("UPDATE memory_jobs SET status='submitting',claimed_at=? WHERE operation_id=? AND status='pending'").run(Date.now(), row.operation_id).changes !== 1) continue;
         try { const memory = JSON.parse(queued.toString()) as unknown; validateSettlementMemory(memory, "verified_outcome"); const blobId = await manual.remember(memory); this.store.db.prepare("UPDATE memory_jobs SET blob_id=?,status='complete' WHERE operation_id=?").run(blobId, row.operation_id); this.registerMemoryAuthority(blobId, memory); }
         catch { this.store.db.prepare("UPDATE memory_jobs SET status='unresolved' WHERE operation_id=?").run(row.operation_id); }
       }

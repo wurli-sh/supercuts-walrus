@@ -133,7 +133,7 @@ export class LiveDealPorts implements DealPorts {
       const response = JSON.parse(Buffer.from(String(result.response ?? ""), "base64").toString()) as Record<string, unknown>;
       if (response.status !== "paid" || response.requestId !== prepared.sessionId) fail("DEAL_PAYMENT_UNVERIFIED", "seller-owned x402 resource returned a different receipt");
     }
-    return { transactionDigest: result.transactionDigest, finalized: true, tatumVerified: true };
+    return { transactionDigest: result.transactionDigest, finalized: true, tatumVerified: true, ...(typeof result.proveMs === "number" ? { proveMs: result.proveMs } : {}) };
   }
   async deliver(input: ExecuteDealInput, plan: SettlementPlanV1, negotiation: DealNegotiation, payment: DealPayment, _deliveryOperationId: string): Promise<DealArtifact> {
     const prepared = negotiation as LiveNegotiation, key = wireKey(this.app, prepared.sellerTransportPublicKey, prepared.sessionId);
@@ -150,9 +150,8 @@ export class LiveDealPorts implements DealPorts {
     if (wireHash(Buffer.from(artifact.artifactBase64, "base64")) !== receipt.artifactSha256 || artifact.contentType !== receipt.contentType || canonicalJson(artifact.metadata) !== canonicalJson(receipt.metadata)) fail("DEAL_DELIVERY_UNVERIFIED", "seller delivery bytes or metadata differ from the receipt");
     return { blobId: receipt.blobId, ciphertextHash: receipt.ciphertextHash, artifactSha256: receipt.artifactSha256, contentType: receipt.contentType, metadata: receipt.metadata, artifactBase64: artifact.artifactBase64 };
   }
-  async rememberOutcome(input: ExecuteDealInput, plan: SettlementPlanV1, payment: DealPayment, artifact: DealArtifact, _outcomeOperationId: string): Promise<DealOutcome> {
-    const result = await this.app.recordVerifiedDealOutcome(input.operationId, plan.planHash, payment.transactionDigest, artifact.artifactSha256);
-    return { ...result, indexed: false };
+  async rememberOutcome(input: ExecuteDealInput, plan: SettlementPlanV1, payment: DealPayment, artifact: DealArtifact, _outcomeOperationId: string): Promise<{ queued: true; payloadHash: string }> {
+    return this.app.recordVerifiedDealOutcome(input.operationId, plan.planHash, payment.transactionDigest, artifact.artifactSha256);
   }
   async inventory(blobId: string): Promise<boolean> {
     const result = (await this.app.execute("memory.inventory", { "blob-id": blobId })).data;

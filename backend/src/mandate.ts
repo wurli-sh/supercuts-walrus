@@ -60,6 +60,7 @@ const definitions: Record<string, ReturnType<typeof object>> = {
   "memory.recall": object({ query: string("Policy or experience query.", { maxLength: 1024 }) }, ["query"], false, "Recall relevant prior experience and privacy rules."),
   "memory.status": object({ "operation-id": string("Optional memory job ID to reconcile without draining unrelated jobs.") }, [], false, "List completed memory blob identities or reconcile one job."),
   "memory.inventory": object({ "blob-id": string("Optional role-owned outcome memory blob ID.") }, [], false, "Synchronize Walrus Memory metadata for this role and namespace."),
+  "deal.reconcile": object({ operationId: string("Existing verified deal operation ID.") }, ["operationId"], true, "Reconcile an ambiguous encrypted outcome memory using an exact local plaintext match; never resubmit payment or memory."),
   "deal.execute": object({ input: { type: "object", description: "Versioned composite deal input." } }, ["input"], true, "Execute a protocol deal under the owner v2 mandate and configured seller adapter."),
   "deal.get": object({ operationId: string("Existing deal operation ID.") }, ["operationId"], false, "Read a redacted composite deal status."),
   "deal.resume": object({ operationId: string("Existing deal operation ID.") }, ["operationId"], false, "Resume the same journaled deal without changing task or payment intent."),

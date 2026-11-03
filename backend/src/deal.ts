@@ -25,7 +25,8 @@ export interface DealView {
   paymentDigest?: string;
   deliveryHash?: string;
   evidence: { agreement: "pending" | "verified"; payment: "pending" | "finalized"; delivery: "pending" | "verified"; outcomeMemory: "pending" | "indexed" | "unresolved" };
-  nextAction?: "resume" | "fund_buyer" | "owner_approval" | "owner_review";
+  nextAction?: "resume" | "check_memory" | "reconcile_memory" | "fund_buyer" | "owner_approval" | "owner_review";
+  timingsMs?: Record<string, number>;
 }
 export interface DealEvidenceView {
   version: "supercuts.deal-evidence.v1";
@@ -97,12 +98,13 @@ export class DealJournal {
     const agreement = this.store.db.prepare("SELECT status FROM deal_blobs WHERE operation_id=? AND kind='agreement'").get(operationId) as { status: string } | undefined;
     const delivery = this.store.db.prepare("SELECT status FROM deal_blobs WHERE operation_id=? AND kind='delivery'").get(operationId) as { status: string } | undefined;
     const memory = this.store.db.prepare("SELECT status FROM deal_memory_outbox WHERE operation_id=? AND event_kind='outcome'").get(operationId) as { status: string } | undefined;
+    const timings = this.store.db.prepare("SELECT stage,duration_ms FROM deal_timings WHERE operation_id=?").all(operationId) as Array<{ stage: string; duration_ms: number }>;
     const payment = this.store.getOperation(row.payment_operation_id);
     const hasLiveTransactions = Boolean(this.store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='live_signed_transactions'").get());
     const signed = hasLiveTransactions ? this.store.db.prepare("SELECT status,digest FROM live_signed_transactions WHERE operation_id=?").get(row.payment_operation_id) as { status: string; digest: string } | undefined : undefined;
     const verifiedPayment = this.step<{ transactionDigest: string; finalized: boolean; tatumVerified: boolean }>(operationId, "payment");
     const finalized = Boolean(verifiedPayment?.finalized && verifiedPayment.tatumVerified && ((payment?.status === "confirmed" || payment?.status === "delivered") && payment.txDigest === verifiedPayment.transactionDigest || signed?.status === "finalized" && signed.digest === verifiedPayment.transactionDigest));
-    return { version: DEAL_VERSION, dealId: row.deal_id, operationId, state: row.state, ...(row.rail ? { rail: row.rail, visibility: row.rail === "shielded" ? "shielded-direct-payment" as const : "public-x402" as const } : {}), ...(row.plan_hash ? { planHash: row.plan_hash } : {}), ...(finalized ? { paymentDigest: verifiedPayment!.transactionDigest } : {}), evidence: { agreement: agreement?.status === "verified" ? "verified" : "pending", payment: finalized ? "finalized" : "pending", delivery: delivery?.status === "verified" ? "verified" : "pending", outcomeMemory: memory?.status === "indexed" ? "indexed" : memory?.status === "unresolved" ? "unresolved" : "pending" }, ...(row.state === "funding_required" ? { nextAction: "fund_buyer" as const } : row.state === "awaiting_approval" ? { nextAction: "owner_approval" as const } : row.state === "review_required" ? { nextAction: "owner_review" as const } : !["complete", "failed"].includes(row.state) ? { nextAction: "resume" as const } : {}) };
+    return { version: DEAL_VERSION, dealId: row.deal_id, operationId, state: row.state, ...(row.rail ? { rail: row.rail, visibility: row.rail === "shielded" ? "shielded-direct-payment" as const : "public-x402" as const } : {}), ...(row.plan_hash ? { planHash: row.plan_hash } : {}), ...(finalized ? { paymentDigest: verifiedPayment!.transactionDigest } : {}), evidence: { agreement: agreement?.status === "verified" ? "verified" : "pending", payment: finalized ? "finalized" : "pending", delivery: delivery?.status === "verified" ? "verified" : "pending", outcomeMemory: memory?.status === "indexed" ? "indexed" : memory?.status === "unresolved" ? "unresolved" : "pending" }, ...(timings.length ? { timingsMs: Object.fromEntries(timings.map((item) => [item.stage, item.duration_ms])) } : {}), ...(row.state === "funding_required" ? { nextAction: "fund_buyer" as const } : row.state === "awaiting_approval" ? { nextAction: "owner_approval" as const } : row.state === "review_required" ? { nextAction: "owner_review" as const } : row.state === "outcome_pending" ? { nextAction: memory?.status === "unresolved" ? "reconcile_memory" as const : "check_memory" as const } : !["complete", "failed"].includes(row.state) ? { nextAction: "resume" as const } : {}) };
   }
 
   input(operationId: string): ExecuteDealInput {
@@ -152,9 +154,31 @@ export class DealJournal {
     this.get(operationId);
     if (!/^[0-9a-f]{64}$/.test(payloadHash) || !blobId) fail("DEAL_MEMORY_INVALID", "outcome hash or blob ID is invalid");
     const prior = this.store.db.prepare("SELECT payload_hash,blob_id FROM deal_memory_outbox WHERE operation_id=? AND event_kind='outcome'").get(operationId) as { payload_hash: string; blob_id: string } | undefined;
-    if (prior && (prior.payload_hash !== payloadHash || prior.blob_id !== blobId)) fail("DEAL_MEMORY_CONFLICT", "outcome memory already identifies a different write");
-    this.store.db.prepare("INSERT INTO deal_memory_outbox(operation_id,event_kind,payload_hash,blob_id,status,updated_at) VALUES(?,'outcome',?,?,?,?) ON CONFLICT(operation_id,event_kind) DO UPDATE SET status=CASE WHEN deal_memory_outbox.status='indexed' THEN 'indexed' ELSE excluded.status END,updated_at=excluded.updated_at")
+    if (prior && (prior.payload_hash !== payloadHash || prior.blob_id && prior.blob_id !== blobId)) fail("DEAL_MEMORY_CONFLICT", "outcome memory already identifies a different write");
+    this.store.db.prepare("INSERT INTO deal_memory_outbox(operation_id,event_kind,payload_hash,blob_id,status,updated_at) VALUES(?,'outcome',?,?,?,?) ON CONFLICT(operation_id,event_kind) DO UPDATE SET blob_id=COALESCE(deal_memory_outbox.blob_id,excluded.blob_id),status=CASE WHEN deal_memory_outbox.status='indexed' THEN 'indexed' ELSE excluded.status END,updated_at=excluded.updated_at")
       .run(operationId, payloadHash, blobId, indexed ? "indexed" : "pending", Date.now());
+  }
+
+  outcomeStatus(operationId: string): { payloadHash: string; blobId: string | null; status: string } | undefined {
+    const row = this.store.db.prepare("SELECT payload_hash,blob_id,status FROM deal_memory_outbox WHERE operation_id=? AND event_kind='outcome'").get(operationId) as { payload_hash: string; blob_id: string | null; status: string } | undefined;
+    return row ? { payloadHash: row.payload_hash, blobId: row.blob_id, status: row.status } : undefined;
+  }
+
+  queueOutcome(operationId: string, payloadHash: string): void {
+    this.get(operationId);
+    if (!/^[0-9a-f]{64}$/.test(payloadHash)) fail("DEAL_MEMORY_INVALID", "outcome hash is invalid");
+    const prior = this.store.db.prepare("SELECT payload_hash FROM deal_memory_outbox WHERE operation_id=? AND event_kind='outcome'").get(operationId) as { payload_hash: string } | undefined;
+    if (prior && prior.payload_hash !== payloadHash) fail("DEAL_MEMORY_CONFLICT", "outcome memory identifies different evidence");
+    this.store.db.prepare("INSERT OR IGNORE INTO deal_memory_outbox(operation_id,event_kind,payload_hash,blob_id,status,updated_at) VALUES(?,'outcome',?,NULL,'pending',?)").run(operationId, payloadHash, Date.now());
+  }
+
+  setOutcomeUnresolved(operationId: string): void {
+    this.store.db.prepare("UPDATE deal_memory_outbox SET status='unresolved',updated_at=? WHERE operation_id=? AND event_kind='outcome' AND status='pending'").run(Date.now(), operationId);
+  }
+
+  recordTiming(operationId: string, stage: string, durationMs: number): void {
+    if (!/^[a-z][a-z0-9_]{0,63}$/.test(stage) || !Number.isSafeInteger(durationMs) || durationMs < 0) fail("DEAL_TIMING_INVALID", "deal timing is invalid");
+    this.store.db.prepare("INSERT OR IGNORE INTO deal_timings(operation_id,stage,duration_ms) VALUES(?,?,?)").run(operationId, stage, durationMs);
   }
 
   evidence(dealId: string): DealEvidenceView {

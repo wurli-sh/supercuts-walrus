@@ -14,7 +14,10 @@ export async function createConfiguredDealEngine(app: Phase3App): Promise<DealEn
   if (mandate.version !== "supercuts.mandate.v2") fail("DEAL_MANDATE_VERSION", "composite deals require an owner-issued v2 mandate");
   if (!mandate.allowedCommands.includes("deal.execute")) fail("MANDATE_COMMAND_FORBIDDEN", "owner mandate does not allow composite deal execution");
   const path = join(app.home, "deal-ports.mjs");
-  if (!existsSync(path)) return new DealEngine(new DealJournal(app.store), new LiveDealPorts(app, mandate), mandate);
+  if (!existsSync(path)) {
+    if (!app.store.getSecret("live:memory-config")) fail("LIVE_MEMORY_CONFIG_MISSING", "live composite deals require an owner-only Walrus Memory configuration");
+    return new DealEngine(new DealJournal(app.store), new LiveDealPorts(app, mandate), mandate);
+  }
   if ((statSync(path).mode & 0o077) !== 0) fail("DEAL_PORTS_PERMISSIONS", "deal ports adapter must be owner-only");
   let loaded: { createDealPorts?: (app: Phase3App, mandate: AgentMandate) => Promise<DealPorts> | DealPorts };
   try { loaded = await import(pathToFileURL(path).href) as typeof loaded; }

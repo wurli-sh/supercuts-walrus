@@ -21,7 +21,7 @@ test("composite deal resumes after an inventory delay without another payment", 
   const input: ExecuteDealInput = { operationId: "deal-restart", capabilityId: manifest.capabilityId, input: { task: "private" }, budget: { asset: manifest.asset, maximum: "30" } };
   const home = mkdtempSync(join(tmpdir(), "supercuts-engine-")), path = join(home, "state.sqlite"), key = randomBytes(32);
   const store = new RoleStore(path, key);
-  let paid = 0, remembered = 0, inventoryReads = 0, needsFunding = true;
+  let paid = 0, remembered = 0, inventoryReads = 0, needsFunding = true, queueMode = false;
   const artifact = Buffer.from("private artifact"), artifactSha256 = createHash("sha256").update(artifact).digest("hex");
   const transcriptBytes = Buffer.from("encrypted transcript"), agreementBytes = Buffer.from("encrypted agreement"), deliveryBytes = Buffer.from("encrypted delivery");
   const sha = (value: Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -39,7 +39,7 @@ test("composite deal resumes after an inventory delay without another payment", 
       return { transactionDigest: "tx-one", finalized: true, tatumVerified: true };
     },
     deliver: async () => ({ blobId: "delivery-one", ciphertextHash: sha(deliveryBytes), artifactSha256, contentType: "application/json", metadata: {}, artifactBase64: artifact.toString("base64") }),
-    rememberOutcome: async () => { remembered++; return { payloadHash: "d".repeat(64), blobId: "outcome-one", indexed: false }; },
+    rememberOutcome: async () => { remembered++; return queueMode ? { queued: true as const, payloadHash: "d".repeat(64) } : { payloadHash: "d".repeat(64), blobId: "outcome-one", indexed: false }; },
     inventory: async () => ++inventoryReads > 1,
   };
   try {
@@ -59,9 +59,26 @@ test("composite deal resumes after an inventory delay without another payment", 
     assert.equal(journal.evidence(complete.dealId).inventory, "indexed");
     assert.deepEqual(journal.evidence(complete.dealId).transcriptBlobIds, ["transcript-one"]);
     assert.deepEqual(journal.delivery(complete.dealId).artifact, artifact);
+    queueMode = true;
+    const queuedInput = { ...input, operationId: "queued-outcome-deal" };
+    const readsBeforeQueue = inventoryReads;
+    const queued = await engine.execute(queuedInput);
+    assert.equal(queued.state, "outcome_pending");
+    assert.equal(queued.nextAction, "check_memory");
+    assert.equal(queued.evidence.payment, "finalized");
+    assert.equal(queued.evidence.delivery, "verified");
+    assert.deepEqual(journal.delivery(queued.dealId).artifact, artifact);
+    assert.equal(inventoryReads, readsBeforeQueue);
+    assert.equal((await engine.execute(queuedInput)).state, "outcome_pending");
+    assert.equal(paid, 2);
+    assert.equal(remembered, 2);
+    journal.setOutcomeUnresolved(queuedInput.operationId);
+    assert.equal(journal.get(queuedInput.operationId).nextAction, "reconcile_memory");
+    assert.equal((await engine.resume(queuedInput.operationId)).state, "outcome_pending");
+    assert.equal(paid, 2);
     blobs.set("agreement-one", Buffer.from("tampered agreement"));
     await assert.rejects(() => engine.execute({ ...input, operationId: "tampered-deal" }), { code: "WALRUS_BLOB_MISMATCH" });
-    assert.equal(paid, 1);
+    assert.equal(paid, 2);
   } finally { store.close(); }
 });
 

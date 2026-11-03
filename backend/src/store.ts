@@ -68,6 +68,7 @@ export class RoleStore {
       CREATE TABLE IF NOT EXISTS deal_steps (operation_id TEXT NOT NULL, step TEXT NOT NULL, input_hash TEXT NOT NULL, state TEXT NOT NULL, result_hash TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY(operation_id,step), FOREIGN KEY(operation_id) REFERENCES deal_operations(operation_id));
       CREATE TABLE IF NOT EXISTS deal_blobs (operation_id TEXT NOT NULL, kind TEXT NOT NULL, ciphertext_hash TEXT NOT NULL, blob_id TEXT, status TEXT NOT NULL, PRIMARY KEY(operation_id,kind), FOREIGN KEY(operation_id) REFERENCES deal_operations(operation_id));
       CREATE TABLE IF NOT EXISTS deal_memory_outbox (operation_id TEXT NOT NULL, event_kind TEXT NOT NULL, payload_hash TEXT NOT NULL, blob_id TEXT, status TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(operation_id,event_kind), FOREIGN KEY(operation_id) REFERENCES deal_operations(operation_id));
+      CREATE TABLE IF NOT EXISTS deal_timings (operation_id TEXT NOT NULL, stage TEXT NOT NULL, duration_ms INTEGER NOT NULL, PRIMARY KEY(operation_id,stage), FOREIGN KEY(operation_id) REFERENCES deal_operations(operation_id));
       CREATE TABLE IF NOT EXISTS settlement_plans (plan_hash TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE, plan_json TEXT NOT NULL, status TEXT NOT NULL, expires_at INTEGER NOT NULL, consumed_at INTEGER, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS settlement_execution_bindings (operation_id TEXT PRIMARY KEY, plan_hash TEXT NOT NULL UNIQUE, binding_hash TEXT NOT NULL, binding_json TEXT NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY(plan_hash) REFERENCES settlement_plans(plan_hash));
       CREATE TABLE IF NOT EXISTS settlement_agreement_bindings (session_id TEXT PRIMARY KEY, plan_hash TEXT NOT NULL UNIQUE, binding_hash TEXT NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY(plan_hash) REFERENCES settlement_plans(plan_hash));
@@ -75,6 +76,7 @@ export class RoleStore {
     `);
     const memoryColumns = this.db.prepare("PRAGMA table_info(memory_jobs)").all() as Array<{ name: string }>;
     if (!memoryColumns.some((column) => column.name === "fact_hash")) this.db.exec("ALTER TABLE memory_jobs ADD COLUMN fact_hash TEXT");
+    if (!memoryColumns.some((column) => column.name === "claimed_at")) this.db.exec("ALTER TABLE memory_jobs ADD COLUMN claimed_at INTEGER");
     for (const candidate of [path, `${path}-wal`, `${path}-shm`]) if (existsSync(candidate)) chmodSync(candidate, 0o600);
   }
 

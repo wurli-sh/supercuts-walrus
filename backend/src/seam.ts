@@ -60,6 +60,10 @@ process.stdin.on("end", async () => {
           const engine = await createConfiguredDealEngine(app);
           return write(envelope(request.requestId, { ok: true, result: await engine.resume(String(request.params?.operationId ?? "")) }));
         }
+        if (request.method === "deal.reconcile") {
+          if (!loadMandate(home).allowedCommands.includes("deal.resume")) throw Object.assign(new Error("deal reconciliation requires owner deal authority"), { code: "MANDATE_COMMAND_FORBIDDEN" });
+          return write(envelope(request.requestId, { ok: true, result: await app.reconcileDealOutcome(String(request.params?.operationId ?? "")) }));
+        }
         if (request.method === "deal.get") return write(envelope(request.requestId, { ok: true, result: journal.get(String(request.params?.operationId ?? "")) }));
         if (request.method === "deal.evidence") return write(envelope(request.requestId, { ok: true, result: journal.evidence(String(request.params?.dealId ?? "")) }));
         if (request.method === "deal.delivery") {
