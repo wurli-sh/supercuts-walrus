@@ -24,7 +24,7 @@ test("hosted seller exposes signed v2 catalog while preserving v1 routes", async
   const sellerAddress = reservation.address(); assert(sellerAddress && typeof sellerAddress === "object");
   const origin = `http://127.0.0.1:${sellerAddress.port}`;
   await new Promise<void>((done) => reservation.close(() => done()));
-  const deployment = resolve(fileURLToPath(import.meta.url), "../../../config/pool-v1.testnet.json");
+  const deployment = resolve(fileURLToPath(import.meta.url), "../../../config/phase1.testnet.json");
   initialize(home, { role: "seller", "deployment-config": deployment, "sui-key-file": keyPath, "tatum-key-file": tatum, "write-grpc": "https://fullnode.testnet.sui.io:443", "tatum-grpc": "https://example.invalid:443", "walrus-publisher": walrusUrl, "walrus-aggregator": walrusUrl });
   const app = new Phase3App(home), transportPublicKey = app.store.getSecret("identity:x25519-public")!.toString("base64url");
   const manifest = createCapabilityManifest({ capabilityId: "hosted-report", sellerId: signer.toSuiAddress(), capability: "report", description: "Hosted report", inputSchema: { type: "object", required: ["task"], properties: { task: { type: "string" } }, additionalProperties: false }, outputSchema: { type: "object", required: ["kind"], properties: { kind: { const: "report" } }, additionalProperties: false }, supportedRails: ["shielded"], priceBand: { minimum: "10", maximum: "10" }, asset: "0x2::sui::SUI", endpoint: `${origin}/v2/resource/hosted-report`, expiresAt: Date.now() + 600_000 });
@@ -43,4 +43,8 @@ test("hosted seller exposes signed v2 catalog while preserving v1 routes", async
     assert.equal(v2.capabilities[0]?.manifest.capabilityId, "hosted-report");
     assert.deepEqual(v1.capabilities, []);
   } finally { await new Promise<void>((done) => server.close(() => done())); service.close(); await new Promise<void>((done) => manifestServer.close(() => done())); }
+  const oldProfile = { ...JSON.parse(Buffer.from(snapshot.files["profile.json"], "base64url").toString()) as Record<string, unknown>, verifierVersion: 1 };
+  const wrongPool = { ...snapshot, files: { ...snapshot.files, "profile.json": Buffer.from(JSON.stringify(oldProfile)).toString("base64url") } };
+  const v1Db = { ...db, getSnapshot: async () => ({ payload: encryptSellerSnapshot(wrongPool, stateKey), revision: 0 }) } as unknown as SellerDatabase;
+  await assert.rejects(() => SellerService.create({ db: v1Db, snapshotKey: stateKey, origin, facilitatorUrl: origin, facilitatorKey: "local-test-key", allowedBuyers: new Set(), claudeKey: "local-test-key" }), /separate v2 seller role home/);
 });

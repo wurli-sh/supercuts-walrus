@@ -80,7 +80,7 @@ protocol path.
 ## Sellers
 
 A self-hosted seller initializes a **separate** seller role home with
-`supercuts init`, publishes a signed capability with
+`supercuts init` against the pinned v2 Testnet deployment, publishes a signed capability with
 `supercuts-seller-register`, and starts `supercuts-seller-live` with an
 owner-only config naming its registration file and handler module. Its public
 `/v2/catalog`, `/v2/prepare`, `/v2/fulfill`, and protected x402 resource
@@ -88,13 +88,17 @@ endpoints use the same wire protocol as the hosted seller. The default buyer
 access policy is open to valid signed buyers; `allowedBuyers` in the seller
 config restricts private offerings.
 
-The existing hosted seller keeps its `/v1/*` routes. To add fixed-artifact v2
-capabilities, register them against that seller's existing signer and use
+The existing hosted seller keeps its `/v1/*` routes and v1 role homes. Create
+**separate v2 seller role homes and addresses** for shielded v2 capabilities;
+do not migrate old v1 notes or copy a v1 state key into a v2 home. Register
+each capability with that v2 seller signer, then run
 `supercuts-seller-v2-provision <owner-only-config.json>`. The provisioning JSON
-contains `sellers: [{ sellerId, capabilities: [{ registrationFile,
-artifactFile, outputMetadata, contentType? }] }]`. Each registration must
+contains `sellers: [{ sellerId, home, capabilities: [{ registrationFile,
+artifactFile, outputMetadata, contentType? }] }]`; `home` is required when
+adding a new hosted seller and can be omitted when refreshing its v2 snapshot.
+Each registration must
 point to that service's `/v2/resource/<capability-id>` path and have a current
-expiry. Provisioning reads and updates the encrypted Supabase seller snapshot,
+expiry. Provisioning creates or updates the encrypted Supabase v2 seller snapshot,
 then adds catalog rows. **Stop the hosted seller before provisioning and
 restart it afterward** so no running instance writes an older snapshot over
 the new revision. The packaged hosted handler serves the configured artifact

@@ -1,14 +1,16 @@
 #!/usr/bin/env node
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { readFileSync, statSync } from "node:fs";
+import { resolve } from "node:path";
+import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
+import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { verifySignedCapability, validateCapabilityPayload, type SignedCapabilityRegistration } from "./capability.js";
 import { fail } from "./errors.js";
 import { SellerDatabase } from "./seller-database.js";
-import { captureSellerHome, decryptSellerSnapshot, encryptSellerSnapshot, restoreSellerHome } from "./seller-state.js";
+import { captureSellerHome, decryptSellerSnapshot, encryptSellerSnapshot, type SellerSnapshot } from "./seller-state.js";
+import { Phase3App } from "./phase3.js";
 
 interface Item { registrationFile: string; artifactFile: string; outputMetadata: Record<string, unknown>; contentType?: string; }
-interface Seller { sellerId: string; capabilities: Item[]; }
+interface Seller { sellerId: string; home?: string; capabilities: Item[]; }
 async function main(): Promise<void> {
   const configPath = resolve(process.argv[2] ?? fail("ARGUMENT_REQUIRED", "usage: supercuts-seller-v2-provision <owner-only-config.json>"));
   if ((statSync(configPath).mode & 0o077) !== 0) fail("SELLER_CONFIG_PERMISSIONS", "provision config must be owner-only");
@@ -18,8 +20,24 @@ async function main(): Promise<void> {
   const db = new SellerDatabase(required("SUPABASE_URL"), required("SUPABASE_SERVICE_ROLE_KEY"));
   const stateKey = required("SELLER_STATE_KEY"), origin = new URL(required("SELLER_ORIGIN")).origin;
   for (const seller of config.sellers) {
-    const stored = await db.getSnapshot(seller.sellerId) ?? fail("SELLER_STATE_MISSING", "seller must have an encrypted hosted snapshot before v2 provisioning");
-    const snapshot = decryptSellerSnapshot(stored.payload, stateKey);
+    const stored = await db.getSnapshot(seller.sellerId);
+    let snapshot: SellerSnapshot;
+    if (stored) snapshot = decryptSellerSnapshot(stored.payload, stateKey);
+    else {
+      if (!seller.home) fail("SELLER_STATE_MISSING", "new hosted v2 seller requires its separate local role home");
+      const home = resolve(seller.home!);
+      if ((statSync(home).mode & 0o077) !== 0) fail("SELLER_CONFIG_PERMISSIONS", "seller role home must be owner-only");
+      const app = new Phase3App(home);
+      try {
+        if (app.profile.role !== "seller" || app.profile.mock || app.profile.verifierVersion !== 2) fail("SELLER_POOL_VERSION_MISMATCH", "new hosted v2 seller requires a live v2 seller role home");
+        const encoded = app.store.getSecret("live:sui-private-key")?.toString() ?? fail("LIVE_CREDENTIAL_MISSING", "seller signer is missing");
+        const decoded = decodeSuiPrivateKey(encoded);
+        if (decoded.scheme !== "ED25519" || Ed25519Keypair.fromSecretKey(decoded.secretKey).toSuiAddress() !== seller.sellerId) fail("SELLER_IDENTITY_MISMATCH", "v2 seller home signer differs from configured seller ID");
+        snapshot = await captureSellerHome(home, seller.sellerId);
+      } finally { app.close(); }
+    }
+    const profile = JSON.parse(Buffer.from(snapshot.files["profile.json"], "base64url").toString()) as { role?: string; mock?: boolean; verifierVersion?: number };
+    if (profile.role !== "seller" || profile.mock || profile.verifierVersion !== 2) fail("SELLER_POOL_VERSION_MISMATCH", "v2 capability cannot use a v1 seller snapshot; create a separate v2 role home");
     const registrations: Array<{ registration: SignedCapabilityRegistration; item: Item }> = [];
     for (const item of seller.capabilities) {
       const path = resolve(item.registrationFile);
@@ -33,14 +51,9 @@ async function main(): Promise<void> {
       snapshot.artifacts[registration.manifest.capabilityId] = artifact.toString("base64url");
       registrations.push({ registration, item });
     }
-    const temporary = mkdtempSync(join(tmpdir(), "supercuts-seller-v2-"));
-    try {
-      restoreSellerHome(join(temporary, "seller"), snapshot);
-      const updated = await captureSellerHome(join(temporary, "seller"), seller.sellerId, snapshot.artifacts);
-      await db.putSnapshot(encryptSellerSnapshot(updated, stateKey), stored.revision);
-      for (const { registration, item } of registrations) await db.putCatalog({ seller_id: seller.sellerId, capability_id: registration.manifest.capabilityId, manifest: registration.manifest, blob_id: registration.manifestBlobId, signature: registration.sellerSignature, transport_public_key: registration.transportPublicKey, preview: { genericV2: true, outputMetadata: item.outputMetadata, contentType: item.contentType ?? "application/octet-stream" } });
-      process.stdout.write(`${JSON.stringify({ ok: true, sellerId: seller.sellerId, capabilities: registrations.map(({ registration }) => registration.manifest.capabilityId), restartRequired: true })}\n`);
-    } finally { rmSync(temporary, { recursive: true, force: true }); }
+    await db.putSnapshot(encryptSellerSnapshot(snapshot, stateKey), stored?.revision);
+    for (const { registration, item } of registrations) await db.putCatalog({ seller_id: seller.sellerId, capability_id: registration.manifest.capabilityId, manifest: registration.manifest, blob_id: registration.manifestBlobId, signature: registration.sellerSignature, transport_public_key: registration.transportPublicKey, preview: { genericV2: true, outputMetadata: item.outputMetadata, contentType: item.contentType ?? "application/octet-stream" } });
+    process.stdout.write(`${JSON.stringify({ ok: true, sellerId: seller.sellerId, capabilities: registrations.map(({ registration }) => registration.manifest.capabilityId), restartRequired: true })}\n`);
   }
 }
 main().catch((error) => { process.stderr.write(`${error instanceof Error ? error.message : "v2 provisioning failed"}\n`); process.exitCode = 1; });

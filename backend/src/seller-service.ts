@@ -70,6 +70,7 @@ export class SellerService {
       }
       const v2Rows = rows.filter((item) => item.seller_id === sellerId && isV2(item));
       if (v2Rows.length) {
+        if (app.profile.verifierVersion !== 2) fail("SELLER_POOL_VERSION_MISMATCH", "hosted v2 capabilities require a separate v2 seller role home");
         const transport = new LiveSellerTransport(app, { origin: config.origin, facilitatorUrl: config.facilitatorUrl, facilitatorKey: config.facilitatorKey, persist: async () => { try { await service.persist(slot); } catch (error) { service.#healthy = false; throw error; } }, claimPayment: (digest, requestId) => config.db.claimPayment(digest, requestId, sellerId) });
         for (const row of v2Rows) {
           const metadata = row.preview.outputMetadata;
