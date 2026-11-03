@@ -1,0 +1,37 @@
+import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import test from "node:test";
+import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+import { inspectHostedExit, queueHostedExit } from "../src/hosted-exit.js";
+import { initialize, Phase3App } from "../src/phase3.js";
+import { captureSellerHome, encryptSellerSnapshot } from "../src/seller-state.js";
+import type { SellerDatabase } from "../src/seller-database.js";
+import { V2ExitQueue } from "../src/v2-exits.js";
+
+test("hosted exit inspection binds a standard queue to the recovered seller note and run", async () => {
+  const root = mkdtempSync(join(tmpdir(), "supercuts-hosted-exit-test-")), home = join(root, "seller"), keyPath = join(root, "seller.key"), tatum = join(root, "tatum.key");
+  const signer = Ed25519Keypair.generate(), sellerId = signer.toSuiAddress(), sessionId = "analysis-one", runId = "run-one", commitment = randomBytes(32).toString("hex");
+  writeFileSync(keyPath, signer.getSecretKey(), { mode: 0o600 }); writeFileSync(tatum, "test-key", { mode: 0o600 });
+  initialize(home, { role: "seller", "deployment-config": resolve(fileURLToPath(import.meta.url), "../../../config/phase1.testnet.json"), "sui-key-file": keyPath, "tatum-key-file": tatum, "write-grpc": "https://fullnode.testnet.sui.io:443", "tatum-grpc": "https://example.invalid:443", "walrus-publisher": "https://example.invalid", "walrus-aggregator": "https://example.invalid" });
+  const app = new Phase3App(home);
+  app.store.db.exec("CREATE TABLE remote_deliveries(session_id TEXT PRIMARY KEY, run_id TEXT NOT NULL)");
+  app.store.db.prepare("INSERT INTO remote_deliveries(session_id,run_id) VALUES(?,?)").run(sessionId, runId);
+  app.store.putNote(commitment, "payment", sessionId, 0n);
+  const windowStart = Date.now() + 120_000, windowEnd = windowStart + 3_600_000, queued = new V2ExitQueue(app.store).queue({ operationId: `remote-exit-${sessionId}`, commitment, amount: 1_000_000n, exactExit: false, windowStart, windowEnd }, true);
+  app.store.putSecretOnce(`v2-exit-request:${queued.operationId}`, Buffer.from("prepared-proof"));
+  const stateKey = randomBytes(32).toString("base64url"), snapshot = encryptSellerSnapshot(await captureSellerHome(home, sellerId), stateKey);
+  app.close();
+  const db = { getSnapshot: async () => ({ payload: snapshot, revision: 1 }), putSnapshot: async () => { throw Error("existing queue must not be rewritten"); } } as unknown as SellerDatabase;
+  const input = { sellerId, runId, sessionId };
+  const inspected = await inspectHostedExit(db, stateKey, input);
+  assert.equal(inspected.operationId, queued.operationId);
+  assert.equal(inspected.amount, "1000000");
+  assert.equal(inspected.executeAt, queued.executeAt);
+  assert.deepEqual(await queueHostedExit(db, stateKey, { ...input, windowStart, windowEnd }), inspected);
+  await assert.rejects(() => inspectHostedExit(db, stateKey, { ...input, runId: "other-run" }), { code: "DELIVERY_NOT_FOUND" });
+  await assert.rejects(() => inspectHostedExit(db, stateKey, { ...input, sessionId: "other-session" }), { code: "DELIVERY_NOT_FOUND" });
+});

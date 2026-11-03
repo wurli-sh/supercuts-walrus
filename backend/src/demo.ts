@@ -16,6 +16,8 @@ import { loadMandate } from "./mandate.js";
 import { LiveDealPorts } from "./live-deal-ports.js";
 import { DealJournal } from "./deal.js";
 import { V2ExitQueue } from "./v2-exits.js";
+import { inspectHostedExit } from "./hosted-exit.js";
+import { SellerDatabase } from "./seller-database.js";
 
 const [command = "", ...words] = process.argv.slice(2), args = parseArgs(words);
 const value = (name: string, fallback?: string): string => typeof args[name] === "string" ? args[name] : fallback ?? fail("ARGUMENT_REQUIRED", `--${name} is required`);
@@ -35,8 +37,10 @@ async function setup(): Promise<Record<string, unknown>> {
   const common: Record<string, string | boolean> = mock ? { mock: true } : { "deployment-config": resolve(value("deployment-config")), "tatum-key-file": resolve(value("tatum-key-file")), "write-grpc": value("write-grpc"), "tatum-grpc": value("tatum-grpc"), "walrus-publisher": value("walrus-publisher"), "walrus-aggregator": value("walrus-aggregator"), ...(typeof args.rapidsnark === "string" ? { rapidsnark: resolve(args.rapidsnark) } : {}) };
   const roleInputs: Array<[keyof typeof roles, "buyer" | "seller" | "auditor", string]> = [["buyer", "buyer", keys.buyer], ["publicSeller", "seller", keys.publicSeller], ["secondPublicSeller", "seller", keys.secondPublicSeller], ["confidentialSeller", "seller", keys.confidentialSeller], ["auditor", "auditor", keys.auditor]];
   for (const [name, role, key] of roleInputs) {
-    if (existsSync(join(roles[name], "profile.json"))) continue;
-    initialize(roles[name], { role, ...common, ...(!mock ? { "sui-key-file": key } : {}), ...(role === "buyer" ? { "allow-counterparty": `${addresses.publicSeller},${addresses.secondPublicSeller},${addresses.confidentialSeller}`, ...(typeof args["memory-config-file"] === "string" ? { "memory-config-file": resolve(args["memory-config-file"]) } : {}), ...(typeof args["max-memory-distance"] === "string" ? { "max-memory-distance": args["max-memory-distance"] } : {}) } : {}) });
+    const profilePath = join(roles[name], "profile.json");
+    if (!existsSync(profilePath)) initialize(roles[name], { role, ...common, ...(!mock ? { "sui-key-file": key } : {}), ...(role === "buyer" ? { "allow-counterparty": `${addresses.publicSeller},${addresses.secondPublicSeller},${addresses.confidentialSeller}`, ...(typeof args["memory-config-file"] === "string" ? { "memory-config-file": resolve(args["memory-config-file"]) } : {}), ...(typeof args["max-memory-distance"] === "string" ? { "max-memory-distance": args["max-memory-distance"] } : {}) } : {}) });
+    const profile = JSON.parse(readFileSync(profilePath, "utf8")) as { role?: string; mock?: boolean; verifierVersion?: number };
+    if (profile.role !== role || profile.mock !== mock || !mock && profile.verifierVersion !== 2) fail("DEMO_ROLE_PROFILE_MISMATCH", "demo setup needs fresh isolated live v2 role homes; choose a new --state-dir instead of reusing v1 or mock profiles");
   }
   const workflowPath = typeof args.workflow === "string" ? resolve(args.workflow) : !mock && typeof args["seller-url"] !== "string" ? resolve(value("workflow")) : undefined;
   if (workflowPath) {
@@ -67,13 +71,14 @@ async function doctor(): Promise<Record<string, unknown>> {
     try {
       if (app.profile.role !== "buyer" || app.profile.mock || app.profile.verifierVersion !== 2) fail("LIVE_PROFILE_REQUIRED", "generic Codex doctor requires a live v2 buyer");
       const mandate = loadMandate(home), buyer = (await app.execute("doctor", {})).data;
+      if (buyer.readyForDemo === false) fail("DEMO_PREREQUISITES_MISSING", (buyer.fixes as string[]).join(" "));
       const catalog = await new LiveDealPorts(app, mandate).catalog();
       if (!catalog.length) fail("SELLER_CATALOG_EMPTY", "configured seller origins have no allowed signed v2 capability");
       return { healthy: true, buyer, sellerCapabilities: catalog.map(({ registration }) => registration.manifest.capabilityId) };
     } finally { app.close(); }
   }
   const roles = homes(stateDir()), reports: Record<string, unknown> = {};
-  for (const [name, home] of Object.entries(roles)) { const app = new Phase3App(home); try { reports[name] = (await app.execute("doctor", {})).data; } finally { app.close(); } }
+  for (const [name, home] of Object.entries(roles)) { const app = new Phase3App(home); try { const report = (await app.execute("doctor", {})).data; if (report.readyForDemo === false) fail("DEMO_PREREQUISITES_MISSING", `${name}: ${(report.fixes as string[]).join(" ")}`); reports[name] = report; } finally { app.close(); } }
   let remote: Record<string, unknown> | undefined;
   if (typeof args["seller-url"] === "string") {
     const base = new URL(args["seller-url"]), health = await fetch(new URL("/health", base), { signal: AbortSignal.timeout(90_000) }), catalog = await fetch(new URL("/v1/catalog", base), { signal: AbortSignal.timeout(30_000) });
@@ -101,7 +106,7 @@ async function seedPolicy(): Promise<Record<string, unknown>> {
   } finally { app.close(); }
 }
 
-function check(): Record<string, unknown> {
+async function check(): Promise<Record<string, unknown>> {
   if (typeof args["buyer-home"] === "string") {
     const home = resolve(args["buyer-home"]), sellerHome = resolve(value("seller-home")), path = resolve(value("events"));
     if (!existsSync(home) || (statSync(home).mode & 0o077) !== 0 || !existsSync(sellerHome) || (statSync(sellerHome).mode & 0o077) !== 0 || !existsSync(path) || (statSync(path).mode & 0o077) !== 0) fail("DEMO_PERMISSIONS", "generic role homes and event stream must be owner-only");
@@ -110,13 +115,16 @@ function check(): Record<string, unknown> {
     const raw = readFileSync(path, "utf8");
     if (/(?:suiprivkey|BEGIN [A-Z ]*PRIVATE KEY|approval.?token|note.?opening|full.?prompt)/i.test(raw)) fail("SECRET_SCAN_FAILED", "event bundle contains forbidden secret material");
     const events = readDemoEvents(path), deals = events.filter((event) => event.stage === "deal-lifecycle" && event.status === "complete" && event.publicDetails.state === "complete");
+    if (!events.length || events.some((event) => event.mode !== "live" || event.runId !== events[0]!.runId)) fail("DEMO_EVENTS_INVALID", "recording needs one nonempty live event stream for a single run");
     const rails = new Map(deals.map((event) => [event.publicDetails.rail, event]));
     const memories = events.filter((event) => event.stage === "memory" && event.status === "complete" && typeof event.publicDetails.blobId === "string");
     const recall = events.find((event) => event.stage === "memory-recall" && Array.isArray(event.publicDetails.citations) && event.publicDetails.citations.some((citation) => citation.kind === "privacy_rule" && citation.provenance === "owner_policy"));
-    const privacyPlan = events.find((event) => event.stage === "settlement-plan" && event.publicDetails.rail === "shielded" && Array.isArray(event.publicDetails.reasonCodes) && event.publicDetails.reasonCodes.includes("MEMORY_PRIVACY_APPLIED") && (!recall || event.sequence > recall.sequence));
+    const policyCitation = (recall?.publicDetails.citations as Array<{ kind?: string; provenance?: string; blobId?: string }> | undefined)?.find((citation) => citation.kind === "privacy_rule" && citation.provenance === "owner_policy" && typeof citation.blobId === "string");
+    const privacyPlan = events.find((event) => event.stage === "settlement-plan" && event.status === "complete" && event.publicDetails.rail === "shielded" && Array.isArray(event.publicDetails.reasonCodes) && event.publicDetails.reasonCodes.includes("MEMORY_PRIVACY_APPLIED") && recall && event.sequence > recall.sequence && policyCitation && Array.isArray(event.publicDetails.blobIds) && event.publicDetails.blobIds.includes(policyCitation.blobId));
     const prefund = events.find((event) => event.stage === "prefunding" && event.status === "complete" && typeof event.publicDetails.transactionDigest === "string");
     const exit = events.find((event) => event.actor === "confidential-seller" && event.stage === "delayed-exit" && event.status === "complete" && event.publicDetails.state === "queued");
-    if (!prefund || !exit || !recall || !privacyPlan || memories.length < 10 || new Set(memories.map((event) => event.publicDetails.blobId)).size < 10 || memories.some((event) => String(event.publicDetails.blobId).startsWith("mockwalrus_")) || !rails.has("x402") || !rails.has("shielded") || [...rails.values()].some((event) => event.publicDetails.payment !== "finalized" || event.publicDetails.agreement !== "verified" || event.publicDetails.delivery !== "verified" || event.publicDetails.outcomeMemory !== "indexed" || typeof event.publicDetails.paymentDigest !== "string") || prefund.sequence >= Math.min(...deals.map((event) => event.sequence)) || exit.sequence <= rails.get("shielded")!.sequence) fail("DEMO_ACCEPTANCE_INCOMPLETE", "generic Codex stream needs prefunding, ten memories, recalled privacy, both live paid deliveries and indexed outcomes, then a queued seller exit");
+    const publicDeal = rails.get("x402"), privateDeal = rails.get("shielded");
+    if (!prefund || !exit || !recall || !privacyPlan || memories.length < 10 || new Set(memories.map((event) => event.publicDetails.blobId)).size < 10 || memories.some((event) => String(event.publicDetails.blobId).startsWith("mockwalrus_")) || !publicDeal || !privateDeal || [...rails.values()].some((event) => event.publicDetails.payment !== "finalized" || event.publicDetails.agreement !== "verified" || event.publicDetails.delivery !== "verified" || event.publicDetails.outcomeMemory !== "indexed" || typeof event.publicDetails.paymentDigest !== "string") || prefund.sequence >= publicDeal.sequence || publicDeal.sequence >= Math.min(...memories.map((event) => event.sequence)) || Math.max(...memories.map((event) => event.sequence)) >= recall.sequence || recall.sequence >= privacyPlan.sequence || privacyPlan.sequence >= privateDeal.sequence || privateDeal.sequence >= exit.sequence) fail("DEMO_ACCEPTANCE_INCOMPLETE", "generic Codex stream needs prefunding, public delivery, ten memories, recalled privacy, shielded delivery, then a queued seller exit in that order");
     const buyer = new Phase3App(home), seller = new Phase3App(sellerHome);
     try {
       if (seller.profile.role !== "seller" || seller.profile.mock || seller.profile.verifierVersion !== 2) fail("LIVE_PROFILE_REQUIRED", "queued exit must belong to a separate live v2 seller");
@@ -131,20 +139,21 @@ function check(): Record<string, unknown> {
         const view = journal.get(row!.operation_id), evidence = journal.evidence(dealId);
         if (view.state !== "complete" || view.rail !== event.publicDetails.rail || view.paymentDigest !== event.publicDetails.paymentDigest || evidence.inventory !== "indexed" || !evidence.paymentFinalized || evidence.ciphertextReadback !== "verified") fail("DEMO_EVIDENCE_MISMATCH", "logged deal differs from verified buyer journal");
       }
-      const funded = buyer.store.db.prepare("SELECT 1 FROM live_signed_transactions WHERE digest=? AND status='finalized'").get(String(prefund!.publicDetails.transactionDigest));
+      const funded = buyer.store.db.prepare("SELECT 1 FROM live_signed_transactions AS tx JOIN live_operation_context AS context ON context.operation_id=tx.operation_id WHERE tx.digest=? AND tx.status='finalized' AND context.kind='deposit' AND context.subject=?").get(String(prefund!.publicDetails.transactionDigest), String(prefund!.publicDetails.amount ?? ""));
       const queued = new V2ExitQueue(seller.store).get(String(exit!.publicDetails.operationId ?? ""));
       const recovered = queued ? seller.store.db.prepare("SELECT 1 FROM notes WHERE commitment=? AND role='payment'").get(queued.commitment) : undefined;
-      if (!funded || !queued || queued.status !== "queued" || !recovered) fail("DEMO_EVIDENCE_MISMATCH", "prefunding or recovered seller exit is absent from its role journal");
+      if (!funded || !queued || !recovered) fail("DEMO_EVIDENCE_MISMATCH", "prefunding or recovered seller exit is absent from its role journal");
       return { healthy: true, checked: [home, sellerHome, path], secretScan: "pass", deals: deals.length };
     } finally { buyer.close(); seller.close(); }
   }
   const root = stateDir(), roles = homes(root), checked: string[] = [];
   for (const path of [root, ...Object.values(roles)]) { if (!existsSync(path) || (statSync(path).mode & 0o077) !== 0) fail("DEMO_PERMISSIONS", `${path} is missing or not owner-only`); checked.push(path); }
-  const runPath = join(root, "run.json"), run = existsSync(runPath) ? JSON.parse(readFileSync(runPath, "utf8")) as { eventPath?: string } : {};
+  const runPath = join(root, "run.json"), run = existsSync(runPath) ? JSON.parse(readFileSync(runPath, "utf8")) as { eventPath?: string; runId?: string; addresses?: { confidentialSeller?: string } } : {};
   const eventPath = typeof args.events === "string" ? resolve(args.events) : run.eventPath ?? join(root, "events.jsonl");
-  if (!existsSync(eventPath) && (run.eventPath || typeof args.events === "string")) fail("DEMO_EVENTS_MISSING", "demo event stream is missing");
+  if (!existsSync(eventPath)) fail("DEMO_EVENTS_MISSING", "demo event stream is missing");
   if (existsSync(eventPath)) {
     const text = readFileSync(eventPath, "utf8"); if (/(?:suiprivkey|BEGIN [A-Z ]*PRIVATE KEY|approval.?token|note.?opening|full.?prompt)/i.test(text)) fail("SECRET_SCAN_FAILED", "event bundle contains forbidden secret material"); const events = readDemoEvents(eventPath); checked.push(eventPath);
+    if (!events.length || events.some((event) => event.mode !== "live" || event.runId !== events[0]!.runId)) fail("DEMO_EVENTS_INVALID", "recording needs one nonempty live event stream for a single run");
     const remoteFlow = events.some((event) => event.stage === "run" && event.publicDetails.flow === "codex-remote");
     if (args["require-claude"] === true && !remoteFlow && !["buyer", "public-seller", "confidential-seller"].every((actor) => events.some((event) => event.actor === actor && event.stage === "agent-decision" && event.status === "complete" && typeof event.publicDetails.model === "string" && Number(event.publicDetails.outputTokens) > 0))) fail("DEMO_CLAUDE_EVIDENCE_MISSING", "event stream is missing live Claude decisions from a buyer or seller agent");
     const decisionKeys: Record<string, Set<string>> = { "settlement-plan": new Set(["phase", "planHash", "capabilityId", "rail", "openingAmount", "maximumAmount", "riskLevel", "reasonCodes", "blobIds"]), "memory-recall": new Set(["restarted", "citations", "policyBlobId"]) };
@@ -163,6 +172,39 @@ function check(): Record<string, unknown> {
       const privatePayment = events.find((event) => event.stage === "private-settlement" && event.status === "complete");
       const delayed = events.find((event) => event.stage === "delayed-exit" && event.status === "complete" && event.publicDetails.state === "queued");
       if (!prefund || !negotiation || !privatePayment || !delayed || prefund.sequence >= negotiation.sequence || privatePayment.sequence >= delayed.sequence) fail("DEMO_V2_SEQUENCE_INVALID", "v2 demo needs finalized prefunding before negotiation and a queued seller exit after settlement");
+    }
+    const required = (stage: string) => events.find((event) => event.stage === stage && event.status === "complete")?.sequence;
+    const lastMemory = Math.max(...events.filter((event) => event.stage === "memory" && event.status === "complete").map((event) => event.sequence));
+    const recallAfterMemories = events.find((event) => event.stage === "memory-recall" && event.status === "complete" && event.sequence > lastMemory)?.sequence;
+    const sequence = [required("prefunding"), required("negotiation"), required("public-settlement"), required("artifact-delivery"), required("memory"), recallAfterMemories, events.find((event) => event.stage === "settlement-plan" && event.status === "complete" && event.publicDetails.rail === "shielded" && event.sequence > (recallAfterMemories ?? 0))?.sequence, required("private-settlement"), events.find((event) => event.actor === "confidential-seller" && event.stage === "delayed-exit" && event.status === "complete" && event.publicDetails.state === "queued")?.sequence];
+    if (sequence.some((step) => step === undefined) || sequence.some((step, index) => index > 0 && step! <= sequence[index - 1]!)) fail("DEMO_SEQUENCE_INVALID", "live recording must show prefunding, public purchase, memories, privacy recall, shielded payment, and seller exit in order");
+    const completedMemories = events.filter((event) => event.stage === "memory" && event.status === "complete" && typeof event.publicDetails.blobId === "string" && !event.publicDetails.blobId.startsWith("mockwalrus_"));
+    if (new Set(completedMemories.map((event) => event.publicDetails.blobId)).size < 10 || completedMemories.some((event) => event.sequence <= sequence[3]! || event.sequence >= sequence[5]!)) fail("DEMO_MEMORY_SEQUENCE_INVALID", "ten distinct completed live memories must appear after public delivery and before privacy recall");
+    const cited = events.find((event) => event.stage === "memory-recall" && event.sequence === sequence[5])?.publicDetails.citations;
+    const policyBlobId = Array.isArray(cited) ? (cited as Array<{ blobId?: string; kind?: string; provenance?: string }>).find((item) => item.kind === "privacy_rule" && item.provenance === "owner_policy")?.blobId : undefined;
+    const plan = events.find((event) => event.stage === "settlement-plan" && event.sequence === sequence[6]);
+    if (!policyBlobId || !Array.isArray(plan?.publicDetails.blobIds) || !plan.publicDetails.blobIds.includes(policyBlobId) || !Array.isArray(plan.publicDetails.reasonCodes) || !plan.publicDetails.reasonCodes.includes("MEMORY_PRIVACY_APPLIED")) fail("DEMO_PRIVACY_EVIDENCE_MISSING", "shielded plan must cite the recalled owner privacy rule");
+    if (remoteFlow) {
+      const exitEvent = events.find((event) => event.actor === "confidential-seller" && event.stage === "delayed-exit" && event.sequence === sequence[8])!;
+      const requiredEnv = (name: string) => process.env[name] ?? fail("SELLER_CONFIG_MISSING", `${name} is required to verify the hosted seller exit`);
+      const runId = run.runId || fail("DEMO_RUN_INVALID", "run.json is missing the run ID"), sellerId = run.addresses?.confidentialSeller || fail("DEMO_RUN_INVALID", "run.json is missing the confidential seller");
+      if (runId !== events[0]!.runId) fail("DEMO_RUN_INVALID", "remote event stream does not match run.json");
+      const queued = await inspectHostedExit(new SellerDatabase(requiredEnv("SUPABASE_URL"), requiredEnv("SUPABASE_SERVICE_ROLE_KEY")), requiredEnv("SELLER_STATE_KEY"), { sellerId, runId, sessionId: String(exitEvent.publicDetails.sessionId ?? "") });
+      if (queued.operationId !== exitEvent.publicDetails.operationId || queued.amount !== exitEvent.publicDetails.amount || queued.executeAt !== exitEvent.publicDetails.executeAt || queued.windowEnd !== exitEvent.publicDetails.windowEnd) fail("DEMO_EVIDENCE_MISMATCH", "recorded hosted seller exit differs from its encrypted state snapshot");
+    } else {
+      const buyer = new Phase3App(roles.buyer), seller = new Phase3App(roles.confidentialSeller);
+      try {
+        if (buyer.profile.mock || seller.profile.mock || buyer.profile.verifierVersion !== 2 || seller.profile.verifierVersion !== 2) fail("LIVE_PROFILE_REQUIRED", "recorded payment evidence needs separate live v2 buyer and seller roles");
+        for (const [stage, kind] of [["prefunding", "deposit"], ["public-settlement", "x402"], ["private-settlement", "shielded"]] as const) {
+          const digest = events.find((event) => event.stage === stage && event.status === "complete")?.publicDetails.transactionDigest;
+          const row = typeof digest === "string" && buyer.store.db.prepare("SELECT 1 FROM live_signed_transactions AS tx JOIN live_operation_context AS context ON context.operation_id=tx.operation_id WHERE tx.digest=? AND tx.status='finalized' AND context.kind=?").get(digest, kind);
+          if (!row) fail("DEMO_EVIDENCE_MISMATCH", `${stage} digest is not a finalized ${kind} transaction in the buyer journal`);
+        }
+        for (const event of completedMemories) if (!buyer.store.db.prepare("SELECT 1 FROM memory_jobs WHERE blob_id=? AND status='complete'").get(String(event.publicDetails.blobId))) fail("DEMO_EVIDENCE_MISMATCH", "recorded memory is not a completed buyer write");
+        const exitEvent = events.find((event) => event.stage === "delayed-exit" && event.sequence === sequence[8])!;
+        const queued = new V2ExitQueue(seller.store).get(String(exitEvent.publicDetails.operationId ?? ""));
+        if (!queued || queued.amount.toString() !== exitEvent.publicDetails.amount || !seller.store.db.prepare("SELECT 1 FROM notes WHERE commitment=? AND role='payment'").get(queued.commitment)) fail("DEMO_EVIDENCE_MISMATCH", "recorded exit is not queued against a recovered seller payment note");
+      } finally { buyer.close(); seller.close(); }
     }
   }
   return { healthy: true, checked, secretScan: "pass" };
@@ -274,5 +316,5 @@ async function replay(): Promise<Record<string, unknown>> {
   return { label: "recorded funded run", freshTransaction: false, events };
 }
 
-try { const data = command === "setup" ? await setup() : command === "doctor" ? await doctor() : command === "seed-policy" ? await seedPolicy() : command === "reuse-memories" ? reuseMemories() : command === "check" ? check() : command === "live" ? await live() : command === "replay" ? await replay() : fail("COMMAND_UNKNOWN", "use setup, doctor, seed-policy, reuse-memories, live, replay, or check"); send(data); }
+try { const data = command === "setup" ? await setup() : command === "doctor" ? await doctor() : command === "seed-policy" ? await seedPolicy() : command === "reuse-memories" ? reuseMemories() : command === "check" ? await check() : command === "live" ? await live() : command === "replay" ? await replay() : fail("COMMAND_UNKNOWN", "use setup, doctor, seed-policy, reuse-memories, live, replay, or check"); send(data); }
 catch (error) { process.stdout.write(`${JSON.stringify(errorOutput(error))}\n`); process.exitCode = 1; }
