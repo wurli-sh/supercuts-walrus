@@ -1,5 +1,10 @@
 # Experimental pool v2 rollout
 
+The v2 pool is Supercuts' confidential settlement rail for privately negotiated
+agent deals. Walrus Memory can supply a scoped owner rule that selects this rail;
+the pool proof then commits the accepted payment instead of publishing a direct
+seller transfer. Memory does not hide the pool activity described below.
+
 Pool v2 is a separate Move module (`pool_v2`) with statement version 2. The
 current pinned Testnet deployment is `config/phase1.testnet.json`. Existing v1
 notes must be redeemed against `config/pool-v1.testnet.json`; no note is

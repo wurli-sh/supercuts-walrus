@@ -1,8 +1,11 @@
 # Supercuts backend, CLI, and MCP
 
-The backend is the role-separated foundation shared by the Phase 3 CLI and MCP
-adapters. Settlement and policy decisions remain in this package rather than
-being reimplemented in tool handlers.
+The backend implements Supercuts' private negotiation and settlement layer for
+agents. Signed encrypted offers bind an agreement to a public x402 or shielded
+payment. Walrus Memory carries typed owner rules and verified outcomes across
+runs, so remembered context can guide a later deal. The role-separated CLI,
+MCP, and SDK adapters share this runtime; settlement and policy decisions stay
+here rather than being reimplemented in tool handlers.
 
 Each buyer, seller, auditor, resource server, and relayer uses a separate
 SQLite state path and a separate owner-only 32-byte state-key file. Secret

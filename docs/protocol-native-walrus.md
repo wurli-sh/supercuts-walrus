@@ -1,5 +1,10 @@
 # Protocol-native Walrus for Supercuts
 
+Supercuts is a private negotiation and settlement layer for agents, boosted by
+Walrus Memory. Walrus carries signed capability registrations and encrypted
+deal transcripts; Memory carries typed owner rules and verified outcomes into
+later planning. The runtime binds both to an owner-approved payment.
+
 Status: implemented with local integration and funded Testnet coverage, 2026-11-03.
 This document does not change the pinned Testnet pool, its proof statement,
 or existing notes.

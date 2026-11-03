@@ -1,5 +1,10 @@
 # Remote seller demo with a Codex buyer
 
+This demo shows the Supercuts core flow end to end: agents negotiate privately,
+settle on the public or shielded rail, and use Walrus Memory to carry an owner
+privacy rule into the next payment decision. The memory recall must select the
+shielded rail for the confidential analysis.
+
 This path runs a buyer-only `supercuts-mcp` process in Codex. One Render web service hosts three separate seller identities: two prepared Sui market briefs and one competitor analysis with a prepared variant for each brief. The existing x402 facilitator remains a separate Render service. All payments use live Sui Testnet. The seller's research specialty is independent of the payment rail.
 
 ## Prepare the reports and roles

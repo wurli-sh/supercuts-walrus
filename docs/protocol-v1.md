@@ -1,5 +1,10 @@
 # Supercuts shielded pool protocol v1
 
+This statement is the original shielded settlement component of Supercuts'
+private agent negotiation and settlement layer. The negotiated agreement and
+Walrus Memory decisions live above the pool protocol; this document defines
+the proof and on-chain checks for existing v1 notes.
+
 Status: experimental and unaudited. This document freezes the Phase 1 statement
 encoding. It does not make a production-safety claim.
 

@@ -1,5 +1,10 @@
 # Supercuts Phase 1 circuits
 
+These circuits are the shielded settlement part of Supercuts' private agent
+negotiation and settlement layer. The authenticated agreement is handled by the
+backend; Walrus Memory informs later decisions, while the proof constrains the
+pool transition. The pool and artifacts are experimental Testnet software.
+
 The current files implement and test the frozen SHA-256 statement compressor.
 They intentionally expose exactly two public inputs and constrain every statement
 byte. Run:

@@ -1,5 +1,10 @@
 # Supercuts TypeScript SDK
 
+Supercuts gives agents private negotiation and settlement tools, with Walrus
+Memory to carry policy and outcome context into later deals. The SDK exposes
+that workflow through typed role clients while the runtime enforces the owner's
+mandate and verifies payment evidence.
+
 `@supercuts/sdk` is a typed, role-scoped wrapper over the one-request Supercuts
 subprocess seam. Wallet keys, state keys, witnesses, and service credentials stay
 inside the Supercuts process; the SDK receives intents and verified receipts.

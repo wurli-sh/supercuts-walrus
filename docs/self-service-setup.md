@@ -1,9 +1,11 @@
 # Self-service Supercuts setup
 
-Supercuts is the buyer's settlement layer. An agent supplies a task and calls the
-protocol tools; the buyer role home holds policy, keys, payment state, and Walrus
-credentials. The agent does not call Walrus directly. The current pool is
-experimental and Sui Testnet-only.
+Supercuts is a private negotiation and settlement layer for agents, boosted by
+Walrus Memory. An agent supplies a task and calls protocol tools to discover a
+seller, negotiate encrypted terms, settle under the owner's mandate, and reuse
+typed preferences and verified outcomes in later decisions. The buyer role
+home holds policy, keys, payment state, and Walrus credentials. The agent does
+not call Walrus directly. The current pool is experimental and Sui Testnet-only.
 
 ## Buyer: configure once
 
