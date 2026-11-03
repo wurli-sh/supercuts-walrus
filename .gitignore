@@ -17,3 +17,7 @@
 /reference-shii/
 /*.md
 !/AGENTS.md
+!/README.md
+!/JUDGES.md
+!/ARCHITECTURE.md
+/demo/
