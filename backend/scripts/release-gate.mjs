@@ -31,7 +31,8 @@ try {
   for (const [tarball, required] of [[backendTar, "package/dist/seam.js"], [sdkTar, "package/dist/index.js"]]) {
     const files = run("tar", ["-tzf", tarball], root).trim().split("\n");
     assert.ok(files.includes(required), `${tarball} lacks ${required}`);
-    assert.ok(files.every((file) => /^package\/(dist\/|README\.md$|package\.json$)/.test(file)), `${tarball} contains unexpected files`);
+    assert.ok(files.includes("package/LICENSE"), `${tarball} lacks LICENSE`);
+    assert.ok(files.every((file) => /^package\/(dist\/|README\.md$|LICENSE$|package\.json$)/.test(file)), `${tarball} contains unexpected files`);
   }
   const packedSdk = JSON.parse(run("tar", ["-xOzf", sdkTar, "package/package.json"], root));
   const packedBackend = JSON.parse(run("tar", ["-xOzf", backendTar, "package/package.json"], root));
