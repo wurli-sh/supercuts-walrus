@@ -43,7 +43,7 @@ export class LivePoolIndex {
   }
   async sync(): Promise<LiveIndexState> {
     const leaves: bigint[] = [], transactions: string[] = [], leafTransactions: string[] = [];
-    const depositingAddresses = new Set<string>(); let deposits = 0, exits = 0;
+    const depositingAddresses = new Set<string>(), seenTransactions = new Set<string>(); let deposits = 0, exits = 0;
     let cursor: string | null = null, checkpoint = this.deploymentCheckpoint, expectedRoot = BigInt(`0x${this.engine.deployment.initialRoot.replace(/^0x/, "")}`), guard = 0;
     do {
       if (++guard > 100_000) fail("CHAIN_PAGINATION_INVALID", "pool history pagination did not terminate");
@@ -51,6 +51,8 @@ export class LivePoolIndex {
       for (const result of page.transactions) {
         const tx = transaction(result); if (!tx.checkpoint || BigInt(tx.checkpoint) < this.deploymentCheckpoint || !tx.status.success) continue;
         if (!tx.effects?.changedObjects.some((object) => object.objectId.toLowerCase() === this.poolId.toLowerCase())) continue;
+        if (!tx.digest || seenTransactions.has(tx.digest) || BigInt(tx.checkpoint) < checkpoint) fail("POOL_HISTORY_INVALID", "pool transaction history contains a duplicate or is out of checkpoint order");
+        seenTransactions.add(tx.digest);
         let touched = false;
         for (const event of tx.events ?? []) {
           if (event.packageId.toLowerCase() !== this.packageId.toLowerCase() || event.module !== this.moduleName || !event.json) continue;

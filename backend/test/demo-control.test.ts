@@ -49,7 +49,7 @@ test("seller-owned x402 service challenges, settles once, and rejects cross-requ
   // The configured origin is part of the signed challenge; use a second service with the actual ephemeral port.
   await new Promise<void>((resolve) => server.close(() => resolve())); store.close();
   const store2 = new RoleStore(join(directory, "state2.sqlite"), randomBytes(32)), origin = `http://127.0.0.1:${address.port}`, service2 = new X402ResourceService(store2, { origin, facilitatorUrl: "http://127.0.0.1:9999", facilitatorKey, network: "sui:testnet", asset: "0x2::sui::SUI", payTo: `0x${"11".repeat(32)}`, amount: "7" }, facilitatorFetch), server2 = service2.createServer();
-  service2.register("request-a", "operation-a", Buffer.from('{"report":"ready"}')); service2.register("request-b", "operation-b", Buffer.from('{"report":"other"}'));
+  service2.register("request-a", "operation-a", Buffer.from('{"report":"ready"}')); service2.register("request-b", "operation-b", Buffer.from('{"report":"other"}')); service2.register("request-expired", "operation-expired", Buffer.from('{"report":"expired"}'));
   await new Promise<void>((resolve) => server2.listen(address.port, "127.0.0.1", resolve));
   try {
     const challengeResponse = await fetch(`${origin}/capability/request-a`); assert.equal(challengeResponse.status, 402);
@@ -62,5 +62,9 @@ test("seller-owned x402 service challenges, settles once, and rejects cross-requ
     const secondChallengeResponse = await fetch(`${origin}/capability/request-b`), secondChallenge = JSON.parse(Buffer.from(secondChallengeResponse.headers.get("payment-required")!, "base64").toString()) as any, secondRequirements = secondChallenge.accepts[0], secondExtra = secondRequirements.extra;
     const secondUnsignedRequirements = { ...secondRequirements, extra: { requestId: secondExtra.requestId, operationId: secondExtra.operationId, nonce: secondExtra.nonce } }, secondBinding = { requestId: "request-b", nonce: secondExtra.nonce, requirementsHash: requirementsHash(secondUnsignedRequirements), transactionDigest: digest, payer: payer.toSuiAddress() }, secondSignature = (await payer.signPersonalMessage(paymentBindingBytes(secondBinding))).signature;
     const consumed = await fetch(`${origin}/capability/request-b`, { headers: { "payment-signature": Buffer.from(JSON.stringify({ x402Version: 2, resource: secondChallenge.resource, accepted: secondRequirements, payload: { signature: "transaction-signature", transaction: "bytes" } })).toString("base64"), "x-supercuts-binding": Buffer.from(JSON.stringify({ ...secondBinding, payerSignature: secondSignature })).toString("base64") } }); assert.equal(consumed.status, 409);
+    const expiredChallenge = await fetch(`${origin}/capability/request-expired`); assert.equal(expiredChallenge.status, 402);
+    store2.db.prepare("UPDATE x402_challenges SET created_at=? WHERE request_id=?").run(Date.now() - 301_000, "request-expired");
+    const expiredPayment = await fetch(`${origin}/capability/request-expired`, { headers: { "payment-signature": "e30=" } });
+    assert.equal(expiredPayment.status, 400); assert.equal((await expiredPayment.json() as { error: string }).error, "X402_CHALLENGE_EXPIRED");
   } finally { await new Promise<void>((resolve) => server2.close(() => resolve())); store2.close(); }
 });

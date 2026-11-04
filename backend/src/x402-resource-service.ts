@@ -72,6 +72,8 @@ export class X402ResourceService {
       const challenge = this.challenge(artifact), requirements = challenge.accepts instanceof Array ? challenge.accepts[0] as ExactRequirements : fail("X402_STATE_INVALID", "challenge omitted requirements");
       const paymentHeader = Array.isArray(request.headers["payment-signature"]) ? request.headers["payment-signature"][0] : request.headers["payment-signature"];
       if (!paymentHeader) { await this.persist?.(); return this.send(response, 402, Buffer.from("Payment Required"), { "payment-required": encode(challenge) }); }
+      const stored = this.#ledger.getChallenge(artifact.requestId, requirementsHash(this.requirements(artifact))) ?? fail("X402_CHALLENGE_MISSING", "resource challenge was not persisted");
+      if (!this.#ledger.isDeliveryComplete(artifact.requestId) && Date.now() > stored.createdAt + requirements.maxTimeoutSeconds * 1_000) fail("X402_CHALLENGE_EXPIRED", "payment challenge has expired");
       const payload = decode(paymentHeader, "X402_PAYMENT_INVALID"), bindingValue = Array.isArray(request.headers["x-supercuts-binding"]) ? request.headers["x-supercuts-binding"][0] : request.headers["x-supercuts-binding"], binding = decode(bindingValue, "X402_REQUEST_BINDING_INVALID") as unknown as PaymentBinding;
       const offered = payload.accepted as ExactRequirements;
       if (!offered || requirementsHash(offered) !== requirementsHash(requirements)) fail("X402_REQUIREMENTS_MISMATCH", "payment payload changed the challenged requirements");
