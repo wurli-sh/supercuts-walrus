@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -89,6 +89,26 @@ test("v2 relayer requires its own pinned signer and rejects changed retries", as
     store.db.prepare("INSERT INTO v2_relay_journal(operation_id,request_hash,note_nullifier,transaction_bytes,signature,digest,status,updated_at) VALUES(?,?,?,?,?,?,'signed',?)")
       .run("exit-1", "old-hash", "aa".repeat(32), Buffer.from([1]), "signature", "digest", Date.now());
     await assert.rejects(() => relayer.submit({ operationId: "exit-1", root: new Uint8Array(32), noteNullifier: new Uint8Array(32), recipient: id, amount: 1_000_000n, exactExit: false, changeCommitment: new Uint8Array(32), newRoot: new Uint8Array(32), newIndex: 1n, proof: new Uint8Array([1]) }), { code: "OPERATION_ID_CONFLICT" });
+  } finally { store.close(); }
+});
+
+test("v2 relayer leaves a journaled exit unresolved when Tatum disagrees", async () => {
+  const store = new RoleStore(join(mkdtempSync(join(tmpdir(), "supercuts-v2-relay-evidence-")), "state.sqlite"), randomBytes(32));
+  try {
+    const signer = Ed25519Keypair.generate();
+    store.putSecret("live:relayer-sui-private-key", Buffer.from(signer.getSecretKey()));
+    store.putSecret("live:tatum-api-key", Buffer.from("test-key"));
+    const relayer = new V2ExitRelayer(store, { packageId: id, poolId: id, coinType: "0x2::sui::SUI", relayerAddress: signer.toSuiAddress(), writeGrpcEndpoint: "https://example.com", tatumGrpcEndpoint: "https://example.com" });
+    const request = { operationId: "exit-evidence", root: new Uint8Array(32), noteNullifier: new Uint8Array(32), recipient: id, amount: 1_000_000n, exactExit: false, changeCommitment: new Uint8Array(32), newRoot: new Uint8Array(32), newIndex: 1n, proof: new Uint8Array([1]) };
+    const normalized = { operationId: request.operationId, root: "00".repeat(32), noteNullifier: "00".repeat(32), recipient: id, amount: "1000000", exactExit: false, changeCommitment: "00".repeat(32), newRoot: "00".repeat(32), newIndex: "1", proofHash: createHash("sha256").update(request.proof).digest("hex") };
+    const requestHash = createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+    store.db.prepare("INSERT INTO v2_relay_journal(operation_id,request_hash,note_nullifier,transaction_bytes,signature,digest,status,updated_at) VALUES(?,?,?,?,?,?,'signed',?)")
+      .run(request.operationId, requestHash, normalized.noteNullifier, Buffer.from([1]), "signature", "journaled-digest", Date.now());
+    const testRelayer = relayer as unknown as { client: { executeTransaction: () => Promise<unknown>; waitForTransaction: () => Promise<unknown> }; tatum: { getTransaction: () => Promise<unknown> } };
+    testRelayer.client = { executeTransaction: async () => ({}), waitForTransaction: async () => ({ Transaction: { digest: "journaled-digest", checkpoint: "42", status: { success: true } } }) };
+    testRelayer.tatum = { getTransaction: async () => ({ transaction: { digest: "other-digest", checkpoint: "42", effects: { status: { success: true } } } }) };
+    await assert.rejects(() => relayer.submit(request), { code: "TATUM_TRANSACTION_MISMATCH" });
+    assert.equal((store.db.prepare("SELECT status FROM v2_relay_journal WHERE operation_id=?").get(request.operationId) as { status: string }).status, "signed");
   } finally { store.close(); }
 });
 

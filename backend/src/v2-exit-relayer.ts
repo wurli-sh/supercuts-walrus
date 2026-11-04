@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { fail } from "./errors.js";
+import { assertSuiFinality, assertTatumFinality } from "./finality.js";
 import type { RoleStore } from "./store.js";
 import { buildWithdrawV2, type WithdrawV2Call, writeClient } from "./sui.js";
 import { TatumLedger } from "./tatum.js";
@@ -41,6 +42,10 @@ export class V2ExitRelayer {
 
   async submit(request: V2ExitRequest): Promise<{ digest: string; checkpoint: string; relayer: string; resumed: boolean; tatumVerified: true }> {
     if (!request.operationId || request.operationId.length > 256) fail("RELAY_REQUEST_INVALID", "operation ID is invalid");
+    if ([request.root, request.noteNullifier, request.changeCommitment, request.newRoot].some((value) => value.length !== 32) ||
+      !/^0x[0-9a-f]{64}$/i.test(request.recipient) || request.amount <= 0n || request.amount >= 1n << 64n ||
+      (!request.exactExit && request.amount !== 1_000_000n) || request.newIndex <= 0n ||
+      !request.proof.length || request.proof.length > 128 * 1024) fail("RELAY_REQUEST_INVALID", "v2 exit fields are malformed or outside protocol bounds");
     const normalized = {
       operationId: request.operationId, root: Buffer.from(request.root).toString("hex"),
       noteNullifier: Buffer.from(request.noteNullifier).toString("hex"), recipient: request.recipient.toLowerCase(),
@@ -77,10 +82,9 @@ export class V2ExitRelayer {
     let finalized;
     try { finalized = await this.client.waitForTransaction({ digest: signed.digest, timeout: 60_000, include: { effects: true } }); }
     catch (error) { return fail("RELAY_BROADCAST_UNRESOLVED", "relayer transaction outcome is unresolved; retry the same operation ID", error); }
-    const tx = finalized.Transaction ?? finalized.FailedTransaction;
-    if (!tx?.status.success || !tx.checkpoint) fail("RELAY_FINALITY_FAILED", "v2 exit transaction did not finalize successfully");
-    await this.tatum.getTransaction(signed.digest);
+    const checkpoint = assertSuiFinality(finalized, signed.digest);
+    assertTatumFinality(await this.tatum.getTransaction(signed.digest), signed.digest, checkpoint);
     this.store.db.prepare("UPDATE v2_relay_journal SET status='finalized',updated_at=? WHERE operation_id=?").run(Date.now(), request.operationId);
-    return { digest: signed.digest, checkpoint: String(tx.checkpoint), relayer: this.signer.toSuiAddress(), resumed: Boolean(existing), tatumVerified: true };
+    return { digest: signed.digest, checkpoint, relayer: this.signer.toSuiAddress(), resumed: Boolean(existing), tatumVerified: true };
   }
 }

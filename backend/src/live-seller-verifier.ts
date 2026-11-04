@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Phase3App } from "./phase3.js";
 import { LiveRuntime, type LiveRuntimeProfile } from "./live-runtime.js";
 import { fail } from "./errors.js";
+import { assertSuiFinality, assertTatumFinality } from "./finality.js";
 import type { ServiceRequest, VerifiedSellerPayment } from "./seller-runtime.js";
 import { canonicalJson } from "./settlement.js";
 
@@ -30,11 +31,9 @@ export class LiveSellerPaymentVerifier {
     const runtime = await this.runtimeFactory();
     const result = await runtime.client.getTransaction({ digest: request.paymentDigest, include: { effects: true, events: true, balanceChanges: true, transaction: true } });
     const tx = result.Transaction ?? result.FailedTransaction;
-    if (!tx || tx.digest !== request.paymentDigest || !tx.status.success || !tx.checkpoint) fail("SELLER_PAYMENT_UNVERIFIED", "Sui has no finalized successful payment transaction");
+    const checkpoint = assertSuiFinality(result, request.paymentDigest);
     if (tx.transaction?.sender?.toLowerCase() !== (this.app.store.db.prepare("SELECT buyer_address FROM seller_deal_prepares WHERE session_id=?").get(request.requestId) as { buyer_address: string } | undefined)?.buyer_address.toLowerCase()) fail("SELLER_PAYMENT_UNVERIFIED", "payment sender differs from the authenticated buyer");
-    const tatum = await runtime.tatum.getTransaction(request.paymentDigest) as { transaction?: { digest?: string; checkpoint?: bigint | { sequenceNumber?: bigint }; effects?: { status?: { success?: boolean } } } };
-    const checkpoint = typeof tatum.transaction?.checkpoint === "object" ? tatum.transaction.checkpoint.sequenceNumber : tatum.transaction?.checkpoint;
-    if (tatum.transaction?.digest !== request.paymentDigest || String(checkpoint) !== String(tx.checkpoint) || tatum.transaction.effects?.status?.success !== true) fail("SELLER_TATUM_MISMATCH", "Tatum did not confirm the same successful checkpoint");
+    assertTatumFinality(await runtime.tatum.getTransaction(request.paymentDigest), request.paymentDigest, checkpoint);
     if (request.rail === "x402") {
       if (!tx.balanceChanges?.some((change) => change.address?.toLowerCase() === String(agreement.counterparty).toLowerCase() && canonicalType(String(change.coinType)) === canonicalType(this.app.profile.coinType) && BigInt(String(change.amount)) === BigInt(request.agreedAmount))) fail("SELLER_PAYMENT_UNVERIFIED", "x402 transaction does not credit the exact seller and amount");
     } else {
