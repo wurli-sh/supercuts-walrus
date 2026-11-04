@@ -34,6 +34,8 @@ for buyer, seller, and auditor processes. Development homes initialized with
 For a reusable live buyer, run `supercuts setup buyer --home <buyer-home>` and
 follow [the self-service setup guide](../docs/self-service-setup.md). It creates
 a standing v2 policy, signed seller sources, and a Codex MCP configuration.
+For independent seller registration and buyer approval through the shared
+Testnet directory, follow [the onboarding guide](../docs/testnet-onboarding.md).
 
 MCP mutations are authorized by the owner-only `mandate.json` created at
 initialization. Tool schemas reject unknown arguments (including the deprecated

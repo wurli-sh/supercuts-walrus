@@ -20,16 +20,18 @@ generates a fresh buyer Sui key unless an owner-only setup JSON supplies
 For noninteractive setup, use `supercuts setup buyer --home <buyer-home>
 --config <owner-only-setup.json>`. The JSON keys are `deploymentConfig`,
 `tatumKeyFile`, `writeGrpc`, `tatumGrpc`, `walrusPublisher`,
-`walrusAggregator`, `memoryConfigFile`, `sellerOrigins` (array),
-`allowedCounterparties` (Sui address array), `perDealCeiling` and
+`walrusAggregator`, `memoryConfigFile`, `directoryUrl` (the shared Testnet
+seller service origin) or `sellerOrigins` (array), optional
+`allowedCounterparties` (approved seller Sui addresses), `perDealCeiling` and
 `totalBudget` (MIST strings), `expiresAt` (Unix milliseconds), and optional
 `allowPublicX402`, `allowedCapabilityIds`, `allowedCapabilityClasses`,
 `suiKeyFile`, and `rapidsnark`. The config file must be mode `0600`; the role
 home and all credentials remain owner-only. Seller origins must use HTTPS,
 except for loopback development.
 
-Setup prints the generated **buyer** address. Fund only that address with
-Testnet SUI. Check its balance before a live deal. The role home also contains
+Setup prints the generated **buyer** address. For the recorded demo, fund only
+the buyer address printed by `supercuts-demo setup`. Check its balance before a
+live deal. The role home also contains
 `buyer-codex.toml`, which points Codex to the MCP server and a fresh redacted
 event stream. If Codex starts before setup, `setup.status` explains the local
 setup command; restart the MCP connection after completing it.
@@ -47,6 +49,13 @@ reserved operations. Finish or reconcile an in-flight deal before changing its
 policy, because the settlement plan is bound to the original mandate. Use
 `supercuts setup session --home <buyer-home>` to generate a fresh Codex run ID
 and event file without asking for policy again.
+
+With a shared directory, `supercuts policy approve-seller --home <buyer-home>
+--capability-id <id>` verifies the signed listing and its Walrus manifest,
+then adds the seller identity to both local buyer policy layers. Run it in an
+owner terminal after reviewing the directory listing. A listing by itself
+does not authorize payment. The buyer can still use direct `sellerOrigins` for
+existing private catalogs.
 
 ## Buyer: give Codex a task
 
@@ -106,6 +115,23 @@ restart it afterward** so no running instance writes an older snapshot over
 the new revision. The packaged hosted handler serves the configured artifact
 only after exact payment verification; self-hosted sellers may supply arbitrary
 handlers. No seller state or key is copied into a buyer home.
+
+To publish a running self-hosted capability to the shared directory, run
+`supercuts-seller-directory publish <owner-only-registration.json>
+<directory-origin>`. The directory checks the signature, Walrus manifest,
+and that the seller's `/v2/catalog` serves the exact registration. Renew by
+publishing a newly signed registration from the same seller identity. The
+directory service needs `DIRECTORY_WALRUS_AGGREGATOR` set to the trusted Walrus
+aggregator, and its `backend/sql/seller-directory.sql` migration applied before accepting
+registrations. This directory is part of the existing hosted seller service;
+its records are separate from hosted seller role snapshots.
+
+Run `supercuts onboarding doctor --home <buyer-home>` to check buyer runtime,
+policy consistency, and directory health. For a self-hosted seller run
+`supercuts onboarding doctor --home <seller-home> --config
+<owner-only-seller-live.json>` after starting its HTTPS service. These checks
+do not submit a payment. A real transaction still requires the existing live
+Testnet prerequisites and buyer funding.
 
 ## Recorded Testnet demo
 

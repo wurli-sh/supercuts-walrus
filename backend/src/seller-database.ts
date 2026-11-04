@@ -1,5 +1,6 @@
 import { fail } from "./errors.js";
 import type { EncryptedSellerSnapshot } from "./seller-state.js";
+import type { SignedCapabilityRegistration } from "./capability.js";
 
 /** Server-only PostgREST access. The service-role key must never reach a buyer tool. */
 export class SellerDatabase {
@@ -39,6 +40,20 @@ export class SellerDatabase {
     return await this.request("seller_catalog?select=seller_id,capability_id,manifest,blob_id,signature,transport_public_key,preview,updated_at&order=capability_id.asc") as Array<Record<string, unknown>>;
   }
 
+  async listDirectory(now = Date.now(), offset = 0): Promise<SignedCapabilityRegistration[]> {
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100_000) fail("SELLER_DIRECTORY_INVALID", "directory offset is invalid");
+    const rows = await this.request(`seller_directory?expires_at=gt.${now}&select=registration&order=capability_id.asc&limit=100&offset=${offset}`) as Array<{ registration: SignedCapabilityRegistration }>;
+    return rows.map((row) => row.registration);
+  }
+
+  async putDirectory(registration: SignedCapabilityRegistration): Promise<void> {
+    const manifest = registration.manifest;
+    const existing = await this.request(`seller_directory?capability_id=eq.${encodeURIComponent(manifest.capabilityId)}&select=seller_id,registration`) as Array<{ seller_id: string; registration: SignedCapabilityRegistration }>;
+    if (existing[0] && existing[0].seller_id !== manifest.sellerId)
+      fail("SELLER_DIRECTORY_CONFLICT", "capability ID belongs to another seller");
+    await this.request("seller_directory?on_conflict=capability_id", { method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=minimal" }, body: JSON.stringify({ capability_id: manifest.capabilityId, seller_id: manifest.sellerId, registration, endpoint_origin: new URL(manifest.endpoint).origin, expires_at: manifest.expiresAt, updated_at: new Date().toISOString() }) });
+  }
+
   async putCatalog(row: { seller_id: string; capability_id: string; manifest: unknown; blob_id: string; signature: string; transport_public_key: string; preview: unknown }): Promise<void> {
     await this.request("seller_catalog?on_conflict=capability_id", { method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=minimal" }, body: JSON.stringify({ ...row, updated_at: new Date().toISOString() }) });
   }
@@ -49,6 +64,10 @@ export class SellerDatabase {
 
   async listEvents(runId: string): Promise<Array<Record<string, unknown>>> {
     return await this.request(`seller_events?run_id=eq.${encodeURIComponent(runId)}&select=seller_id,stage,status,details,created_at&order=id.asc`) as Array<Record<string, unknown>>;
+  }
+
+  async listPaymentClaims(): Promise<Array<{ digest: string; request_id: string; seller_id: string }>> {
+    return await this.request("seller_payment_claims?select=digest,request_id,seller_id&order=digest.asc") as Array<{ digest: string; request_id: string; seller_id: string }>;
   }
 
   async claimPayment(digest: string, requestId: string, sellerId: string): Promise<void> {

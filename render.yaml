@@ -41,6 +41,8 @@ services:
         sync: false
       - key: SELLER_STATE_KEY
         sync: false
+      - key: DIRECTORY_WALRUS_AGGREGATOR
+        sync: false
       - key: FACILITATOR_URL
         sync: false
       - key: FACILITATOR_SHARED_KEY

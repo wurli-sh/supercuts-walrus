@@ -17,6 +17,7 @@ import { SellerDatabase } from "./seller-database.js";
 import { captureSellerHome, decryptSellerSnapshot, encryptSellerSnapshot, restoreSellerHome } from "./seller-state.js";
 import { X402ResourceService } from "./x402-resource-service.js";
 import { LiveSellerTransport } from "./live-seller-transport.js";
+import { registerDirectoryCapability } from "./seller-directory.js";
 
 interface CatalogRow { seller_id: string; capability_id: string; manifest: CapabilityManifest; blob_id: string; signature: string; transport_public_key: string; preview: Record<string, unknown>; }
 interface Quote { requestId: string; operationId: string; capabilityId: string; amount: string; artifactKey: string; runId: string; }
@@ -37,12 +38,12 @@ export class SellerService {
   #queue: Promise<unknown> = Promise.resolve();
   #healthy = true;
 
-  private constructor(private readonly db: SellerDatabase, private readonly snapshotKey: string, private readonly origin: string, private readonly facilitatorUrl: string, private readonly facilitatorKey: string, private readonly allowedBuyers: ReadonlySet<string>, claudeKey: string) {
+  private constructor(private readonly db: SellerDatabase, private readonly snapshotKey: string, private readonly origin: string, private readonly facilitatorUrl: string, private readonly facilitatorKey: string, private readonly allowedBuyers: ReadonlySet<string>, claudeKey: string, private readonly directoryAggregator?: string) {
     this.#claude = new BoundedClaude({ apiKey: claudeKey });
   }
 
-  static async create(config: { db: SellerDatabase; snapshotKey: string; origin: string; facilitatorUrl: string; facilitatorKey: string; allowedBuyers: ReadonlySet<string>; claudeKey: string }): Promise<SellerService> {
-    const service = new SellerService(config.db, config.snapshotKey, config.origin, config.facilitatorUrl, config.facilitatorKey, config.allowedBuyers, config.claudeKey);
+  static async create(config: { db: SellerDatabase; snapshotKey: string; origin: string; facilitatorUrl: string; facilitatorKey: string; allowedBuyers: ReadonlySet<string>; claudeKey: string; directoryAggregator?: string }): Promise<SellerService> {
+    const service = new SellerService(config.db, config.snapshotKey, config.origin, config.facilitatorUrl, config.facilitatorKey, config.allowedBuyers, config.claudeKey, config.directoryAggregator);
     const rows = (await config.db.listCatalog() as unknown as CatalogRow[]).filter((row) => !(isV2(row) && row.manifest.expiresAt <= Date.now()));
     for (const row of rows) {
       validateCapabilityManifest(row.manifest);
@@ -147,6 +148,24 @@ export class SellerService {
     try {
       const url = new URL(request.url ?? "/", this.origin);
       if (request.method === "GET" && url.pathname === "/health") return this.reply(response, this.#healthy ? 200 : 503, { ok: this.#healthy, service: "supercuts-sellers" });
+      if (request.method === "GET" && url.pathname === "/v2/directory/health") {
+        if (!this.directoryAggregator) return this.reply(response, 503, { ok: false, service: "supercuts-directory", reason: "aggregator not configured" });
+        const capabilities = await this.db.listDirectory();
+        return this.reply(response, 200, { ok: true, service: "supercuts-directory", listings: capabilities.length });
+      }
+      if (request.method === "GET" && url.pathname === "/v2/directory/catalog") {
+        const rawOffset = url.searchParams.get("offset") ?? "0";
+        if (!/^(0|[1-9][0-9]*)$/.test(rawOffset)) fail("SELLER_DIRECTORY_INVALID", "directory offset is invalid");
+        const offset = Number(rawOffset), capabilities = await this.db.listDirectory(Date.now(), offset);
+        return this.reply(response, 200, { capabilities, ...(capabilities.length === 100 ? { nextOffset: offset + 100 } : {}) });
+      }
+      if (request.method === "POST" && url.pathname === "/v2/directory/register") {
+        if (!this.directoryAggregator) fail("SELLER_DIRECTORY_UNAVAILABLE", "directory Walrus aggregator is not configured");
+        const body = await this.body(request);
+        const registration = body.registration as Parameters<typeof registerDirectoryCapability>[1];
+        await registerDirectoryCapability(this.db, registration, this.directoryAggregator!);
+        return this.reply(response, 200, { ok: true, capabilityId: registration.manifest.capabilityId, sellerId: registration.manifest.sellerId, expiresAt: registration.manifest.expiresAt });
+      }
       if (request.method === "GET" && url.pathname === "/v1/catalog") return this.reply(response, 200, { capabilities: [...this.#catalog.values()].map(({ manifest, blob_id, signature, transport_public_key, preview }) => ({ manifest, blobId: blob_id, signature, transportPublicKey: transport_public_key, preview })) });
       if (request.method === "GET" && url.pathname === "/v2/catalog") return this.reply(response, 200, { capabilities: [...this.#v2.values()].map(({ row }) => ({ manifest: row.manifest, manifestBlobId: row.blob_id, sellerSignature: row.signature, transportPublicKey: row.transport_public_key })) });
       if (request.method === "POST" && url.pathname === "/v2/prepare") {
@@ -285,7 +304,7 @@ export class SellerService {
       return this.reply(response, 404, { error: "NOT_FOUND" });
     } catch (error) {
       const known = error instanceof SupercutsError ? error : new SupercutsError("SELLER_INTERNAL_ERROR", "seller request failed");
-      if (!response.headersSent) this.reply(response, known.code === "SELLER_STATE_UNAVAILABLE" ? 503 : 400, { error: known.code, message: known.message });
+      if (!response.headersSent) this.reply(response, ["SELLER_STATE_UNAVAILABLE", "SELLER_DIRECTORY_UNAVAILABLE", "SELLER_DB_UNAVAILABLE"].includes(known.code) ? 503 : 400, { error: known.code, message: known.message });
     }
   }
 
@@ -297,7 +316,7 @@ if (process.argv[1] && import.meta.url.endsWith(process.argv[1])) {
   const required = (key: string) => process.env[key] ?? fail("SELLER_CONFIG_MISSING", `${key} is required`);
   const port = Number(process.env.PORT ?? "3000");
   const origin = required("SELLER_ORIGIN");
-  SellerService.create({ db: new SellerDatabase(required("SUPABASE_URL"), required("SUPABASE_SERVICE_ROLE_KEY")), snapshotKey: required("SELLER_STATE_KEY"), origin, facilitatorUrl: required("FACILITATOR_URL"), facilitatorKey: required("FACILITATOR_SHARED_KEY"), allowedBuyers: new Set(required("SELLER_ALLOWED_BUYERS").split(",")), claudeKey: required("CLAUDE_API_KEY") })
+  SellerService.create({ db: new SellerDatabase(required("SUPABASE_URL"), required("SUPABASE_SERVICE_ROLE_KEY")), snapshotKey: required("SELLER_STATE_KEY"), origin, facilitatorUrl: required("FACILITATOR_URL"), facilitatorKey: required("FACILITATOR_SHARED_KEY"), allowedBuyers: new Set(required("SELLER_ALLOWED_BUYERS").split(",")), claudeKey: required("CLAUDE_API_KEY"), ...(process.env.DIRECTORY_WALRUS_AGGREGATOR ? { directoryAggregator: process.env.DIRECTORY_WALRUS_AGGREGATOR } : {}) })
     .then((service) => { const server = service.createServer(); server.listen(port, "0.0.0.0"); const close = () => server.close(() => { service.close(); process.exit(0); }); process.on("SIGINT", close); process.on("SIGTERM", close); })
     .catch((error) => { process.stderr.write(`${error instanceof Error ? error.message : "seller service failed"}\n`); process.exitCode = 1; });
 }

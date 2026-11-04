@@ -13,6 +13,7 @@ import { executeMandated, type AgentMandate } from "./mandate.js";
 import type { Phase3App } from "./phase3.js";
 import { canonicalJson, settlementMandateHash, validateSettlementPlan, type SettlementPlanV1 } from "./settlement.js";
 import type { SellerDelivery, ServiceRequest } from "./seller-runtime.js";
+import { validateDirectoryOrigin } from "./seller-directory.js";
 
 type LiveNegotiation = DealNegotiation & { sessionId: string; agreementHash: string; agreedAmount: string; resourceUrl?: string; sellerOrigin: string; sellerTransportPublicKey: string; };
 const halves = (hash: string): [string, string] => [BigInt(`0x${hash.slice(0, 32)}`).toString(), BigInt(`0x${hash.slice(32)}`).toString()];
@@ -24,18 +25,25 @@ const offerSignatureBytes = (sessionId: string, capabilityId: string, buyerPubli
 export class LiveDealPorts implements DealPorts {
   readonly #blobs!: WalrusDealBlobs;
   readonly #origins!: URL[];
+  readonly #directory?: URL;
   constructor(private readonly app: Phase3App, private readonly mandate: AgentMandate, private readonly http: typeof fetch = fetch) {
     if (app.profile.role !== "buyer" || app.profile.mock) fail("DEAL_LIVE_REQUIRED", "built-in deal adapter requires a live buyer role");
     const path = join(app.home, "deal-sellers.json");
     let source: unknown;
     try { if ((statSync(path).mode & 0o077) !== 0) fail("DEAL_SELLERS_PERMISSIONS", "seller catalog configuration must be owner-only"); source = JSON.parse(readFileSync(path, "utf8")); }
     catch (error) { return fail("DEAL_SELLERS_NOT_CONFIGURED", "buyer requires owner-only deal-sellers.json containing seller origins", error); }
-    if (!Array.isArray(source) || !source.length || source.length > 32) return fail("DEAL_SELLERS_INVALID", "seller catalog configuration requires 1..32 origins");
-    this.#origins = (source as unknown[]).map((value: unknown) => {
+    const config: { origins?: unknown[]; directoryUrl?: string } = Array.isArray(source) ? { origins: source } : source as { origins?: unknown[]; directoryUrl?: string };
+    if (!config || !Array.isArray(config.origins) || config.origins.length > 32 || !config.origins.length && !config.directoryUrl) return fail("DEAL_SELLERS_INVALID", "seller configuration requires a directory or 1..32 origins");
+    this.#origins = config.origins.map((value: unknown) => {
       const url = new URL(String(value));
       if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname)) || url.username || url.password || url.pathname !== "/" || url.search || url.hash) fail("DEAL_SELLERS_INVALID", "seller origin must be HTTPS or loopback HTTP without path or credentials");
       return url;
     });
+    if (config.directoryUrl) {
+      const url = new URL(config.directoryUrl);
+      if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname)) || url.username || url.password || url.pathname !== "/" || url.search || url.hash) fail("DEAL_SELLERS_INVALID", "directory URL must be an HTTPS or loopback origin");
+      this.#directory = url;
+    }
     this.#blobs = new WalrusDealBlobs(app, http);
   }
   readBlob(blobId: string): Promise<Uint8Array> { return this.#blobs.read(blobId); }
@@ -53,33 +61,38 @@ export class LiveDealPorts implements DealPorts {
   }
   async catalog(): Promise<Array<{ origin: string; registration: SignedCapabilityRegistration }>> {
     const found: Array<{ origin: string; registration: SignedCapabilityRegistration }> = [];
-    for (const origin of this.#origins) {
-      const catalog = await this.request(origin.toString(), "/v2/catalog");
+    const sources = this.#origins.map((origin) => ({ origin, path: "/v2/catalog" }));
+    if (this.#directory) sources.push({ origin: this.#directory, path: "/v2/directory/catalog" });
+    for (const { origin, path } of sources) {
+      let offset = 0;
+      do {
+      const catalog = await this.request(origin.toString(), path === "/v2/directory/catalog" ? `${path}?offset=${offset}` : path);
       if (!Array.isArray(catalog.capabilities) || catalog.capabilities.length > 100) fail("SELLER_CATALOG_INVALID", "seller catalog is invalid");
       for (const item of catalog.capabilities as unknown[]) {
         const registration = item as SignedCapabilityRegistration;
         await verifySignedCapability(registration);
-        if (new URL(registration.manifest.endpoint).origin !== origin.origin) fail("SELLER_CATALOG_INVALID", "signed capability points outside catalog seller origin");
+        if (path === "/v2/catalog" && new URL(registration.manifest.endpoint).origin !== origin.origin) fail("SELLER_CATALOG_INVALID", "signed capability points outside catalog seller origin");
         if (!this.mandate.allowedCounterparties.includes(registration.manifest.sellerId) || this.mandate.allowedCapabilityIds && !this.mandate.allowedCapabilityIds.includes(registration.manifest.capabilityId) || this.mandate.allowedCapabilityClasses && !this.mandate.allowedCapabilityClasses.includes(registration.manifest.capability)) continue;
+        if (path === "/v2/directory/catalog") {
+          const endpoint = await validateDirectoryOrigin(registration.manifest.endpoint);
+          const served = await this.request(endpoint.origin, "/v2/catalog");
+          if (!Array.isArray(served.capabilities) || !served.capabilities.some((item) => canonicalJson(item) === canonicalJson(registration))) fail("SELLER_CATALOG_INVALID", "directory listing is no longer served by the seller");
+        }
         const readback = await this.readBlob(registration.manifestBlobId);
         if (canonicalJson(JSON.parse(Buffer.from(readback).toString())) !== canonicalJson(registration.manifest)) fail("CAPABILITY_BLOB_MISMATCH", "Walrus capability blob differs from signed manifest");
-        found.push({ origin: origin.origin, registration });
+        found.push({ origin: new URL(registration.manifest.endpoint).origin, registration });
       }
+      if (path !== "/v2/directory/catalog" || catalog.nextOffset === undefined) break;
+      if (catalog.nextOffset !== offset + 100 || (catalog.capabilities as unknown[]).length !== 100) fail("SELLER_CATALOG_INVALID", "directory pagination is invalid");
+      offset = catalog.nextOffset as number;
+      if (offset > 100_000) fail("SELLER_CATALOG_INVALID", "directory contains too many listings");
+      } while (true);
     }
     return found;
   }
   async discover(input: ExecuteDealInput): Promise<SignedCapabilityRegistration> {
-    const candidates: SignedCapabilityRegistration[] = [];
-    for (const origin of this.#origins) {
-      const catalog = await this.request(origin.toString(), "/v2/catalog");
-      if (!Array.isArray(catalog.capabilities) || catalog.capabilities.length > 100) return fail("SELLER_CATALOG_INVALID", "seller catalog is invalid");
-      for (const item of catalog.capabilities) {
-        const registration = item as SignedCapabilityRegistration;
-        await verifySignedCapability(registration);
-        if (new URL(registration.manifest.endpoint).origin !== origin.origin) fail("SELLER_CATALOG_INVALID", "signed capability points outside catalog seller origin");
-        if ((input.capabilityId && registration.manifest.capabilityId === input.capabilityId || input.capabilityClass && registration.manifest.capability === input.capabilityClass) && registration.manifest.asset === input.budget.asset) candidates.push(registration);
-      }
-    }
+    const candidates = (await this.catalog()).map(({ registration }) => registration).filter((registration) =>
+      (input.capabilityId && registration.manifest.capabilityId === input.capabilityId || input.capabilityClass && registration.manifest.capability === input.capabilityClass) && registration.manifest.asset === input.budget.asset);
     if (!candidates.length) fail("DEAL_CAPABILITY_NOT_FOUND", "configured sellers have no matching signed capability");
     candidates.sort((a, b) => BigInt(a.manifest.priceBand.minimum) < BigInt(b.manifest.priceBand.minimum) ? -1 : BigInt(a.manifest.priceBand.minimum) > BigInt(b.manifest.priceBand.minimum) ? 1 : a.manifest.capabilityId.localeCompare(b.manifest.capabilityId));
     return candidates[0]!;

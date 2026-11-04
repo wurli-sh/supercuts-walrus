@@ -23,7 +23,8 @@
     "supercuts-seller-live": "dist/seller-live-cli.js",
     "supercuts-seller-register": "dist/seller-register-cli.js",
     "supercuts-seller-v2-provision": "dist/seller-v2-provision.js",
-    "supercuts-hosted-exit": "dist/hosted-exit-cli.js"
+    "supercuts-hosted-exit": "dist/hosted-exit-cli.js",
+    "supercuts-seller-directory": "dist/seller-directory-cli.js"
   },
   "files": [
     "dist",

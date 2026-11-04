@@ -48,3 +48,20 @@ test("hosted seller exposes signed v2 catalog while preserving v1 routes", async
   const v1Db = { ...db, getSnapshot: async () => ({ payload: encryptSellerSnapshot(wrongPool, stateKey), revision: 0 }) } as unknown as SellerDatabase;
   await assert.rejects(() => SellerService.create({ db: v1Db, snapshotKey: stateKey, origin, facilitatorUrl: origin, facilitatorKey: "local-test-key", allowedBuyers: new Set(), claudeKey: "local-test-key" }), /separate v2 seller role home/);
 });
+
+test("hosted directory serves bounded catalog pages independently of seller state", async () => {
+  const offsets: number[] = [];
+  const db = { listCatalog: async () => [], listDirectory: async (_now: number, offset = 0) => { offsets.push(offset); return []; } } as unknown as SellerDatabase;
+  const service = await SellerService.create({ db, snapshotKey: Buffer.alloc(32, 9).toString("base64url"), origin: "http://127.0.0.1:8788", facilitatorUrl: "http://127.0.0.1:8788", facilitatorKey: "test", allowedBuyers: new Set(), claudeKey: "test", directoryAggregator: "https://aggregator.example" });
+  const server = service.createServer();
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const address = server.address(); assert(address && typeof address === "object");
+  try {
+    const origin = `http://127.0.0.1:${address.port}`;
+    const response = await fetch(`${origin}/v2/directory/catalog?offset=100`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { capabilities: [] });
+    assert.deepEqual(offsets, [100]);
+    assert.equal((await fetch(`${origin}/v2/directory/catalog?offset=-1`)).status, 400);
+  } finally { await new Promise<void>((done) => server.close(() => done())); service.close(); }
+});
