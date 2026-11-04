@@ -1,5 +1,5 @@
 {
-  "name": "@supercuts/backend",
+  "name": "@supercuts-walrus/backend",
   "version": "0.1.0",
   "private": false,
   "type": "module",

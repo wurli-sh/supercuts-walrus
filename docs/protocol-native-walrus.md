@@ -675,7 +675,7 @@ relays the buyer-signed payment; it is not the seller resource.
    `memory.status` drain behavior behind this worker; leave diagnostic memory
    commands available for operators.
 3. **Add the orchestration API.** Implement `execute/status/resume/getEvidence`
-   in the backend and thin methods in `@supercuts/sdk`. Bind the existing
+   in the backend and thin methods in `@supercuts-walrus/sdk`. Bind the existing
    mandate, settlement plan, agreement, x402 challenge or shielded proof,
    delivery, and outcome to one operation ID. The procurement demo becomes a
    client of this API rather than the owner of the settlement sequence.

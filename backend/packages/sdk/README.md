@@ -5,18 +5,18 @@ Memory to carry policy and outcome context into later deals. The SDK exposes
 that workflow through typed role clients while the runtime enforces the owner's
 mandate and verifies payment evidence.
 
-`@supercuts/sdk` is a typed, role-scoped wrapper over the one-request Supercuts
+`@supercuts-walrus/sdk` is a typed, role-scoped wrapper over the one-request Supercuts
 subprocess seam. Wallet keys, state keys, witnesses, and service credentials stay
 inside the Supercuts process; the SDK receives intents and verified receipts.
 
 Install the SDK. It installs the matching backend runtime automatically:
 
 ```sh
-pnpm add @supercuts/sdk@0.1.0
+pnpm add @supercuts-walrus/sdk@0.1.0
 ```
 
 ```ts
-import { BuyerClient, initializeProfile } from "@supercuts/sdk";
+import { BuyerClient, initializeProfile } from "@supercuts-walrus/sdk";
 
 await initializeProfile({ home: "/private/buyer" }, { role: "buyer", mock: true });
 const buyer = await BuyerClient.connect({

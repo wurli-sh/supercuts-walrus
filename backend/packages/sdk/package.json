@@ -1,5 +1,5 @@
 {
-  "name": "@supercuts/sdk",
+  "name": "@supercuts-walrus/sdk",
   "version": "0.1.0",
   "description": "Typed, role-scoped TypeScript SDK for Supercuts",
   "license": "Apache-2.0",
@@ -21,7 +21,7 @@
     "test": "tsx --test test/**/*.test.ts"
   },
   "dependencies": {
-    "@supercuts/backend": "workspace:0.1.0"
+    "@supercuts-walrus/backend": "workspace:0.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

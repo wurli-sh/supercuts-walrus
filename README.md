@@ -91,7 +91,7 @@ Auditor
 ```
 
 ```text
-Agent-facing CLI / MCP / @supercuts/sdk
+Agent-facing CLI / MCP / @supercuts-walrus/sdk
   ↓
 Role-scoped backend runtime · mandate · encrypted SQLite · operation journal
   ├── Walrus capabilities and encrypted transcripts

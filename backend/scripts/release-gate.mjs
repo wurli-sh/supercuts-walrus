@@ -36,7 +36,7 @@ try {
   }
   const packedSdk = JSON.parse(run("tar", ["-xOzf", sdkTar, "package/package.json"], root));
   const packedBackend = JSON.parse(run("tar", ["-xOzf", backendTar, "package/package.json"], root));
-  assert.equal(packedSdk.dependencies["@supercuts/backend"], packedBackend.version);
+  assert.equal(packedSdk.dependencies["@supercuts-walrus/backend"], packedBackend.version);
   assert.equal(packedSdk.version, packedBackend.version);
   const project = join(root, "consumer");
   run("mkdir", [project], root);
@@ -44,7 +44,7 @@ try {
   // Seed the unpublished backend tarball locally, then install only the SDK tarball.
   run("npm", ["install", "--no-audit", "--no-fund", backendTar], project);
   run("npm", ["install", "--no-audit", "--no-fund", sdkTar], project);
-  const installed = JSON.parse(readFileSync(join(project, "node_modules/@supercuts/backend/package.json"), "utf8"));
+  const installed = JSON.parse(readFileSync(join(project, "node_modules/@supercuts-walrus/backend/package.json"), "utf8"));
   assert.equal(installed.version, packedSdk.version);
   const bin = join(project, "node_modules/.bin");
   assert.match(run(join(bin, "supercuts"), ["help"], project), /setup buyer/);
@@ -56,7 +56,7 @@ try {
   assert.equal(malformedSeam.error.code, "SEAM_REQUEST_INVALID");
   const malformedMcp = await rpc(join(bin, "supercuts-mcp"), { jsonrpc: "2.0", id: 3, method: "tools/list", params: [] }, project, { SUPERCUTS_HOME: join(root, "unconfigured") });
   assert.equal(malformedMcp.error.code, -32600);
-  const moduleUrl = new URL(`file://${join(project, "node_modules/@supercuts/sdk/dist/index.js")}`);
+  const moduleUrl = new URL(`file://${join(project, "node_modules/@supercuts-walrus/sdk/dist/index.js")}`);
   const { initializeProfile, BuyerClient } = await import(moduleUrl.href);
   const home = join(root, "buyer");
   await initializeProfile({ home }, { role: "buyer", mock: true });

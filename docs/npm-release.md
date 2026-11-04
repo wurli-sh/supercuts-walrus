@@ -1,6 +1,6 @@
 # npm release preparation
 
-Supercuts 0.1.0 is an unpublished pair: `@supercuts/sdk` depends on the exact matching `@supercuts/backend` version. Both are ESM packages for Node 22.13 or later. The deployed pool in `config/phase1.testnet.json` is experimental and Testnet only. Existing v1 notes stay on the v1 pool.
+Supercuts 0.1.0 is an unpublished pair: `@supercuts-walrus/sdk` depends on the exact matching `@supercuts-walrus/backend` version. Both are ESM packages for Node 22.13 or later. The deployed pool in `config/phase1.testnet.json` is experimental and Testnet only. Existing v1 notes stay on the v1 pool.
 
 ## Install and try locally
 
@@ -14,7 +14,7 @@ pnpm test:sdk
 pnpm release:gate
 ```
 
-The gate builds and packs both packages, checks tarball contents (including the Apache-2.0 license) and matching versions, installs them in a clean temporary project, then exercises CLI help, the seam, setup and role MCP tools, and a non-funded SDK mock payment. It does not publish or send a Testnet transaction. It seeds the unpublished backend tarball locally before installing the SDK tarball; after publication, `npm install @supercuts/sdk@0.1.0` installs the backend dependency itself.
+The gate builds and packs both packages, checks tarball contents (including the Apache-2.0 license) and matching versions, installs them in a clean temporary project, then exercises CLI help, the seam, setup and role MCP tools, and a non-funded SDK mock payment. It does not publish or send a Testnet transaction. It seeds the unpublished backend tarball locally before installing the SDK tarball; after publication, `npm install @supercuts-walrus/sdk@0.1.0` installs the backend dependency itself.
 
 For a local mock trial, create a distinct owner-only home for each role. The SDK example in [the SDK guide](../backend/packages/sdk/README.md) shows a buyer client with an approval provider. Mock receipts say `deterministic-mock-not-funded` and are not settlement evidence.
 
@@ -35,7 +35,7 @@ Run `supercuts doctor --home <buyer-home>` for the role runtime checks, then `su
 
 ## Publishing handoff
 
-The release owner must confirm that the npm account has permission to publish under the `@supercuts` organization scope. Run `npm whoami` and check organization membership in the npm account settings. A 403 from `npm org ls supercuts` does not establish publishing access. The npm requirement is documented in the [organization scoped package guide](https://docs.npmjs.com/creating-and-publishing-an-organization-scoped-package/).
+The release owner must confirm that the npm account has permission to publish under the `@supercuts-walrus` organization scope. Run `npm whoami` and check organization membership in the npm account settings. The npm requirement is documented in the [organization scoped package guide](https://docs.npmjs.com/creating-and-publishing-an-organization-scoped-package/).
 
 From the repository root, after the gate passes, build release tarballs outside the repository. Publish the backend first because the SDK depends on its exact version:
 
@@ -43,11 +43,11 @@ From the repository root, after the gate passes, build release tarballs outside 
 release_dir=$(mktemp -d)
 pnpm --dir backend pack --pack-destination "$release_dir"
 pnpm --dir backend/packages/sdk pack --pack-destination "$release_dir"
-npm publish "$release_dir/supercuts-backend-0.1.0.tgz" --access public --dry-run
-npm publish "$release_dir/supercuts-sdk-0.1.0.tgz" --access public --dry-run
+npm publish "$release_dir/supercuts-walrus-backend-0.1.0.tgz" --access public --dry-run
+npm publish "$release_dir/supercuts-walrus-sdk-0.1.0.tgz" --access public --dry-run
 # After reviewing both dry runs and confirming scope access:
-npm publish "$release_dir/supercuts-backend-0.1.0.tgz" --access public
-npm publish "$release_dir/supercuts-sdk-0.1.0.tgz" --access public
+npm publish "$release_dir/supercuts-walrus-backend-0.1.0.tgz" --access public
+npm publish "$release_dir/supercuts-walrus-sdk-0.1.0.tgz" --access public
 ```
 
-Publishing is irreversible for a version. Verify both packages with `npm view @supercuts/backend@0.1.0 version` and `npm view @supercuts/sdk@0.1.0 version`, then install the SDK in a clean project. If npm requires interactive authentication or a one-time code, complete it in the terminal; never put npm credentials in the repository.
+Publishing is irreversible for a version. Verify both packages with `npm view @supercuts-walrus/backend@0.1.0 version` and `npm view @supercuts-walrus/sdk@0.1.0 version`, then install the SDK in a clean project. If npm requires interactive authentication or a one-time code, complete it in the terminal; never put npm credentials in the repository.

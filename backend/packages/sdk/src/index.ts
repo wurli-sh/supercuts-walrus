@@ -81,12 +81,12 @@ interface SeamEnvelope { protocol: number; requestId: string | null; ok: boolean
 interface SeamRequest { protocol: 1; requestId: string; method: string; home?: string; params?: Record<string, unknown>; }
 
 function defaultSeamPath(): string {
-  try { return require.resolve("@supercuts/backend/seam"); }
-  catch { throw new SeamUnavailable(`@supercuts/backend@${SDK_VERSION} is missing. Reinstall @supercuts/sdk to restore its runtime dependency.`); }
+  try { return require.resolve("@supercuts-walrus/backend/seam"); }
+  catch { throw new SeamUnavailable(`@supercuts-walrus/backend@${SDK_VERSION} is missing. Reinstall @supercuts-walrus/sdk to restore its runtime dependency.`); }
 }
 class Seam {
   readonly #path: string; readonly #timeout: number;
-  constructor(private readonly config: SupercutsSdkConfig) { this.#path = config.seamPath ?? defaultSeamPath(); this.#timeout = config.timeoutMs ?? 300_000; if (!Number.isSafeInteger(this.#timeout) || this.#timeout <= 0) throw new TypeError("timeoutMs must be a positive integer"); if (!existsSync(this.#path)) throw new SeamUnavailable(`Supercuts runtime file is missing at ${this.#path}. Reinstall @supercuts/sdk and @supercuts/backend.`); }
+  constructor(private readonly config: SupercutsSdkConfig) { this.#path = config.seamPath ?? defaultSeamPath(); this.#timeout = config.timeoutMs ?? 300_000; if (!Number.isSafeInteger(this.#timeout) || this.#timeout <= 0) throw new TypeError("timeoutMs must be a positive integer"); if (!existsSync(this.#path)) throw new SeamUnavailable(`Supercuts runtime file is missing at ${this.#path}. Reinstall @supercuts-walrus/sdk and @supercuts-walrus/backend.`); }
   async call<T>(method: string, params?: Record<string, unknown>, withHome = true): Promise<T> {
     const request: SeamRequest = { protocol: SEAM_PROTOCOL, requestId: randomUUID(), method, ...(withHome ? { home: this.config.home } : {}), ...(params ? { params } : {}) };
     return await new Promise<T>((resolve, reject) => {

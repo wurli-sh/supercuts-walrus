@@ -53,7 +53,7 @@ manifest, seller, endpoint/session, asset, network, rail, request, and amount
 before signing or proving. `supercuts settlement approve-review` is an owner-only
 CLI path and is intentionally absent from MCP and the agent SDK.
 
-`@supercuts/sdk` is built from `packages/sdk`. It resolves the matching
+`@supercuts-walrus/sdk` is built from `packages/sdk`. It resolves the matching
 `supercuts-seam` binary from this package and exchanges one protocol-v1 request
 per subprocess. SDK mutations use exact-intent approval tokens instead of the
 legacy CLI `--authorize` boolean.
