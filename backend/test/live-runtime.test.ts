@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -9,6 +9,8 @@ import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { Phase3App, initialize } from "../src/phase3.js";
 import { ProtocolEngine } from "../src/protocol-engine.js";
 import { Groth16Prover } from "../src/prover.js";
+import { LiveRuntime } from "../src/live-runtime.js";
+import { RoleStore } from "../src/store.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const deployment = JSON.parse(readFileSync(resolve(root, "config/pool-v1.testnet.json"), "utf8")) as any;
@@ -41,4 +43,17 @@ test("live initialization provisions separate encrypted signing and transport id
   const result = initialize(home, { role: "buyer", "deployment-config": resolve(root, "config/pool-v1.testnet.json"), "sui-key-file": suiKey, "tatum-key-file": tatumKey, "write-grpc": "https://fullnode.testnet.sui.io:443", "tatum-grpc": "https://example.invalid:443", rapidsnark: resolve(root, "circuits/build/tools/rapidsnark-src/build_prover/src/prover") });
   assert.equal(result.data.mock, false); const app = new Phase3App(home);
   try { assert.equal(app.profile.version, 2); assert.equal(app.store.getSecret("identity:babyjub-seed")?.length, 32); assert.notDeepEqual(app.store.getSecret("identity:x25519-private"), app.store.getSecret("identity:x25519-public")); assert.equal(app.store.getSecret("live:tatum-api-key")?.toString(), "test-key-not-used"); } finally { app.close(); }
+});
+
+test("an unsigned prepared note can follow a new root but an indexed note cannot move", () => {
+  const store = new RoleStore(join(mkdtempSync(join(tmpdir(), "supercuts-note-rebase-")), "state.sqlite"), randomBytes(32));
+  try {
+    const runtime = Object.create(LiveRuntime.prototype) as { store: RoleStore; prepareOpening: (opening: unknown, role: "input", operationId: string, leaves: bigint[]) => void };
+    Object.assign(runtime, { store });
+    const opening = { deployment: 1n, amount: 10n, ownerAx: 2n, ownerAy: 3n, spendSecret: 4n, salt: 5n, commitment: 6n, leafIndex: 0n };
+    runtime.prepareOpening(opening, "input", "deposit-1", []);
+    runtime.prepareOpening({ ...opening, leafIndex: 1n }, "input", "deposit-1", [7n]);
+    assert.equal((store.db.prepare("SELECT leaf_index FROM notes WHERE commitment=?").get("0".repeat(63) + "6") as { leaf_index: string }).leaf_index, "1");
+    assert.throws(() => runtime.prepareOpening({ ...opening, leafIndex: 2n }, "input", "deposit-1", [7n, 6n]), { code: "NOTE_ID_CONFLICT" });
+  } finally { store.close(); }
 });

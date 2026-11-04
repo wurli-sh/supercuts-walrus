@@ -69,6 +69,11 @@ test("built-in live buyer and seller exchange encrypted signed agreement through
     assert.equal(negotiated.agreementBlobId, negotiated.transcriptBlobs[1]!.blobId);
     const saved = seller.store.db.prepare("SELECT agreement FROM live_seller_agreements WHERE session_id=?").get(negotiated.sessionId) as { agreement: string };
     assert.equal(JSON.parse(saved.agreement).taskHash.length, 64);
+    const buyerRuntime = await LiveRuntime.create(buyer.profile as LiveRuntimeProfile, buyer.store);
+    assert.throws(() => buyerRuntime.acceptAgreement("another-session", Buffer.from(saved.agreement).toString("base64url")), { code: "AGREEMENT_INVALID" });
+    assert.equal(buyer.store.db.prepare("SELECT 1 FROM live_agreements WHERE session_id='another-session'").get(), undefined);
+    const malformedSignature = { ...JSON.parse(saved.agreement), sessionId: "another-session", sellerSignature: { R8x: "bad", R8y: "0", S: "0" } };
+    assert.throws(() => buyerRuntime.acceptAgreement("another-session", Buffer.from(JSON.stringify(malformedSignature)).toString("base64url")), { code: "AGREEMENT_INVALID" });
     assert.equal(Buffer.from(await ports.readBlob(negotiated.agreementBlobId)).includes(Buffer.from("Sui")), false);
     const repeat = await ports.negotiate(input, found, plan, dealChildId(input.operationId, "agreement"));
     assert.equal(repeat.agreementHash, negotiated.agreementHash);
@@ -82,6 +87,9 @@ test("built-in live buyer and seller exchange encrypted signed agreement through
     const publicRequest = { dealId: input.operationId, capabilityId: manifest.capabilityId, input: input.input, requestId: negotiated.sessionId, paymentDigest: "public-digest", agreementHash: negotiated.agreementHash, agreedAmount: "10", rail: "x402" as const };
     chain.value = { Transaction: { digest: "public-digest", status: { success: true }, checkpoint: "123", transaction: { sender: buyerSigner.toSuiAddress() }, balanceChanges: [{ address: sellerSigner.toSuiAddress(), coinType: manifest.asset, amount: "10" }] } };
     assert.equal((await verifier.verify(publicRequest)).digest, "public-digest");
+    (runtime.tatum as unknown as { getTransaction: (digest: string) => Promise<unknown> }).getTransaction = async (digest) => ({ transaction: { digest, checkpoint: 124n, effects: { status: { success: true } } } });
+    await assert.rejects(verifier.verify(publicRequest), { code: "TATUM_TRANSACTION_MISMATCH" });
+    (runtime.tatum as unknown as { getTransaction: (digest: string) => Promise<unknown> }).getTransaction = async (digest) => ({ transaction: { digest, checkpoint: 123n, effects: { status: { success: true } } } });
     const deliveredPublic = await ports.deliver(input, plan, negotiated, { transactionDigest: "public-digest", finalized: true, tatumVerified: true }, dealChildId(input.operationId, "delivery"));
     assert.equal("pending" in deliveredPublic, false);
     if ("pending" in deliveredPublic) throw new Error("public delivery unexpectedly pending");

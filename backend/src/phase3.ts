@@ -460,7 +460,7 @@ export class Phase3App {
     if (typeof args["plan-hash"] !== "string") return;
     const plan = this.storedPlan(args["plan-hash"]), mandate = this.planningMandate(args), session = String(accepted.sessionId), amount = String(accepted.paymentAmount), counterparty = String(accepted.counterparty);
     if (plan.status !== "approved" || plan.rail !== "shielded" || Date.now() >= plan.expiresAt || plan.mandateHash !== settlementMandateHash(mandate)) fail("SETTLEMENT_PLAN_BINDING_MISMATCH", "accepted agreement is not authorized by an active shielded plan");
-    if (counterparty !== plan.sellerId || BigInt(amount) < BigInt(plan.manifestMinimum) || BigInt(amount) > BigInt(plan.maximumAmount) || accepted.capabilityId !== undefined && accepted.capabilityId !== plan.capabilityId || accepted.manifestHash !== undefined && accepted.manifestHash !== plan.manifestHash) fail("SETTLEMENT_PLAN_BINDING_MISMATCH", "accepted agreement differs from the planned capability, seller, or amount bounds");
+    if (counterparty !== plan.sellerId || BigInt(amount) < BigInt(plan.manifestMinimum) || BigInt(amount) > BigInt(plan.maximumAmount) || accepted.capabilityId !== plan.capabilityId || accepted.manifestHash !== plan.manifestHash) fail("SETTLEMENT_PLAN_BINDING_MISMATCH", "accepted agreement differs from the planned capability, seller, or amount bounds");
     const bindingHash = hash(canonicalJson({ domain: "supercuts-settlement-agreement-v1", session, planHash: plan.planHash, amount, counterparty, capabilityId: accepted.capabilityId ?? plan.capabilityId, manifestHash: accepted.manifestHash ?? plan.manifestHash }));
     const existing = this.store.db.prepare("SELECT plan_hash,binding_hash FROM settlement_agreement_bindings WHERE session_id=? OR plan_hash=?").get(session, plan.planHash) as { plan_hash: string; binding_hash: string } | undefined;
     if (existing && (existing.plan_hash !== plan.planHash || existing.binding_hash !== bindingHash)) fail("SETTLEMENT_PLAN_BINDING_MISMATCH", "session or plan is already bound to another agreement");
@@ -479,7 +479,7 @@ export class Phase3App {
     if (rail === "shielded" && actual.session) {
       const agreement = this.store.db.prepare("SELECT plan_hash FROM settlement_agreement_bindings WHERE session_id=?").get(actual.session) as { plan_hash: string } | undefined;
       if (agreement && agreement.plan_hash !== plan.planHash) fail("SETTLEMENT_PLAN_BINDING_MISMATCH", "shielded agreement is bound to another plan");
-      if (!agreement && !this.profile.mock) { const agreementHash = hash(canonicalJson({ domain: "supercuts-settlement-agreement-v1", session: actual.session, planHash: plan.planHash, amount: actual.amount, counterparty: actual.counterparty, capabilityId: plan.capabilityId, manifestHash: plan.manifestHash })); this.store.db.prepare("INSERT INTO settlement_agreement_bindings(session_id,plan_hash,binding_hash,created_at) VALUES(?,?,?,?)").run(actual.session, plan.planHash, agreementHash, now); }
+      if (!agreement && !this.profile.mock) fail("SETTLEMENT_PLAN_BINDING_MISMATCH", "shielded payment has no accepted agreement bound to this plan");
     }
     const value = BigInt(actual.amount); if (value < BigInt(plan.manifestMinimum) || value > BigInt(plan.maximumAmount)) fail("SETTLEMENT_PLAN_AMOUNT_EXCEEDED", "execution amount is outside the planned manifest bounds");
     const binding = { planHash: plan.planHash, operationId, capabilityId: plan.capabilityId, manifestHash: plan.manifestHash, rail, amount: actual.amount, counterparty: actual.counterparty, asset: actual.asset, endpoint: actual.endpoint ?? null, requestId: actual.requestId, session: actual.session ?? null, requirementsHash: actual.requirementsHash ?? null };
@@ -537,7 +537,17 @@ export class Phase3App {
       return output(command, { ...queued, amount: queued.amount.toString() });
     }
     if (command === "wallet.exit.finalize") return output(command, await runtime.finalizeV2Exit(required(args, "exit-id"), required(args, "digest"), V2_RELAYER));
-    if (command === "offer.accept") { const accepted = typeof args.agreement === "string" ? runtime.acceptAgreement(required(args, "session"), args.agreement) : this.localOffer(command, args); if (typeof args["plan-hash"] === "string") this.bindAcceptedAgreement(args, accepted); this.enqueueVerifiedOutcome("agreement", typeof args["operation-id"] === "string" ? args["operation-id"] : `${String(accepted.sessionId)}:${String(accepted.revision)}`, { status: "accepted", commitment: accepted.dealCommitment ?? accepted.transcriptCommitment }, typeof args["plan-hash"] === "string" ? args["plan-hash"] : undefined); return output(command, accepted); }
+    if (command === "offer.accept") {
+      this.store.db.exec("BEGIN IMMEDIATE");
+      let accepted: Record<string, unknown>;
+      try {
+        accepted = typeof args.agreement === "string" ? runtime.acceptAgreement(required(args, "session"), args.agreement) : this.localOffer(command, args);
+        if (typeof args["plan-hash"] === "string") this.bindAcceptedAgreement(args, accepted);
+        this.store.db.exec("COMMIT");
+      } catch (error) { this.store.db.exec("ROLLBACK"); throw error; }
+      this.enqueueVerifiedOutcome("agreement", typeof args["operation-id"] === "string" ? args["operation-id"] : `${String(accepted.sessionId)}:${String(accepted.revision)}`, { status: "accepted", commitment: accepted.dealCommitment ?? accepted.transcriptCommitment }, typeof args["plan-hash"] === "string" ? args["plan-hash"] : undefined);
+      return output(command, accepted);
+    }
     if (command === "offer.counter") return output(command, typeof args.agreement === "string" ? runtime.prepareSellerAgreement(required(args, "session"), args.agreement) : this.localOffer(command, args));
     if (command === "pay.shielded") { const receipt = await runtime.settleShielded(required(args, "session"), required(args, "operation-id"), (actual) => { this.bindSettlementPlan(command, args, actual); }); this.enqueueVerifiedOutcome("settlement", required(args, "operation-id"), receipt, typeof args["plan-hash"] === "string" ? args["plan-hash"] : undefined, { counterparty: String(receipt.counterparty), asset: String(receipt.asset) }); return output(command, receipt); }
     if (command === "pay.x402") { const receipt = await runtime.payX402Resource(required(args, "operation-id"), required(args, "resource-url"), (actual) => { this.bindSettlementPlan(command, args, actual); }); const { response: _response, ...evidence } = receipt; this.enqueueVerifiedOutcome("settlement", required(args, "operation-id"), evidence, typeof args["plan-hash"] === "string" ? args["plan-hash"] : undefined, { counterparty: String(receipt.counterparty), asset: String(receipt.asset) }); return output(command, receipt); }
