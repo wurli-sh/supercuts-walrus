@@ -153,14 +153,12 @@ export class LiveRuntime {
     const delivered = Boolean(this.store.db.prepare("SELECT 1 FROM live_x402_deliveries WHERE operation_id=?").get(operationId));
     if (payment.status === "finalized") return { operationId, status: "finalized", transactionDigest: payment.digest, kind: context?.kind ?? "unknown", deliveryStatus: delivered ? "delivered" : "not-applicable-or-pending", finalized: true, safeToResumeSameOperationId: true };
     if (!reconcile) return { operationId, status: payment.status, transactionDigest: payment.digest, kind: context?.kind ?? "unknown", deliveryStatus: delivered ? "delivered" : "pending", finalized: false, chainStatus: "unchecked", safeToResumeSameOperationId: true };
-    try {
-      const transaction = await this.client.waitForTransaction({ digest: payment.digest, timeout: 5_000, include: { effects: true } });
-      const checkpoint = assertSuiFinality(transaction, payment.digest); await this.confirmTatum(payment.digest, checkpoint);
-      this.store.db.prepare("UPDATE live_signed_transactions SET status='finalized',updated_at=? WHERE operation_id=?").run(Date.now(), operationId);
-      return { operationId, status: "finalized", transactionDigest: payment.digest, kind: context?.kind ?? "unknown", deliveryStatus: delivered ? "delivered" : "pending", finalized: true, checkpoint, tatumVerified: true, safeToResumeSameOperationId: true };
-    } catch {
-      return { operationId, status: payment.status, transactionDigest: payment.digest, kind: context?.kind ?? "unknown", deliveryStatus: delivered ? "delivered" : "pending", finalized: false, chainStatus: "not-found-or-pending", safeToResumeSameOperationId: true };
-    }
+    let transaction;
+    try { transaction = await this.client.waitForTransaction({ digest: payment.digest, timeout: 5_000, include: { effects: true } }); }
+    catch { return { operationId, status: payment.status, transactionDigest: payment.digest, kind: context?.kind ?? "unknown", deliveryStatus: delivered ? "delivered" : "pending", finalized: false, chainStatus: "not-found-or-pending", safeToResumeSameOperationId: true }; }
+    const checkpoint = assertSuiFinality(transaction, payment.digest); await this.confirmTatum(payment.digest, checkpoint);
+    this.store.db.prepare("UPDATE live_signed_transactions SET status='finalized',updated_at=? WHERE operation_id=?").run(Date.now(), operationId);
+    return { operationId, status: "finalized", transactionDigest: payment.digest, kind: context?.kind ?? "unknown", deliveryStatus: delivered ? "delivered" : "pending", finalized: true, checkpoint, tatumVerified: true, safeToResumeSameOperationId: true };
   }
   private prepareOpening(opening: NoteOpeningData, role: "input" | "change", operationId: string, leaves: bigint[]): void {
     const commitment = hex(opening.commitment), key = `note:${commitment}`;
