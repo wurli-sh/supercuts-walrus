@@ -1,6 +1,15 @@
 <img src="docs/assets/supercuts-banner-placeholder.svg" width="100%" alt="Supercuts: private negotiation and settlement for agents, boosted by Walrus Memory" />
 
-[Judges guide](JUDGES.md) · [Architecture](ARCHITECTURE.md) · [Live demo guide](docs/remote-codex-demo.md)
+[Judges guide](JUDGES.md) · [Architecture](ARCHITECTURE.md) · [Live walkthrough](docs/remote-codex-demo.md)
+
+### Terms used here
+
+- **Public payment** uses x402; the Sui transfer exposes the amount and seller payee.
+- **Shielded payment** uses the experimental shielded pool; the deal amount and counterparty are committed in a proof. Pool activity, funding, deposits, withdrawals and gas remain visible.
+- **Walkthrough** refers to the recorded or live sequence. Commands and paths containing `demo` retain their existing names.
+- **Pool version** identifies compatibility. The current pool is v2; existing v1 notes remain on their original pool.
+
+Payments use Sui Testnet. Testnet SUI has no Mainnet value, and the pool is not a production custody system. Walrus Memory uses Mainnet services.
 
 ## Problem
 
@@ -12,14 +21,14 @@ An agent can find work and agree on a price, but the offer exchange and payment 
 
 Public work uses a seller-owned x402 resource and a visible Sui Testnet SUI transfer. Confidential work uses an experimental v2 shielded pool on Sui Testnet: the deal amount and counterparty are committed in a proof rather than published as a direct payment. Walrus stores signed capability registrations and encrypted negotiation transcripts. Walrus Mainnet Memory adds durable, encrypted preferences and outcome facts. A recalled owner rule can change the next settlement choice to shielded; remembered outcomes can inform later agent decisions. The CLI, MCP server, and TypeScript SDK share the same role-scoped runtime.
 
-### Sui Testnet v2 evidence
+### Sui Testnet settlement evidence
 
 The pinned test-only pool has a funded deposit, private transfer, seller note recovery, and standard relayed exit verified by Sui and Tatum. The recorded demo also includes a public x402 payment and a confidential pool payment. Its ten completed live Memory writes were reused and labeled as such; it performed a fresh policy recall.
 
 | Action | Testnet transaction | Record |
 | --- | --- | --- |
-| Standard v2 deposit | `FNBVYbsX7jxQ2uFkZhcgidfcxiBdntyELdEMUbDffvZH` | [v2 pool evidence](docs/pool-v2.md) |
-| Private v2 transfer | `472A2B2bhTR1eELDoYJbU5QRSZCU5MPUQ3unNJhnGnA4` | [v2 pool evidence](docs/pool-v2.md) |
+| Shielded pool deposit | `FNBVYbsX7jxQ2uFkZhcgidfcxiBdntyELdEMUbDffvZH` | [v2 pool evidence](docs/pool-v2.md) |
+| Shielded pool transfer | `472A2B2bhTR1eELDoYJbU5QRSZCU5MPUQ3unNJhnGnA4` | [v2 pool evidence](docs/pool-v2.md) |
 | Standard relayed exit | `GthWzx5kXsZ8DDkGiWZQJKaraDw3PAhHyXv5F9TJ9oGu` | [v2 pool evidence](docs/pool-v2.md) |
 | Recorded public x402 payment | `GrK5gR9SBzGehv63f8xbau58YyiyssZ1pn2AbBT114kE` | [v2 demo record](docs/pool-v2.md) |
 | Recorded confidential payment | `3merQzwRfYuQ2y4gr9Qe2VJTFS4TYHJXiwvQbEtbESwW` | [v2 demo record](docs/pool-v2.md) |
@@ -32,14 +41,14 @@ The pinned test-only pool has a funded deposit, private transfer, seller note re
 | --- | --- |
 | Settlement network | Sui Testnet |
 | Native asset | `0x2::sui::SUI` |
-| v2 Move package | `0x32d104c1ab422d497df4ae3a6861258694949c86428f886ca338e07bd055cf76` |
-| v2 pool object | `0x8fd22140c906495bb5334a497dcdd9112479c638e21c5df4b4cfb66f633a106b` |
+| Shielded pool package | `0x32d104c1ab422d497df4ae3a6861258694949c86428f886ca338e07bd055cf76` |
+| Shielded pool object | `0x8fd22140c906495bb5334a497dcdd9112479c638e21c5df4b4cfb66f633a106b` |
 | Pinned deployment | [`config/phase1.testnet.json`](config/phase1.testnet.json) |
 | Existing v1 note redemption | [`config/pool-v1.testnet.json`](config/pool-v1.testnet.json) |
 | Seal account policy | [`config/seal-policy.testnet.json`](config/seal-policy.testnet.json) |
 | Live-service topology | [`render.yaml`](render.yaml) |
 
-The current pool is v2 and test-only. Existing v1 notes stay on their v1 pool; no migration happens implicitly. The x402 facilitator validates and relays a buyer-signed transaction. A separate seller-owned protected resource issues the `402` challenge and verifies payment before delivering work. See the [remote demo guide](docs/remote-codex-demo.md) for its live service setup.
+The current shielded pool is experimental and runs only on Sui Testnet. Existing v1 notes stay on their v1 pool; no migration happens implicitly. The x402 facilitator validates and relays a buyer-signed transaction. A separate seller-owned protected resource issues the `402` challenge and verifies payment before delivering work. See the [remote demo guide](docs/remote-codex-demo.md) for its live service setup.
 
 ### Testnet (Sui)
 
@@ -193,7 +202,7 @@ sui client balance 0xYOUR_BUYER_ADDRESS --coin-type 0x2::sui::SUI
 # Run supercuts-demo doctor, record the live path, then supercuts-demo check.
 ```
 
-Walrus Mainnet Memory requires 1536-dimensional embeddings. The local `embeddinggemma` model returns 768 dimensions, so use the repository adapter for both writes and recalls and configure model `embeddinggemma-1536`. The exact adapter command and demo safeguards are in [`AGENTS.md`](AGENTS.md). The recorded event stream stays in owner-only local state and is not committed.
+Walrus Mainnet Memory requires 1536-dimensional embeddings. The local adapter supports OpenAI-compatible models producing up to 1536 values and zero-pads shorter vectors. Use the same model and dimensions for writes and recalls. The [`buyer setup guide`](docs/self-service-setup.md) explains configuration; [`AGENTS.md`](AGENTS.md) provides the recorded walkthrough's `embeddinggemma` example and safeguards. The recorded event stream stays in owner-only local state and is not committed.
 
 ---
 

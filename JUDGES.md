@@ -1,6 +1,6 @@
 # Judging Supercuts
 
-Supercuts is a private negotiation and settlement layer for agents, boosted by Walrus Memory. Its CLI, TypeScript SDK, and MCP server let a buyer verify signed seller capabilities, negotiate through an encrypted transcript, pay on the owner-approved rail, and learn from encrypted memories. The live demo uses Sui Testnet for payments and live Walrus services. The shielded pool is experimental and test-only.
+Supercuts is a private negotiation and settlement layer for agents, boosted by Walrus Memory. Its CLI, TypeScript SDK, and MCP server let a buyer verify signed seller capabilities, negotiate through an encrypted transcript, pay on the owner-approved rail, and learn from encrypted memories. The live walkthrough uses Sui Testnet for payments and live Walrus services. The shielded pool is experimental and test-only.
 
 ## Fast review
 
@@ -11,7 +11,7 @@ Supercuts is a private negotiation and settlement layer for agents, boosted by W
 
 There is no public login or hosted judge dashboard in this repository. A fresh funded run needs the operator's service credentials and private role state; those are intentionally excluded from Git.
 
-## Run a fresh live demo
+## Run a fresh live walkthrough
 
 From the repository root, build the backend and follow the setup arguments in the [remote demo guide](docs/remote-codex-demo.md). `supercuts-demo setup --state-dir <path>` creates separate buyer, two public sellers, a confidential seller, and an auditor. It prints the buyer address to fund and the public seller's x402 payee address. Fund **only the generated buyer address**:
 
@@ -29,14 +29,14 @@ The recording should show prefunding before negotiation, capability discovery, s
 | Action | Transaction digest | Source |
 | --- | --- | --- |
 | v2 pool creation | `BnzMqokgQVWwSkRYCCrMTyWwHN6HVdDKWwVDJXTZqC6b` | [`docs/pool-v2.md`](docs/pool-v2.md) |
-| v2 standard deposit | `FNBVYbsX7jxQ2uFkZhcgidfcxiBdntyELdEMUbDffvZH` | [`docs/pool-v2.md`](docs/pool-v2.md) |
-| v2 private transfer | `472A2B2bhTR1eELDoYJbU5QRSZCU5MPUQ3unNJhnGnA4` | [`docs/pool-v2.md`](docs/pool-v2.md) |
-| v2 relayed standard exit | `GthWzx5kXsZ8DDkGiWZQJKaraDw3PAhHyXv5F9TJ9oGu` | [`docs/pool-v2.md`](docs/pool-v2.md) |
-| Recorded demo public x402 | `GrK5gR9SBzGehv63f8xbau58YyiyssZ1pn2AbBT114kE` | [`docs/pool-v2.md`](docs/pool-v2.md) |
-| Recorded demo confidential pool payment | `3merQzwRfYuQ2y4gr9Qe2VJTFS4TYHJXiwvQbEtbESwW` | [`docs/pool-v2.md`](docs/pool-v2.md) |
+| Shielded pool deposit | `FNBVYbsX7jxQ2uFkZhcgidfcxiBdntyELdEMUbDffvZH` | [`docs/pool-v2.md`](docs/pool-v2.md) |
+| Shielded pool transfer | `472A2B2bhTR1eELDoYJbU5QRSZCU5MPUQ3unNJhnGnA4` | [`docs/pool-v2.md`](docs/pool-v2.md) |
+| Relayed pool exit | `GthWzx5kXsZ8DDkGiWZQJKaraDw3PAhHyXv5F9TJ9oGu` | [`docs/pool-v2.md`](docs/pool-v2.md) |
+| Recorded public payment (x402) | `GrK5gR9SBzGehv63f8xbau58YyiyssZ1pn2AbBT114kE` | [`docs/pool-v2.md`](docs/pool-v2.md) |
+| Recorded shielded payment | `3merQzwRfYuQ2y4gr9Qe2VJTFS4TYHJXiwvQbEtbESwW` | [`docs/pool-v2.md`](docs/pool-v2.md) |
 
 The recorded demo event stream is owner-only at `.state/v2-demo/events-v2-accepted.jsonl`; it is not checked in. [`docs/pool-v2.md`](docs/pool-v2.md) reports that `supercuts-demo check --require-claude` passed against it.
 
-## What the demo proves
+## What the walkthrough shows
 
 The public x402 resource issues its own `402` challenge and releases the artifact after payment verification; the facilitator validates and relays the buyer-signed transaction. Its amount and payee are public. The confidential pool transfer avoids a direct public payment naming the seller and deal amount. Deposits, exits, gas, timing, payout addresses, and the presence of pool activity remain public. This Testnet pool is not a production custody system and its small activity set does not support a strong anonymity claim.

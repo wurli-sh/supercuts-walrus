@@ -5,7 +5,7 @@ Walrus Memory. An agent supplies a task and calls protocol tools to discover a
 seller, negotiate encrypted terms, settle under the owner's mandate, and reuse
 typed preferences and verified outcomes in later decisions. The buyer role
 home holds policy, keys, payment state, and Walrus credentials. The agent does
-not call Walrus directly. The current pool is experimental and Sui Testnet-only.
+not call Walrus directly. The shielded pool is experimental and runs only on Sui Testnet.
 
 ## Buyer: configure once
 
@@ -34,13 +34,36 @@ the buyer address printed by `supercuts-demo setup`. Check its balance before a
 live deal. The role home also contains
 `buyer-codex.toml`, which points Codex to the MCP server and a fresh redacted
 event stream. If Codex starts before setup, `setup.status` explains the local
-setup command; restart the MCP connection after completing it.
+setup command. After completing it, call `setup.refresh`; the bootstrap server
+reloads the configured buyer tools without restarting the MCP connection.
 
-Walrus Memory needs the same 1536-dimensional embedding adapter for writes
-and recalls. Start `pnpm --dir circuits embedding:adapter`, point the owner-only
-Memory config at `http://127.0.0.1:8787/v1`, and use
-`embeddinggemma-1536`. Keep the adapter and Memory service running while
-settling deals.
+Use the guided funding commands to budget public payment, shielded payment
+plus positive private change, and gas:
+
+```sh
+supercuts funding prepare --home <buyer-home> \
+  --public-payment <MIST> --shielded-payment <MIST>
+supercuts funding execute --home <buyer-home> \
+  --public-payment <MIST> --shielded-payment <MIST> \
+  --operation-id <stable-id> --request-faucet --confirm
+```
+
+Faucet execution requires confirmation, targets only the generated buyer
+address, and makes at most one allocation request per invocation. The pool
+deposit is separately confirmed and idempotent by operation ID.
+
+Walrus Memory requires 1536-dimensional embeddings. Choose a local model
+with an OpenAI-compatible endpoint and set `EMBEDDING_UPSTREAM_BASE_URL` and
+`EMBEDDING_UPSTREAM_MODEL` before starting `pnpm --dir circuits embedding:adapter`.
+The adapter zero-pads vectors shorter than 1536, passes 1536-dimensional
+vectors through, and rejects larger vectors. Point the owner-only Memory
+configuration at `http://127.0.0.1:8787/v1`; its model name is a client label,
+while `EMBEDDING_UPSTREAM_MODEL` selects the actual model. The existing
+`embeddinggemma-1536` label and `embeddinggemma` upstream remain valid.
+Use the same model and dimensions for writes and recalls; changing them can
+make existing memories incomparable. Keep the adapter and Memory service
+running while settling deals. Embedding endpoints receive memory plaintext;
+use a trusted local endpoint to keep it local.
 
 `supercuts setup renew --home <buyer-home> --config <owner-only-setup.json>`
 updates the standing policy. `totalBudget` is the **lifetime cumulative**
@@ -115,6 +138,17 @@ restart it afterward** so no running instance writes an older snapshot over
 the new revision. The packaged hosted handler serves the configured artifact
 only after exact payment verification; self-hosted sellers may supply arbitrary
 handlers. No seller state or key is copied into a buyer home.
+
+For operator-assisted onboarding, package one hosted capability with:
+
+```sh
+supercuts seller package --home <seller-home> --spec <capability.json> \
+  --artifact <artifact-file> --metadata <output-metadata.json> \
+  --registration <registration.json> --bundle <provisioning.json>
+```
+
+This validates output metadata, publishes and signs the capability, and emits
+an owner-only provisioning bundle plus the exact host-operator command.
 
 To publish a running self-hosted capability to the shared directory, run
 `supercuts-seller-directory publish <owner-only-registration.json>

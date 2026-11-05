@@ -1,6 +1,6 @@
-# Remote seller demo with a Codex buyer
+# Remote marketplace walkthrough with a Codex buyer
 
-This demo shows the Supercuts core flow end to end: agents negotiate privately,
+This walkthrough shows the Supercuts core flow end to end: agents negotiate privately,
 settle on the public or shielded rail, and use Walrus Memory to carry an owner
 privacy rule into the next payment decision. The memory recall must select the
 shielded rail for the confidential analysis.
@@ -70,7 +70,7 @@ Provision the three live seller homes. This publishes their signed manifests to 
 node backend/dist/seller-provision.js .secrets/seller-provision.json
 ```
 
-The seller provision command reads `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `SELLER_STATE_KEY` from the environment. Its config file must be owner-only. Deploy the `supercuts-sellers-testnet` service from [render.yaml](../render.yaml). Set its secret variables: the same three Supabase values, `FACILITATOR_URL`, `FACILITATOR_SHARED_KEY`, `CLAUDE_API_KEY`, and `SELLER_ALLOWED_BUYERS` containing only the buyer address from `run.json`. Use the same facilitator shared key as the existing facilitator deployment. The service exposes `/health`, `/v1/catalog`, encrypted negotiation and agreement APIs, protected x402 resources, and safe event metadata.
+The seller provision command reads `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `SELLER_STATE_KEY` from the environment. Its config file must be owner-only. Deploy the `supercuts-sellers-testnet` service from [render.yaml](../render.yaml). Set its secret variables: the same three Supabase values, `FACILITATOR_URL`, `FACILITATOR_SHARED_KEY`, and `CLAUDE_API_KEY`. Omit or empty `SELLER_ALLOWED_BUYERS` for self-service access by any cryptographically valid buyer; set it to a comma-separated address list for a private offering. Use the same facilitator shared key as the existing facilitator deployment. The service exposes `/health`, `/v1/catalog`, encrypted negotiation and agreement APIs, protected x402 resources, and safe event metadata.
 
 Seed the saved owner privacy rule for the competitor-analysis capability before the Codex task:
 
