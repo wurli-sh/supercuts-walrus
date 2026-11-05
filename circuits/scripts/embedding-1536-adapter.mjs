@@ -1,9 +1,9 @@
 /**
- * OpenAI-compatible embedding adapter for a 768-dimensional local model.
+ * OpenAI-compatible embedding adapter for local models.
  *
  * The Walrus Mainnet relayer indexes 1536-dimensional embeddings. This proxy
  * forwards requests to a local OpenAI-compatible embedding endpoint and
- * zero-pads each 768-dimensional result to 1536 dimensions. Zero-padding
+ * zero-pads shorter results to 1536 dimensions. Zero-padding
  * preserves cosine similarity and Euclidean distance when all writes and
  * searches use this same endpoint.
  */
@@ -13,17 +13,19 @@ export const SOURCE_DIMENSIONS = 768;
 export const TARGET_DIMENSIONS = 1536;
 
 export function padEmbedding(embedding) {
-  if (!Array.isArray(embedding) || embedding.length !== SOURCE_DIMENSIONS) {
-    throw new Error(`expected a ${SOURCE_DIMENSIONS}-dimensional embedding, received ${Array.isArray(embedding) ? embedding.length : "a non-array value"}`);
+  if (!Array.isArray(embedding) || embedding.length < 1 || embedding.length > TARGET_DIMENSIONS) {
+    throw new Error(`expected an embedding with 1 to ${TARGET_DIMENSIONS} dimensions, received ${Array.isArray(embedding) ? embedding.length : "a non-array value"}`);
   }
   if (!embedding.every((value) => typeof value === "number" && Number.isFinite(value))) {
     throw new Error("upstream embedding contains a non-finite value");
   }
-  return [...embedding, ...Array(TARGET_DIMENSIONS - SOURCE_DIMENSIONS).fill(0)];
+  return [...embedding, ...Array(TARGET_DIMENSIONS - embedding.length).fill(0)];
 }
 
 export function transformEmbeddingResponse(payload) {
-  if (!payload || !Array.isArray(payload.data)) throw new Error("upstream response has no data array");
+  if (!payload || !Array.isArray(payload.data) || !payload.data.length) throw new Error("upstream response has no embeddings");
+  const dimension = payload.data[0]?.embedding?.length;
+  if (payload.data.some((item) => item?.embedding?.length !== dimension)) throw new Error("upstream embeddings have inconsistent dimensions");
   return { ...payload, data: payload.data.map((item) => ({ ...item, embedding: padEmbedding(item?.embedding) })) };
 }
 
@@ -31,10 +33,11 @@ export function createEmbeddingAdapter({ fetchImpl = fetch, upstreamBaseUrl, ups
   if (!upstreamBaseUrl) throw new Error("EMBEDDING_UPSTREAM_BASE_URL is required");
   if (!upstreamModel) throw new Error("EMBEDDING_UPSTREAM_MODEL is required");
   const endpoint = `${upstreamBaseUrl.replace(/\/$/, "")}/embeddings`;
+  let sourceDimensions;
   return createServer(async (request, response) => {
     if (request.method === "GET" && request.url === "/health") {
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ status: "ok", sourceDimensions: SOURCE_DIMENSIONS, targetDimensions: TARGET_DIMENSIONS }));
+      response.end(JSON.stringify({ status: "ok", targetDimensions: TARGET_DIMENSIONS }));
       return;
     }
     if (request.method !== "POST" || request.url !== "/v1/embeddings") {
@@ -57,7 +60,11 @@ export function createEmbeddingAdapter({ fetchImpl = fetch, upstreamBaseUrl, ups
         response.end(upstreamBody);
         return;
       }
-      const result = transformEmbeddingResponse(JSON.parse(upstreamBody));
+      const payload = JSON.parse(upstreamBody);
+      const result = transformEmbeddingResponse(payload);
+      const dimension = payload.data[0].embedding.length;
+      if (sourceDimensions !== undefined && sourceDimensions !== dimension) throw new Error("upstream embedding dimensions changed");
+      sourceDimensions = dimension;
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify(result));
     } catch (error) {

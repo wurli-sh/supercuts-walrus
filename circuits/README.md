@@ -58,10 +58,13 @@ unaudited and are suitable only for the funded Testnet demonstration.
 
 ## Free local embeddings for Walrus Mainnet
 
-The Mainnet relayer requires a 1536-dimensional vector, while local
-`embeddinggemma` produces 768 values. Run the included OpenAI-compatible local
-adapter; it pads the final 768 values with zeroes. This preserves similarity
-scores when the same adapter serves both writes and recalls.
+The Mainnet relayer requires a 1536-dimensional vector. The adapter supports
+local OpenAI-compatible models with up to 1536 output dimensions: it zero-pads
+shorter vectors and rejects larger ones. Padding preserves similarity scores
+when writes and recalls use the same model and dimensions. The following
+example uses `embeddinggemma`, which produces 768 values. Set the upstream
+model and endpoint to use another local model. The endpoint receives memory
+plaintext, so use a trusted local service.
 
 ```sh
 export EMBEDDING_UPSTREAM_BASE_URL=http://127.0.0.1:11434/v1

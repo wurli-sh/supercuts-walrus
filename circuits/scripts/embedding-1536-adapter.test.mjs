@@ -17,8 +17,13 @@ test("preserves OpenAI response fields while padding every vector", () => {
   assert.equal(result.data[0].embedding.length, TARGET_DIMENSIONS);
 });
 
-test("rejects a source model with the wrong output dimension", () => {
-  assert.throws(() => padEmbedding(Array(4).fill(0)), /768-dimensional/);
+test("pads other dimensions, passes through full vectors, and rejects oversized or empty vectors", () => {
+  assert.deepEqual(padEmbedding([1, 2]).slice(0, 3), [1, 2, 0]);
+  assert.deepEqual(padEmbedding(Array(1536).fill(1)), Array(1536).fill(1));
+  assert.throws(() => padEmbedding([]), /1 to 1536/);
+  assert.throws(() => padEmbedding(Array(1537).fill(0)), /1 to 1536/);
+  assert.throws(() => padEmbedding([NaN]), /non-finite/);
+  assert.throws(() => transformEmbeddingResponse({ data: [{ embedding: [1] }, { embedding: [1, 2] }] }), /inconsistent/);
 });
 
 test("serves a 1536-dimensional OpenAI-compatible embedding response", async () => {
