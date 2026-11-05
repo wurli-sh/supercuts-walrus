@@ -8,8 +8,13 @@ import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import {
   BoundedClaude, DemoEventLog, RoleStore, X402ResourceService, capabilityManifestHash,
   createCapabilityManifest, paymentBindingBytes, readDemoEvents, recordedReplay,
-  requirementsHash, validateCapabilityManifest, deterministicCounteroffer, settlementRailForPrivacy,
+  requirementsHash, validateCapabilityManifest, deterministicCounteroffer, settlementRailForPrivacy, x402ResourceFailure,
 } from "../src/index.js";
+
+test("x402 client preserves bounded structured resource errors", () => {
+  assert.equal(x402ResourceFailure(400, Buffer.from(JSON.stringify({ error: "X402_FACILITATOR_INVALID", message: "facilitator settle failed with 400: invalid transaction" }))), "paid resource returned 400: X402_FACILITATOR_INVALID: facilitator settle failed with 400: invalid transaction");
+  assert.equal(x402ResourceFailure(502, Buffer.from("upstream unavailable")), "paid resource returned 502");
+});
 
 test("capability v1 validates its canonical hash and rejects mutations", () => {
   const manifest = createCapabilityManifest({ capabilityId: "market-brief", sellerId: "seller-public", capability: "public-market-research", description: "Cited public market brief", inputSchema: { type: "object", properties: { topic: { type: "string" } } }, outputSchema: { type: "object", properties: { report: { type: "string" } } }, supportedRails: ["x402"], priceBand: { minimum: "10", maximum: "20" }, asset: "0x2::sui::SUI", endpoint: "https://seller.example/research", expiresAt: Date.now() + 60_000 });
@@ -54,13 +59,13 @@ test("seller-owned x402 service challenges, settles once, and rejects cross-requ
   try {
     const challengeResponse = await fetch(`${origin}/capability/request-a`); assert.equal(challengeResponse.status, 402);
     const challenge = JSON.parse(Buffer.from(challengeResponse.headers.get("payment-required")!, "base64").toString()) as any, requirements = challenge.accepts[0], extra = requirements.extra;
-    const unsignedRequirements = { ...requirements, extra: { requestId: extra.requestId, operationId: extra.operationId, nonce: extra.nonce } };
+    const unsignedRequirements = { ...requirements, extra: { requestId: extra.requestId, operationId: extra.operationId, nonce: extra.nonce, expiresAt: extra.expiresAt } };
     const unsignedBinding = { requestId: "request-a", nonce: extra.nonce, requirementsHash: requirementsHash(unsignedRequirements), transactionDigest: digest, payer: payer.toSuiAddress() };
     const payerSignature = (await payer.signPersonalMessage(paymentBindingBytes(unsignedBinding))).signature, headers = { "payment-signature": Buffer.from(JSON.stringify({ x402Version: 2, resource: challenge.resource, accepted: requirements, payload: { signature: "transaction-signature", transaction: "bytes" } })).toString("base64"), "x-supercuts-binding": Buffer.from(JSON.stringify({ ...unsignedBinding, payerSignature })).toString("base64") };
     const paid = await fetch(`${origin}/capability/request-a`, { headers }); assert.equal(paid.status, 200); assert.equal(await paid.text(), '{"report":"ready"}');
     const replayed = await fetch(`${origin}/capability/request-a`, { headers }); assert.equal(replayed.status, 200);
     const secondChallengeResponse = await fetch(`${origin}/capability/request-b`), secondChallenge = JSON.parse(Buffer.from(secondChallengeResponse.headers.get("payment-required")!, "base64").toString()) as any, secondRequirements = secondChallenge.accepts[0], secondExtra = secondRequirements.extra;
-    const secondUnsignedRequirements = { ...secondRequirements, extra: { requestId: secondExtra.requestId, operationId: secondExtra.operationId, nonce: secondExtra.nonce } }, secondBinding = { requestId: "request-b", nonce: secondExtra.nonce, requirementsHash: requirementsHash(secondUnsignedRequirements), transactionDigest: digest, payer: payer.toSuiAddress() }, secondSignature = (await payer.signPersonalMessage(paymentBindingBytes(secondBinding))).signature;
+    const secondUnsignedRequirements = { ...secondRequirements, extra: { requestId: secondExtra.requestId, operationId: secondExtra.operationId, nonce: secondExtra.nonce, expiresAt: secondExtra.expiresAt } }, secondBinding = { requestId: "request-b", nonce: secondExtra.nonce, requirementsHash: requirementsHash(secondUnsignedRequirements), transactionDigest: digest, payer: payer.toSuiAddress() }, secondSignature = (await payer.signPersonalMessage(paymentBindingBytes(secondBinding))).signature;
     const consumed = await fetch(`${origin}/capability/request-b`, { headers: { "payment-signature": Buffer.from(JSON.stringify({ x402Version: 2, resource: secondChallenge.resource, accepted: secondRequirements, payload: { signature: "transaction-signature", transaction: "bytes" } })).toString("base64"), "x-supercuts-binding": Buffer.from(JSON.stringify({ ...secondBinding, payerSignature: secondSignature })).toString("base64") } }); assert.equal(consumed.status, 409);
     const expiredChallenge = await fetch(`${origin}/capability/request-expired`); assert.equal(expiredChallenge.status, 402);
     store2.db.prepare("UPDATE x402_challenges SET created_at=? WHERE request_id=?").run(Date.now() - 301_000, "request-expired");

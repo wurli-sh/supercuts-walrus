@@ -14,6 +14,15 @@ import { TatumLedger } from "./tatum.js";
 import type { RoleStore } from "./store.js";
 import { paymentBindingBytes, requirementsHash, type ExactRequirements } from "./x402.js";
 
+export function x402ResourceFailure(status: number, response: Uint8Array): string {
+  const fallback = `paid resource returned ${status}`;
+  let value: unknown;
+  try { value = JSON.parse(Buffer.from(response).toString("utf8")); } catch { return fallback; }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
+  const record = value as Record<string, unknown>, code = typeof record.error === "string" ? record.error.replace(/\s+/g, " ").slice(0, 128) : "", message = typeof record.message === "string" ? record.message.replace(/\s+/g, " ").slice(0, 512) : "";
+  return code || message ? `${fallback}: ${[code, message].filter(Boolean).join(": ")}` : fallback;
+}
+
 export interface LiveRuntimeProfile {
   role: "buyer" | "seller" | "auditor"; packageId: string; poolId: string; coinType: string; verifierVersion: number;
   live: {
@@ -346,17 +355,23 @@ export class LiveRuntime {
     if (amount > BigInt(this.profile.policy.maxAmount)) fail("POLICY_AMOUNT_EXCEEDED", "challenge exceeds the configured cap");
     if (!this.profile.policy.allowedAssets.includes(asset)) fail("POLICY_ASSET_FORBIDDEN", "challenged asset is not allowed");
     if (!this.profile.policy.allowedCounterparties.includes(payTo)) fail("POLICY_COUNTERPARTY_FORBIDDEN", "challenged payee is not allowed");
-    const extra = requirements.extra as Record<string, unknown> | undefined, requestId = String(extra?.requestId ?? operationId), challengeOperationId = String(extra?.operationId ?? operationId), nonce = String(extra?.nonce ?? "");
-    if (challengeOperationId !== operationId || !nonce || String(extra?.requirementsHash ?? "") !== requirementsHash({ ...requirements, extra: { requestId, operationId: challengeOperationId, nonce } })) fail("X402_CHALLENGE_INVALID", "challenge does not bind this operation and request");
+    const extra = requirements.extra as Record<string, unknown> | undefined, requestId = String(extra?.requestId ?? operationId), challengeOperationId = String(extra?.operationId ?? operationId), nonce = String(extra?.nonce ?? ""), expiresAt = Number(extra?.expiresAt);
+    const unsignedRequirements = { ...requirements, extra: { requestId, operationId: challengeOperationId, nonce, expiresAt } };
+    if (challengeOperationId !== operationId || !nonce || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now() || String(extra?.requirementsHash ?? "") !== requirementsHash(unsignedRequirements)) fail("X402_CHALLENGE_INVALID", "challenge does not bind this operation, request, and expiry");
     bind?.({ amount: amount.toString(), counterparty: payTo, asset, endpoint: resourceUrl, requestId, requirementsHash: String(extra?.requirementsHash) });
     const tx = new (await import("@mysten/sui/transactions")).Transaction(); tx.transferObjects([tx.coin({ balance: amount, type: asset })], payTo);
+    tx.setSender(this.signer.toSuiAddress()); await tx.build({ client: this.client });
+    const resolvedExpiration = tx.getData().expiration;
+    const validity = resolvedExpiration?.$kind === "ValidDuring" ? resolvedExpiration.ValidDuring : fail("X402_TRANSACTION_EXPIRY_INVALID", "Sui did not resolve a bounded transaction validity window");
+    if (validity.minEpoch == null || validity.maxEpoch == null || !validity.chain || validity.nonce == null) fail("X402_TRANSACTION_EXPIRY_INVALID", "Sui resolved an incomplete transaction validity window");
+    tx.setExpiration({ ValidDuring: { minEpoch: validity.minEpoch, maxEpoch: validity.maxEpoch, minTimestamp: validity.minTimestamp ?? null, maxTimestamp: expiresAt, chain: validity.chain, nonce: validity.nonce } });
     const legacyIntentHash = hash(JSON.stringify({ domain: "supercuts-x402-v2", operationId, resourceUrl, payTo, asset, amount: amount.toString() }));
     const intentHash = hash(JSON.stringify({ domain: "supercuts-x402-v2", operationId, resourceUrl, payTo, asset, amount: amount.toString(), requestId, requirementsHash: String(extra?.requirementsHash) })), signed = await this.signed(operationId, intentHash, tx, legacyIntentHash);
-    const unsignedBinding = { requestId, nonce, requirementsHash: requirementsHash({ ...requirements, extra: { requestId, operationId: challengeOperationId, nonce } }), transactionDigest: signed.digest, payer: this.signer.toSuiAddress() };
+    const unsignedBinding = { requestId, nonce, requirementsHash: requirementsHash(unsignedRequirements), transactionDigest: signed.digest, payer: this.signer.toSuiAddress() };
     const payerSignature = (await this.signer.signPersonalMessage(paymentBindingBytes(unsignedBinding))).signature;
     const paymentPayload = { x402Version: 2, resource, accepted: requirements, payload: { signature: signed.signature, transaction: Buffer.from(signed.transaction).toString("base64") } };
     const paid = await fetch(paymentUrl, { redirect: "error", headers: { "payment-signature": Buffer.from(JSON.stringify(paymentPayload)).toString("base64"), "x-supercuts-binding": Buffer.from(JSON.stringify({ ...unsignedBinding, payerSignature })).toString("base64") }, signal: AbortSignal.timeout(60_000) });
-    const response = Buffer.from(await paid.arrayBuffer()); if (!paid.ok) fail("X402_DELIVERY_FAILED", `paid resource returned ${paid.status}`);
+    const response = Buffer.from(await paid.arrayBuffer()); if (!paid.ok) fail("X402_DELIVERY_FAILED", x402ResourceFailure(paid.status, response));
     const settlementHeader = paid.headers.get("payment-response") ?? fail("X402_SETTLEMENT_INVALID", "payment-response header is missing");
     let settlement: Record<string, unknown>; try { settlement = JSON.parse(Buffer.from(settlementHeader, "base64").toString()) as Record<string, unknown>; } catch (error) { return fail("X402_SETTLEMENT_INVALID", "payment-response is not base64 JSON", error); }
     if (settlement.success !== true || settlement.transaction !== signed.digest || settlement.network !== "sui:testnet") fail("X402_SETTLEMENT_INVALID", "resource reported a different or unsuccessful settlement");

@@ -56,8 +56,10 @@ export class X402ResourceService {
   private challenge(artifact: RegisteredArtifact): Record<string, unknown> {
     // The live Sui exact facilitator requires the x402 nonce to be exactly
     // 32 random bytes (hex encoded), not merely an application nonce.
-    const requirements = this.requirements(artifact), nonce = this.#ledger.challenge(artifact.requestId, requirementsHash(requirements), () => randomBytes(32).toString("hex"));
-    requirements.extra = { ...requirements.extra, nonce };
+    const requirements = this.requirements(artifact), baseHash = requirementsHash(requirements), nonce = this.#ledger.challenge(artifact.requestId, baseHash, () => randomBytes(32).toString("hex"));
+    const stored = this.#ledger.getChallenge(artifact.requestId, baseHash) ?? fail("X402_CHALLENGE_MISSING", "resource challenge was not persisted");
+    const expiresAt = stored.createdAt + requirements.maxTimeoutSeconds * 1_000;
+    requirements.extra = { ...requirements.extra, nonce, expiresAt };
     // The nonce changes the signed requirement set and is persisted per request.
     const finalHash = requirementsHash(requirements);
     return { x402Version: 2, resource: { url: this.resourceUrl(artifact.requestId), description: "Supercuts seller capability artifact", mimeType: "application/json" }, accepts: [{ ...requirements, extra: { ...requirements.extra, requirementsHash: finalHash } }] };
@@ -77,9 +79,9 @@ export class X402ResourceService {
       const payload = decode(paymentHeader, "X402_PAYMENT_INVALID"), bindingValue = Array.isArray(request.headers["x-supercuts-binding"]) ? request.headers["x-supercuts-binding"][0] : request.headers["x-supercuts-binding"], binding = decode(bindingValue, "X402_REQUEST_BINDING_INVALID") as unknown as PaymentBinding;
       const offered = payload.accepted as ExactRequirements;
       if (!offered || requirementsHash(offered) !== requirementsHash(requirements)) fail("X402_REQUIREMENTS_MISMATCH", "payment payload changed the challenged requirements");
-      const extra = requirements.extra as Record<string, unknown>, nonce = String(extra.nonce ?? ""), declaredHash = String(extra.requirementsHash ?? "");
-      const unsignedRequirements = { ...requirements, extra: { requestId: extra.requestId, operationId: extra.operationId, nonce } };
-      if (declaredHash !== requirementsHash(unsignedRequirements)) fail("X402_REQUIREMENTS_MISMATCH", "challenge requirements hash is invalid");
+      const extra = requirements.extra as Record<string, unknown>, nonce = String(extra.nonce ?? ""), declaredHash = String(extra.requirementsHash ?? ""), expiresAt = Number(extra.expiresAt);
+      const unsignedRequirements = { ...requirements, extra: { requestId: extra.requestId, operationId: extra.operationId, nonce, expiresAt } };
+      if (!Number.isSafeInteger(expiresAt) || expiresAt !== stored.createdAt + requirements.maxTimeoutSeconds * 1_000 || declaredHash !== requirementsHash(unsignedRequirements)) fail("X402_REQUIREMENTS_MISMATCH", "challenge requirements hash or expiry is invalid");
       verifyBinding(binding, artifact.requestId, nonce, unsignedRequirements, binding.transactionDigest);
       const { payerSignature: _signature, ...unsignedBinding } = binding;
       if (!(await isValidPersonalMessageSignature(paymentBindingBytes(unsignedBinding), binding.payerSignature, { address: binding.payer }))) fail("X402_PAYER_SIGNATURE_INVALID", "payer did not bind payment to this resource request");

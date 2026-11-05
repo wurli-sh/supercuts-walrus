@@ -89,6 +89,20 @@ test("mandate-gated execution resolves and consumes the identical stored plan", 
   } finally { app.close(); }
 });
 
+test("planning retries return the immutable plan instead of regenerating time-dependent hashes", async () => {
+  const home = mkdtempSync(join(tmpdir(), "supercuts-plan-retry-")); initialize(home, { role: "buyer", mock: true });
+  const app = new Phase3App(home), capability = createCapabilityManifest({ capabilityId: "retry-cap", sellerId: "seller-a", capability: "artifact.generation", description: "artifact", inputSchema: {}, outputSchema: {}, supportedRails: ["x402"], priceBand: { minimum: "10", maximum: "40" }, asset: "0x2::sui::SUI", endpoint: "https://seller.example/artifact", expiresAt: Date.now() + 600_000 });
+  const execute = async (args: Record<string, string | boolean>) => { const token = app.approve(app.preview("settlement.plan", args).challengeId); return (await app.execute("settlement.plan", { ...args, "approval-token": token.token })).data; };
+  try {
+    const args = { "operation-id": "retry-plan", manifest: JSON.stringify(capability), "requested-amount": "30" };
+    const first = await execute(args);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const replay = await execute(args);
+    assert.equal(replay.planHash, first.planHash); assert.equal(replay.createdAt, first.createdAt);
+    await assert.rejects(() => execute({ ...args, "requested-amount": "31" }), { code: "OPERATION_ID_CONFLICT" });
+  } finally { app.close(); }
+});
+
 test("owner review creates a new approved hash without widening original bounds", async () => {
   const home = mkdtempSync(join(tmpdir(), "supercuts-review-")); initialize(home, { role: "buyer", mock: true }); const app = new Phase3App(home);
   const capability = createCapabilityManifest({ capabilityId: "review-cap", sellerId: "seller-a", capability: "artifact.generation", description: "artifact", inputSchema: {}, outputSchema: {}, supportedRails: ["x402", "shielded"], priceBand: { minimum: "10", maximum: "40" }, asset: "0x2::sui::SUI", endpoint: "https://seller.example/artifact", expiresAt: Date.now() + 600_000 });

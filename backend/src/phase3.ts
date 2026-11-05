@@ -318,13 +318,25 @@ export class Phase3App {
     validateCapabilityManifest(primary);
     if (typeof args.alternatives === "string") { try { alternatives = parseArgument(args.alternatives) as CapabilityManifest[]; } catch (error) { return fail("CAPABILITY_LIST_INVALID", "alternative manifests are not JSON", error); } }
     if (!Array.isArray(alternatives)) fail("CAPABILITY_LIST_INVALID", "alternatives must be an array"); for (const item of alternatives) validateCapabilityManifest(item);
+    const operationId = required(args, "operation-id"), mandate = this.planningMandate(args);
+    const persisted = this.store.db.prepare("SELECT plan_hash FROM settlement_plans WHERE operation_id=?").get(operationId) as { plan_hash: string } | undefined;
+    if (persisted) {
+      const existing = this.storedPlan(persisted.plan_hash), manifests = [primary, ...alternatives];
+      const requestedAmount = typeof args["requested-amount"] === "string" ? BigInt(args["requested-amount"]) : BigInt(existing.manifestMinimum);
+      const boundedAmount = requestedAmount < BigInt(existing.manifestMinimum) ? BigInt(existing.manifestMinimum) : requestedAmount > BigInt(existing.maximumAmount) ? BigInt(existing.maximumAmount) : requestedAmount;
+      const requestedRail = args["requested-rail"] === "x402" || args["requested-rail"] === "shielded" ? args["requested-rail"] : undefined;
+      if (existing.mandateHash !== settlementMandateHash(mandate) || !manifests.some((manifest) => manifest.manifestHash === existing.manifestHash) || requestedRail && requestedRail !== existing.rail || args["privacy-hint"] === "shielded" && existing.rail !== "shielded" || boundedAmount.toString() !== existing.openingAmount) {
+        fail("OPERATION_ID_CONFLICT", "planning operation already identifies another immutable plan");
+      }
+      return existing as unknown as Record<string, unknown>;
+    }
     let recalled = this.recalledMockMemories();
     if (!this.profile.mock && this.store.getSecret("live:memory-config")) {
       const encoded = this.store.getSecret("live:memory-config")!; let config: ManualMemoryConfig; try { config = JSON.parse(encoded.toString()) as ManualMemoryConfig; } catch (error) { return fail("LIVE_MEMORY_CONFIG_INVALID", "encrypted memory config is invalid", error); }
       const manual = new ManualMemory(this.store, config);
       try { recalled = (await manual.recall(`${primary.capabilityId} ${primary.capability} ${primary.sellerId}`, 20)).map((item) => { let memory: SettlementMemoryV1 | undefined; try { const value = JSON.parse(item.text) as unknown; validateSettlementMemory(value); memory = this.authenticatedMemory(item.blobId, value); } catch { /* malformed or legacy memory remains advisory */ } return { blobId: item.blobId, distance: item.distance, ...(memory ? { memory } : { legacy: true }) }; }); } finally { manual.destroy(); }
     }
-    const plan = createSettlementPlan({ operationId: required(args, "operation-id"), mandate: this.planningMandate(args), manifests: [primary, ...alternatives], ...(typeof args["requested-amount"] === "string" ? { requestedAmount: args["requested-amount"] } : {}), ...(args["privacy-hint"] === "shielded" ? { privacyHint: "shielded" as const } : {}), ...(args["requested-rail"] === "x402" || args["requested-rail"] === "shielded" ? { requestedRail: args["requested-rail"] } : {}), recalled, maxMemoryDistance: this.profile.policy.maxMemoryDistance ?? 0.35 });
+    const plan = createSettlementPlan({ operationId, mandate, manifests: [primary, ...alternatives], ...(typeof args["requested-amount"] === "string" ? { requestedAmount: args["requested-amount"] } : {}), ...(args["privacy-hint"] === "shielded" ? { privacyHint: "shielded" as const } : {}), ...(args["requested-rail"] === "x402" || args["requested-rail"] === "shielded" ? { requestedRail: args["requested-rail"] } : {}), recalled, maxMemoryDistance: this.profile.policy.maxMemoryDistance ?? 0.35 });
     return this.persistPlan(plan) as unknown as Record<string, unknown>;
   }
 
@@ -472,7 +484,6 @@ export class Phase3App {
     if (!supplied) { if ((mandate as PlanningMandate & { requireSettlementPlan?: boolean }).requireSettlementPlan) fail("SETTLEMENT_PLAN_REQUIRED", "owner mandate requires an approved settlement plan"); return undefined; }
     const plan = this.storedPlan(supplied), rail = command === "pay.x402" ? "x402" : "shielded", now = Date.now();
     if (plan.status !== "approved" || plan.riskLevel === "review_required") fail("SETTLEMENT_PLAN_REVIEW_REQUIRED", "settlement plan requires owner review");
-    if (now >= plan.expiresAt) fail("SETTLEMENT_PLAN_EXPIRED", "settlement plan has expired");
     if (plan.mandateHash !== settlementMandateHash(mandate)) fail("SETTLEMENT_PLAN_MANDATE_MISMATCH", "owner mandate changed after planning");
     const operationId = required(args, "operation-id");
     if (plan.operationId !== operationId || plan.rail !== rail || plan.sellerId !== actual.counterparty || plan.asset !== actual.asset || plan.network !== "sui:testnet" || actual.endpoint && !matchesPlannedEndpoint(plan.endpoint, actual.endpoint, actual.requestId)) fail("SETTLEMENT_PLAN_BINDING_MISMATCH", "execution differs from the planned operation, capability, seller, endpoint, asset, network, or rail");
@@ -485,6 +496,7 @@ export class Phase3App {
     const binding = { planHash: plan.planHash, operationId, capabilityId: plan.capabilityId, manifestHash: plan.manifestHash, rail, amount: actual.amount, counterparty: actual.counterparty, asset: actual.asset, endpoint: actual.endpoint ?? null, requestId: actual.requestId, session: actual.session ?? null, requirementsHash: actual.requirementsHash ?? null };
     const bindingHash = hash(canonicalJson({ domain: "supercuts-settlement-execution-v1", binding })), existing = this.store.db.prepare("SELECT binding_hash FROM settlement_execution_bindings WHERE operation_id=? OR plan_hash=?").get(operationId, plan.planHash) as { binding_hash: string } | undefined;
     if (existing && existing.binding_hash !== bindingHash) fail("SETTLEMENT_PLAN_CONSUMED", "plan or operation is already bound to another execution");
+    if (!existing && now >= plan.expiresAt) fail("SETTLEMENT_PLAN_EXPIRED", "settlement plan has expired");
     if (!existing) { this.store.db.prepare("INSERT INTO settlement_execution_bindings(operation_id,plan_hash,binding_hash,binding_json,created_at) VALUES(?,?,?,?,?)").run(operationId, plan.planHash, bindingHash, canonicalJson(binding), now); this.store.db.prepare("UPDATE settlement_plans SET consumed_at=? WHERE plan_hash=?").run(now, plan.planHash); }
     return plan;
   }
