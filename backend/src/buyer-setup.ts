@@ -58,7 +58,7 @@ function readConfig(path: string): BuyerSetup { ownerFile(path); return validate
 function writePolicy(home: string, config: BuyerSetup): void {
   const path = join(home, "mandate.json"), mandate = loadMandate(home);
   const base: AgentMandate = { ...mandate }; delete base.allowedCapabilityIds; delete base.allowedCapabilityClasses;
-  const next: AgentMandate = { ...base, version: "supercuts.mandate.v2", allowedCommands: [...new Set([...mandate.allowedCommands, "deal.execute", "deal.get", "deal.resume", "deal.evidence", "deal.delivery", "deal.catalog", "deal.policy", "settlement.plan", "memory.inventory"])], allowedCounterparties: config.allowedCounterparties ?? [], perDealCeiling: config.perDealCeiling, totalRunBudget: config.totalBudget, expiresAt: config.expiresAt, requiredPrivacy: "any", requireSettlementPlan: true, allowedRails: config.allowPublicX402 === true ? ["shielded", "x402"] : ["shielded"], allowPublicX402: config.allowPublicX402 === true, ...(config.allowedCapabilityIds ? { allowedCapabilityIds: config.allowedCapabilityIds } : {}), ...(config.allowedCapabilityClasses ? { allowedCapabilityClasses: config.allowedCapabilityClasses } : {}) };
+  const next: AgentMandate = { ...base, version: "supercuts.mandate.v2", allowedCommands: [...new Set([...mandate.allowedCommands, "deal.execute", "deal.get", "deal.resume", "deal.evidence", "deal.delivery", "deal.catalog", "deal.policy", "settlement.plan", "memory.inventory", "remote.research"])], allowedCounterparties: config.allowedCounterparties ?? [], perDealCeiling: config.perDealCeiling, totalRunBudget: config.totalBudget, expiresAt: config.expiresAt, requiredPrivacy: "any", requireSettlementPlan: true, allowedRails: config.allowPublicX402 === true ? ["shielded", "x402"] : ["shielded"], allowPublicX402: config.allowPublicX402 === true, ...(config.allowedCapabilityIds ? { allowedCapabilityIds: config.allowedCapabilityIds } : {}), ...(config.allowedCapabilityClasses ? { allowedCapabilityClasses: config.allowedCapabilityClasses } : {}) };
   writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 }); chmodSync(path, 0o600);
   writeFileSync(join(home, "deal-sellers.json"), `${JSON.stringify(config.directoryUrl ? { directoryUrl: origins([config.directoryUrl])[0], origins: config.sellerOrigins?.length ? origins(config.sellerOrigins) : [] } : origins(config.sellerOrigins ?? []), null, 2)}\n`, { mode: 0o600 });
   const profilePath = join(home, "profile.json"), profile = JSON.parse(readFileSync(profilePath, "utf8")) as { policy: { allowedCounterparties: string[]; maxAmount: string; expiresAt: number } };
@@ -158,7 +158,7 @@ export async function approveBuyerSeller(home: string, capabilityId: string): Pr
   profile.policy.allowedCounterparties = updated.allowedCounterparties;
   writeFileSync(path, `${JSON.stringify(updated, null, 2)}\n`, { mode: 0o600 });
   writeFileSync(profilePath, `${JSON.stringify(profile, null, 2)}\n`, { mode: 0o600 });
-  return { capabilityId, sellerId: registration.manifest.sellerId, approved: true };
+  return { capabilityId, sellerId: registration.manifest.sellerId, approved: true, manifestHash: registration.manifest.manifestHash, description: registration.manifest.description, priceBand: registration.manifest.priceBand, asset: registration.manifest.asset, supportedRails: registration.manifest.supportedRails, expiresAt: registration.manifest.expiresAt };
 }
 export async function addBuyerPrivacyRule(home: string, capabilityId: string): Promise<Record<string, unknown>> {
   const app = new Phase3App(home);

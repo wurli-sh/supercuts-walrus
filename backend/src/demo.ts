@@ -44,11 +44,31 @@ async function setup(): Promise<Record<string, unknown>> {
   }
   const workflowPath = typeof args.workflow === "string" ? resolve(args.workflow) : !mock && typeof args["seller-url"] !== "string" ? resolve(value("workflow")) : undefined;
   if (workflowPath) {
-    const workflow = JSON.parse(readFileSync(workflowPath, "utf8")) as { capabilities?: CapabilityManifest[] }, capabilities = workflow.capabilities ?? [];
-    if (!capabilities.length) fail("DEMO_CAPABILITIES_REQUIRED", "live workflow must provide capability manifests for the buyer mandate"); for (const manifest of capabilities) validateCapabilityManifest(manifest);
+    const workflow = JSON.parse(readFileSync(workflowPath, "utf8")) as { capabilities?: CapabilityManifest[] }, configured = workflow.capabilities ?? [];
+    if (!configured.length) fail("DEMO_CAPABILITIES_REQUIRED", "live workflow must provide capability manifests for the buyer mandate"); for (const manifest of configured) validateCapabilityManifest(manifest);
+    let capabilities = configured;
+    if (!mock && typeof args["seller-url"] === "string") {
+      const response = await fetch(new URL("/v1/catalog", new URL(args["seller-url"])), { signal: AbortSignal.timeout(90_000) });
+      if (!response.ok) fail("SELLER_SERVICE_UNAVAILABLE", `remote seller catalog returned ${response.status}`);
+      const served = await response.json() as { capabilities?: Array<{ manifest?: CapabilityManifest; blobId?: string }> };
+      const allowedIds = new Set(configured.map((item) => item.capabilityId)), entries = (served.capabilities ?? []).filter((item) => item.manifest && allowedIds.has(item.manifest.capabilityId));
+      if (!entries.length || entries.some((item) => !item.manifest || typeof item.blobId !== "string")) fail("SELLER_CATALOG_INVALID", "remote seller catalog has no configured capabilities with Walrus identities");
+      const app = new Phase3App(roles.buyer);
+      try {
+        const discovered = (await app.execute("capability.discover", { "blob-ids": Buffer.from(JSON.stringify(entries.map((item) => item.blobId))).toString("base64url") })).data.capabilities as Array<CapabilityManifest & { blobId?: string }>;
+        const verified = new Map(discovered.map((item) => [`${item.capabilityId}:${item.blobId}`, item.manifestHash]));
+        if (entries.some((item) => verified.get(`${item.manifest!.capabilityId}:${item.blobId}`) !== item.manifest!.manifestHash)) fail("SELLER_CATALOG_INVALID", "remote seller catalog differs from its Walrus manifests");
+      } finally { app.close(); }
+      capabilities = entries.map((item) => item.manifest!);
+    }
     const mandatePath = join(roles.buyer, "mandate.json"), mandate = JSON.parse(readFileSync(mandatePath, "utf8")) as Record<string, unknown>;
-    mandate.requireSettlementPlan = true; mandate.allowedCommands = [...new Set([...(Array.isArray(mandate.allowedCommands) ? mandate.allowedCommands as string[] : []), "settlement.plan"])]; mandate.allowedCapabilityIds = [...new Set(capabilities.map((item) => item.capabilityId))]; mandate.allowedCapabilityClasses = [...new Set(capabilities.map((item) => item.capability))]; mandate.allowedRails = [...new Set(capabilities.flatMap((item) => item.supportedRails))];
+    mandate.requireSettlementPlan = true; mandate.allowedCommands = [...new Set([...(Array.isArray(mandate.allowedCommands) ? mandate.allowedCommands as string[] : []), "settlement.plan"])]; mandate.allowedCounterparties = [...new Set(capabilities.map((item) => item.sellerId))]; mandate.allowedCapabilityIds = [...new Set(capabilities.map((item) => item.capabilityId))]; mandate.allowedCapabilityClasses = [...new Set(capabilities.map((item) => item.capability))]; mandate.allowedRails = [...new Set(capabilities.flatMap((item) => item.supportedRails))];
     writeFileSync(mandatePath, `${JSON.stringify(mandate, null, 2)}\n`, { mode: 0o600 }); chmodSync(mandatePath, 0o600);
+    const buyerProfilePath = join(roles.buyer, "profile.json"), buyerProfile = JSON.parse(readFileSync(buyerProfilePath, "utf8")) as { policy?: { allowedCounterparties?: string[] } };
+    if (!buyerProfile.policy) fail("DEMO_ROLE_PROFILE_MISMATCH", "buyer profile has no payment policy");
+    const buyerPolicy = buyerProfile.policy as { allowedCounterparties?: string[] };
+    buyerPolicy.allowedCounterparties = [...new Set(capabilities.map((item) => item.sellerId))];
+    writeFileSync(buyerProfilePath, `${JSON.stringify(buyerProfile, null, 2)}\n`, { mode: 0o600 }); chmodSync(buyerProfilePath, 0o600);
   }
   const mcpScript = join(dirname(fileURLToPath(import.meta.url)), "mcp.js");
   const mcp = { mcpServers: Object.fromEntries(Object.entries(roles).map(([name, home]) => [`supercuts-${name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`, { command: process.execPath, args: [mcpScript], env: { SUPERCUTS_HOME: home } }])) };
@@ -61,7 +81,7 @@ async function setup(): Promise<Record<string, unknown>> {
     writeFileSync(join(root, "buyer-codex.toml"), codex, { mode: 0o600 });
   }
   const remote = typeof args["seller-url"] === "string";
-  writeFileSync(join(root, "run.json"), `${JSON.stringify({ schema: "supercuts.demo.run.v1", createdAt: new Date().toISOString(), runId, ...(remote ? { eventPath } : {}), mock, homes: roles, addresses }, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(join(root, "run.json"), `${JSON.stringify({ schema: "supercuts.demo.run.v1", createdAt: new Date().toISOString(), runId, ...(remote ? { eventPath, sellerUrl: new URL(String(args["seller-url"])).toString() } : {}), mock, homes: roles, addresses }, null, 2)}\n`, { mode: 0o600 });
   return { stateDir: root, mock, funding: mock ? [] : [{ address: addresses.buyer, needs: ["Testnet SUI gas", "configured x402 asset", "shielded deposit value"] }], sellerPayTo: addresses.publicSeller, sellerAddresses: { publicA: addresses.publicSeller, publicB: addresses.secondPublicSeller, analysis: addresses.confidentialSeller }, files: { mcp: join(root, "mcp.json"), run: join(root, "run.json"), events: remote ? eventPath : join(root, "events.jsonl"), ...(remote ? { codex: join(root, "buyer-codex.toml") } : {}) } };
 }
 
@@ -78,26 +98,43 @@ async function doctor(): Promise<Record<string, unknown>> {
     } finally { app.close(); }
   }
   const roles = homes(stateDir()), reports: Record<string, unknown> = {};
-  for (const [name, home] of Object.entries(roles)) { const app = new Phase3App(home); try { const report = (await app.execute("doctor", {})).data; if (report.readyForDemo === false) fail("DEMO_PREREQUISITES_MISSING", `${name}: ${(report.fixes as string[]).join(" ")}`); reports[name] = report; } finally { app.close(); } }
+  for (const [name, home] of Object.entries(roles)) { const app = new Phase3App(home); try { const report = (await app.execute("doctor", {})).data; if (report.readyForDemo === false) fail("DEMO_PREREQUISITES_MISSING", `${name}: ${(report.fixes as string[]).join(" ")}`); if (name === "buyer") { const mandate = loadMandate(home), profileSellers = [...app.profile.policy.allowedCounterparties].sort(), mandateSellers = [...mandate.allowedCounterparties].sort(); if (JSON.stringify(profileSellers) !== JSON.stringify(mandateSellers)) fail("POLICY_COUNTERPARTY_MISMATCH", "buyer mandate and payment profile allow different sellers; rerun setup refresh before funding"); } reports[name] = report; } finally { app.close(); } }
   let remote: Record<string, unknown> | undefined;
   if (typeof args["seller-url"] === "string") {
     const base = new URL(args["seller-url"]), health = await fetch(new URL("/health", base), { signal: AbortSignal.timeout(90_000) }), catalog = await fetch(new URL("/v1/catalog", base), { signal: AbortSignal.timeout(30_000) });
     if (!health.ok || !catalog.ok) fail("SELLER_SERVICE_UNAVAILABLE", "remote seller health or catalog check failed");
+    const healthBody = await health.json() as { buyerAccess?: string }, buyerSigner = String((reports.buyer as { signer?: string } | undefined)?.signer ?? ""), accessUrl = new URL("/v1/access", base); accessUrl.searchParams.set("buyerAddress", buyerSigner);
+    const access = await fetch(accessUrl, { signal: AbortSignal.timeout(30_000) });
+    if (!access.ok) fail("SELLER_SERVICE_UNAVAILABLE", "remote seller access preflight failed");
+    const accessBody = await access.json() as { allowed?: boolean; mode?: string };
+    if (accessBody.allowed !== true) fail("SELLER_BUYER_FORBIDDEN", "remote seller does not currently accept this buyer; use open access or complete owner enrollment before funding");
     const body = await catalog.json() as { capabilities?: Array<{ manifest?: CapabilityManifest }> }, capabilities = body.capabilities ?? [];
     if (capabilities.filter((item) => item.manifest?.capability === "sui.market-brief").length < 2 || !capabilities.some((item) => item.manifest?.capability === "sui.competitor-analysis")) fail("SELLER_CATALOG_INVALID", "remote catalog needs two briefs and one competitor analysis");
-    remote = { healthy: true, origin: base.origin, capabilities: capabilities.length };
+    remote = { healthy: true, origin: base.origin, capabilities: capabilities.length, buyerAccess: accessBody.mode ?? healthBody.buyerAccess ?? "unknown", buyerAllowed: true };
   }
   return { healthy: true, roles: reports, isolation: new Set(Object.values(roles)).size === 5, ...(remote ? { remote } : {}) };
 }
 
 async function seedPolicy(): Promise<Record<string, unknown>> {
   const source = JSON.parse(readFileSync(resolve(value("workflow")), "utf8")) as { capabilities?: CapabilityManifest[] };
-  const manifest = source.capabilities?.find((item) => item.capability === "sui.competitor-analysis") ?? fail("DEMO_POLICY_SCOPE_INVALID", "workflow has no competitor analysis capability");
+  let manifest = source.capabilities?.find((item) => item.capability === "sui.competitor-analysis") ?? fail("DEMO_POLICY_SCOPE_INVALID", "workflow has no competitor analysis capability");
   validateCapabilityManifest(manifest);
   if (manifest.capability !== "sui.competitor-analysis") fail("DEMO_POLICY_SCOPE_INVALID", "privacy policy must target the competitor analysis capability");
   const app = new Phase3App(homes(stateDir()).buyer);
   try {
     if (app.profile.mock) fail("LIVE_PROFILE_REQUIRED", "saved demo privacy policy requires a live buyer profile");
+    const runPath = join(stateDir(), "run.json"), run = existsSync(runPath) ? JSON.parse(readFileSync(runPath, "utf8")) as { sellerUrl?: string } : {};
+    if (run.sellerUrl) {
+      const response = await fetch(new URL("/v1/catalog", run.sellerUrl), { signal: AbortSignal.timeout(90_000) });
+      if (!response.ok) fail("SELLER_SERVICE_UNAVAILABLE", `remote seller catalog returned ${response.status}`);
+      const body = await response.json() as { capabilities?: Array<{ manifest?: CapabilityManifest; blobId?: string }> };
+      const entry = body.capabilities?.find((item) => item.manifest?.capabilityId === manifest.capabilityId && item.manifest.capability === "sui.competitor-analysis") ?? fail("DEMO_POLICY_SCOPE_INVALID", "remote catalog has no matching competitor analysis capability");
+      if (!entry.manifest || typeof entry.blobId !== "string") fail("SELLER_CATALOG_INVALID", "remote analysis capability has no Walrus identity");
+      const liveManifest = entry.manifest as CapabilityManifest, liveBlobId = entry.blobId as string;
+      const discovered = (await app.execute("capability.discover", { "blob-ids": Buffer.from(JSON.stringify([liveBlobId])).toString("base64url") })).data.capabilities as Array<CapabilityManifest & { blobId?: string }>;
+      if (discovered.length !== 1 || discovered[0]!.blobId !== liveBlobId || discovered[0]!.manifestHash !== liveManifest.manifestHash) fail("SELLER_CATALOG_INVALID", "remote analysis capability differs from its Walrus manifest");
+      manifest = liveManifest;
+    }
     const memory = { version: "supercuts.settlement-memory.v1", kind: "privacy_rule", scope: { capabilityId: manifest.capabilityId, counterparty: manifest.sellerId, network: "sui:testnet", asset: manifest.asset }, createdAt: Date.now(), signal: { requiresShielded: true } };
     const parameters = { "operation-id": value("operation-id", `privacy-${manifest.capabilityId}`), memory: Buffer.from(JSON.stringify(memory)).toString("base64url") };
     const token = app.approve(app.preview("memory.policy", parameters).challengeId);

@@ -16,6 +16,8 @@ export interface X402ResourceServiceConfig {
   payTo: string;
   amount: string;
   maxTimeoutSeconds?: number;
+  /** Bounded retry schedule for transient facilitator cold starts. */
+  facilitatorRetryDelaysMs?: number[];
 }
 
 interface RegisteredArtifact { requestId: string; operationId: string; body: Buffer; }
@@ -108,14 +110,22 @@ export class X402ResourceService {
   createServer(): Server { return createServer((request, response) => void this.handle(request, response)); }
   private async facilitator(path: "verify" | "settle", body: unknown): Promise<Record<string, any>> {
     const endpoint = new URL(path, `${this.#facilitator.toString().replace(/\/$/, "")}/`);
-    const response = await this.http(endpoint, { method: "POST", headers: { "content-type": "application/json", "x-supercuts-facilitator-key": this.config.facilitatorKey }, body: JSON.stringify(body), signal: AbortSignal.timeout(60_000) });
-    let value: unknown; try { value = await response.json(); } catch (error) { return fail("X402_FACILITATOR_INVALID", "facilitator returned invalid JSON", error); }
-    if (!response.ok || !value || typeof value !== "object" || Array.isArray(value)) {
+    const delays = this.config.facilitatorRetryDelaysMs ?? [0, 2_000, 5_000, 10_000]; let lastCause: unknown;
+    for (const delay of delays) {
+      if (delay > 0) await new Promise<void>((resolve) => setTimeout(resolve, delay));
+      let response: Response;
+      try { response = await this.http(endpoint, { method: "POST", headers: { "content-type": "application/json", "x-supercuts-facilitator-key": this.config.facilitatorKey }, body: JSON.stringify(body), signal: AbortSignal.timeout(60_000) }); }
+      catch (error) { lastCause = error; continue; }
+      const raw = Buffer.from(await response.arrayBuffer()); let value: unknown;
+      try { value = JSON.parse(raw.toString("utf8")); }
+      catch (error) { lastCause = error; continue; }
+      if (response.ok && value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, any>;
       const message = value && typeof value === "object" && !Array.isArray(value) && typeof (value as Record<string, unknown>).message === "string"
         ? `: ${(value as Record<string, string>).message}` : "";
-      fail("X402_FACILITATOR_INVALID", `facilitator ${path} failed with ${response.status}${message}`);
+      if (response.status < 500) fail("X402_FACILITATOR_INVALID", `facilitator ${path} failed with ${response.status}${message}`);
+      lastCause = new Error(`facilitator ${path} returned ${response.status}${message}`);
     }
-    return value as Record<string, any>;
+    return fail("X402_FACILITATOR_UNAVAILABLE", `facilitator ${path} remained unavailable after bounded retries`, lastCause);
   }
   private send(response: ServerResponse, status: number, body: Buffer, headers: Record<string, string> = {}): void { response.writeHead(status, { "content-length": String(body.length), ...headers }); response.end(body); }
 }

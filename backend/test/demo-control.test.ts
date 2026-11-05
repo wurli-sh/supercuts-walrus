@@ -46,14 +46,15 @@ test("bounded Claude accepts only the forced schema tool output", async () => {
 
 test("seller-owned x402 service challenges, settles once, and rejects cross-request reuse", async () => {
   const directory = mkdtempSync(join(tmpdir(), "supercuts-x402-service-")), store = new RoleStore(join(directory, "state.sqlite"), randomBytes(32)), payer = Ed25519Keypair.generate(), digest = "tx-digest";
-  const facilitatorFetch: typeof fetch = async (input) => new Response(JSON.stringify(String(input).endsWith("/verify") ? { isValid: true } : { success: true, transaction: digest, network: "sui:testnet" }), { status: 200, headers: { "content-type": "application/json" } });
+  let facilitatorCalls = 0;
+  const facilitatorFetch: typeof fetch = async (input) => { facilitatorCalls++; if (facilitatorCalls === 1) return new Response("cold start", { status: 502, headers: { "content-type": "text/html" } }); return new Response(JSON.stringify(String(input).endsWith("/verify") ? { isValid: true } : { success: true, transaction: digest, network: "sui:testnet" }), { status: 200, headers: { "content-type": "application/json" } }); };
   const facilitatorKey = "f".repeat(32);
-  const service = new X402ResourceService(store, { origin: "http://127.0.0.1:0", facilitatorUrl: "http://127.0.0.1:9999", facilitatorKey, network: "sui:testnet", asset: "0x2::sui::SUI", payTo: `0x${"11".repeat(32)}`, amount: "7" }, facilitatorFetch);
+  const service = new X402ResourceService(store, { origin: "http://127.0.0.1:0", facilitatorUrl: "http://127.0.0.1:9999", facilitatorKey, network: "sui:testnet", asset: "0x2::sui::SUI", payTo: `0x${"11".repeat(32)}`, amount: "7", facilitatorRetryDelaysMs: [0, 0] }, facilitatorFetch);
   const server = service.createServer(); await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address(); assert(address && typeof address === "object");
   // The configured origin is part of the signed challenge; use a second service with the actual ephemeral port.
   await new Promise<void>((resolve) => server.close(() => resolve())); store.close();
-  const store2 = new RoleStore(join(directory, "state2.sqlite"), randomBytes(32)), origin = `http://127.0.0.1:${address.port}`, service2 = new X402ResourceService(store2, { origin, facilitatorUrl: "http://127.0.0.1:9999", facilitatorKey, network: "sui:testnet", asset: "0x2::sui::SUI", payTo: `0x${"11".repeat(32)}`, amount: "7" }, facilitatorFetch), server2 = service2.createServer();
+  const store2 = new RoleStore(join(directory, "state2.sqlite"), randomBytes(32)), origin = `http://127.0.0.1:${address.port}`, service2 = new X402ResourceService(store2, { origin, facilitatorUrl: "http://127.0.0.1:9999", facilitatorKey, network: "sui:testnet", asset: "0x2::sui::SUI", payTo: `0x${"11".repeat(32)}`, amount: "7", facilitatorRetryDelaysMs: [0, 0] }, facilitatorFetch), server2 = service2.createServer();
   service2.register("request-a", "operation-a", Buffer.from('{"report":"ready"}')); service2.register("request-b", "operation-b", Buffer.from('{"report":"other"}')); service2.register("request-expired", "operation-expired", Buffer.from('{"report":"expired"}'));
   await new Promise<void>((resolve) => server2.listen(address.port, "127.0.0.1", resolve));
   try {
@@ -62,7 +63,7 @@ test("seller-owned x402 service challenges, settles once, and rejects cross-requ
     const unsignedRequirements = { ...requirements, extra: { requestId: extra.requestId, operationId: extra.operationId, nonce: extra.nonce, expiresAt: extra.expiresAt } };
     const unsignedBinding = { requestId: "request-a", nonce: extra.nonce, requirementsHash: requirementsHash(unsignedRequirements), transactionDigest: digest, payer: payer.toSuiAddress() };
     const payerSignature = (await payer.signPersonalMessage(paymentBindingBytes(unsignedBinding))).signature, headers = { "payment-signature": Buffer.from(JSON.stringify({ x402Version: 2, resource: challenge.resource, accepted: requirements, payload: { signature: "transaction-signature", transaction: "bytes" } })).toString("base64"), "x-supercuts-binding": Buffer.from(JSON.stringify({ ...unsignedBinding, payerSignature })).toString("base64") };
-    const paid = await fetch(`${origin}/capability/request-a`, { headers }); assert.equal(paid.status, 200); assert.equal(await paid.text(), '{"report":"ready"}');
+    const paid = await fetch(`${origin}/capability/request-a`, { headers }); assert.equal(paid.status, 200); assert.equal(await paid.text(), '{"report":"ready"}'); assert.equal(facilitatorCalls, 3);
     const replayed = await fetch(`${origin}/capability/request-a`, { headers }); assert.equal(replayed.status, 200);
     const secondChallengeResponse = await fetch(`${origin}/capability/request-b`), secondChallenge = JSON.parse(Buffer.from(secondChallengeResponse.headers.get("payment-required")!, "base64").toString()) as any, secondRequirements = secondChallenge.accepts[0], secondExtra = secondRequirements.extra;
     const secondUnsignedRequirements = { ...secondRequirements, extra: { requestId: secondExtra.requestId, operationId: secondExtra.operationId, nonce: secondExtra.nonce, expiresAt: secondExtra.expiresAt } }, secondBinding = { requestId: "request-b", nonce: secondExtra.nonce, requirementsHash: requirementsHash(secondUnsignedRequirements), transactionDigest: digest, payer: payer.toSuiAddress() }, secondSignature = (await payer.signPersonalMessage(paymentBindingBytes(secondBinding))).signature;

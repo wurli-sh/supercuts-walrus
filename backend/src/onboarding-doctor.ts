@@ -36,8 +36,19 @@ export async function onboardingDoctor(home: string, sellerConfig?: string): Pro
       }
       const endpoint = app.profile.live?.writeGrpcEndpoint ?? fail("LIVE_PROFILE_INVALID", "buyer write RPC is missing");
       const signer = String(runtime.data.signer ?? "");
-      const { balance } = await writeClient(endpoint).getBalance({ owner: signer, coinType: "0x2::sui::SUI" });
-      return { role: "buyer", healthy: true, runtime: runtime.data, approvedSellers: mandate.allowedCounterparties.length, nativeSuiMist: String(balance.balance), funded: BigInt(balance.balance) > 0n, ...(directoryListings !== undefined ? { directoryListings } : {}) };
+      const [{ balance }, shielded] = await Promise.all([
+        writeClient(endpoint).getBalance({ owner: signer, coinType: "0x2::sui::SUI" }),
+        app.execute("wallet.balance", {}),
+      ]);
+      const nativeSuiMist = String(balance.balance), shieldedMist = String(shielded.data.available ?? "0");
+      const checks = [
+        { id: "runtime", status: "ready", detail: "Pinned deployment, prover, RPC, and Walrus prerequisites verified." },
+        { id: "public-balance", status: BigInt(nativeSuiMist) > 0n ? "ready" : "action_required", detail: BigInt(nativeSuiMist) > 0n ? `${nativeSuiMist} MIST available.` : "Fund only this generated buyer address before a public payment." },
+        { id: "shielded-balance", status: BigInt(shieldedMist) > 0n ? "ready" : "action_required", detail: BigInt(shieldedMist) > 0n ? `${shieldedMist} MIST available in the experimental pool.` : "Create a buyer-owned pool deposit before a shielded deal." },
+        { id: "seller-approval", status: mandate.allowedCounterparties.length > 0 ? "ready" : "action_required", detail: mandate.allowedCounterparties.length > 0 ? `${mandate.allowedCounterparties.length} seller identity or identities approved.` : "Review and approve a signed seller capability locally." },
+        ...(directoryListings !== undefined ? [{ id: "directory", status: directoryListings > 0 ? "ready" : "action_required", detail: `${directoryListings} live directory listing or listings.` }] : []),
+      ];
+      return { role: "buyer", healthy: true, readyForPublicPayment: BigInt(nativeSuiMist) > 0n && mandate.allowedCounterparties.length > 0, readyForShieldedPayment: BigInt(shieldedMist) > 0n && mandate.allowedCounterparties.length > 0, runtime: runtime.data, checks, approvedSellers: mandate.allowedCounterparties.length, nativeSuiMist, shieldedMist, funded: BigInt(nativeSuiMist) > 0n, ...(directoryListings !== undefined ? { directoryListings } : {}) };
     }
     if (app.profile.role === "seller") {
       if (!sellerConfig) fail("ARGUMENT_REQUIRED", "seller doctor requires --config <owner-only-seller-config.json>");

@@ -147,7 +147,12 @@ export class SellerService {
   async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
       const url = new URL(request.url ?? "/", this.origin);
-      if (request.method === "GET" && url.pathname === "/health") return this.reply(response, this.#healthy ? 200 : 503, { ok: this.#healthy, service: "supercuts-sellers" });
+      if (request.method === "GET" && url.pathname === "/health") return this.reply(response, this.#healthy ? 200 : 503, { ok: this.#healthy, service: "supercuts-sellers", buyerAccess: this.allowedBuyers.size ? "restricted" : "open" });
+      if (request.method === "GET" && url.pathname === "/v1/access") {
+        const buyerAddress = String(url.searchParams.get("buyerAddress") ?? "").toLowerCase();
+        if (!/^0x[0-9a-f]{64}$/.test(buyerAddress)) fail("SELLER_REQUEST_INVALID", "buyerAddress is invalid");
+        return this.reply(response, 200, { buyerAddress, allowed: this.allowedBuyers.size === 0 || this.allowedBuyers.has(buyerAddress), mode: this.allowedBuyers.size ? "restricted" : "open" });
+      }
       if (request.method === "GET" && url.pathname === "/v2/directory/health") {
         if (!this.directoryAggregator) return this.reply(response, 503, { ok: false, service: "supercuts-directory", reason: "aggregator not configured" });
         const capabilities = await this.db.listDirectory();
@@ -198,7 +203,7 @@ export class SellerService {
           const capabilityId = validId(input.capabilityId, "capabilityId"), row = this.#catalog.get(capabilityId) ?? fail("SELLER_CAPABILITY_UNKNOWN", "capability is unknown"), slot = this.#slots.get(row.seller_id)!;
           const sessionId = validId(input.sessionId, "sessionId"), runId = validId(input.runId, "runId"), buyerAddress = String(input.buyerAddress ?? ""), buyerPublicKey = String(input.buyerPublicKey ?? ""), ciphertext = String(input.ciphertext ?? ""), buyerSignature = String(input.buyerSignature ?? "");
           if (!/^0x[0-9a-f]{64}$/.test(buyerAddress) || buyerPublicKey.length > 1024 || ciphertext.length > 16384 || !ciphertext || !buyerSignature) fail("SELLER_REQUEST_INVALID", "buyer identity or encrypted offer is invalid");
-          if (!this.allowedBuyers.has(buyerAddress)) fail("SELLER_BUYER_FORBIDDEN", "buyer is outside the seller service allowlist");
+          if (this.allowedBuyers.size > 0 && !this.allowedBuyers.has(buyerAddress)) fail("SELLER_BUYER_FORBIDDEN", "buyer is outside the seller service allowlist");
           const signedBytes = Buffer.from(`${sessionId}:${capabilityId}:${buyerPublicKey}:${sha256(Buffer.from(ciphertext, "base64"))}`);
           if (!(await isValidPersonalMessageSignature(signedBytes, buyerSignature, { address: buyerAddress }))) fail("SELLER_BUYER_SIGNATURE_INVALID", "buyer did not authorize this negotiation request");
           const prior = slot.app.store.db.prepare("SELECT capability_id AS capabilityId,buyer_address AS buyerAddress,buyer_public_key AS buyerPublicKey,request_ciphertext AS ciphertext,reply_ciphertext AS replyCiphertext,reply_signature AS replySignature,request_blob_id AS requestBlobId,reply_blob_id AS replyBlobId,transcript_hash AS transcriptHash,brief_hash AS briefHash,run_id AS runId FROM remote_negotiations WHERE session_id=?").get(sessionId) as Record<string, unknown> | undefined;
@@ -316,7 +321,7 @@ if (process.argv[1] && import.meta.url.endsWith(process.argv[1])) {
   const required = (key: string) => process.env[key] ?? fail("SELLER_CONFIG_MISSING", `${key} is required`);
   const port = Number(process.env.PORT ?? "3000");
   const origin = required("SELLER_ORIGIN");
-  SellerService.create({ db: new SellerDatabase(required("SUPABASE_URL"), required("SUPABASE_SERVICE_ROLE_KEY")), snapshotKey: required("SELLER_STATE_KEY"), origin, facilitatorUrl: required("FACILITATOR_URL"), facilitatorKey: required("FACILITATOR_SHARED_KEY"), allowedBuyers: new Set(required("SELLER_ALLOWED_BUYERS").split(",")), claudeKey: required("CLAUDE_API_KEY"), ...(process.env.DIRECTORY_WALRUS_AGGREGATOR ? { directoryAggregator: process.env.DIRECTORY_WALRUS_AGGREGATOR } : {}) })
+  SellerService.create({ db: new SellerDatabase(required("SUPABASE_URL"), required("SUPABASE_SERVICE_ROLE_KEY")), snapshotKey: required("SELLER_STATE_KEY"), origin, facilitatorUrl: required("FACILITATOR_URL"), facilitatorKey: required("FACILITATOR_SHARED_KEY"), allowedBuyers: new Set((process.env.SELLER_ALLOWED_BUYERS ?? "").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean)), claudeKey: required("CLAUDE_API_KEY"), ...(process.env.DIRECTORY_WALRUS_AGGREGATOR ? { directoryAggregator: process.env.DIRECTORY_WALRUS_AGGREGATOR } : {}) })
     .then((service) => { const server = service.createServer(); server.listen(port, "0.0.0.0"); const close = () => server.close(() => { service.close(); process.exit(0); }); process.on("SIGINT", close); process.on("SIGTERM", close); })
     .catch((error) => { process.stderr.write(`${error instanceof Error ? error.message : "seller service failed"}\n`); process.exitCode = 1; });
 }

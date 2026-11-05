@@ -35,7 +35,7 @@ const V2_RELAYER = "0x405f473ed1f7f609b16d3d7dabc7cd04831cfc73b4a7fcebe9fa502d72
 const COIN = "0x2::sui::SUI";
 const WRITE = new Set(["wallet.deposit", "wallet.recover", "wallet.withdraw", "wallet.exit.queue", "wallet.exit.finalize", "offer.open", "offer.propose", "offer.counter", "offer.accept", "pay.shielded", "pay.x402", "resource.serve", "memory.remember", "disclose", "capability.publish", "settlement.plan", "settlement.approve-review", "memory.policy"]);
 const ROLE_COMMANDS: Record<Role, ReadonlySet<string>> = {
-  buyer: new Set(["status", "doctor", "capability.discover", "settlement.plan", "settlement.approve-review", "memory.policy", "wallet.deposit", "wallet.balance", "wallet.recover", "wallet.withdraw", "wallet.exit.queue", "wallet.exit.status", "wallet.exit.finalize", "offer.open", "offer.propose", "offer.accept", "offer.show", "pay.quote", "pay.shielded", "pay.x402", "pay.status", "resource.fetch", "memory.remember", "memory.recall", "memory.status", "memory.inventory", "remote.catalog", "remote.rank-briefs", "remote.negotiate", "remote.quote", "remote.purchase-brief", "remote.agreement", "remote.settle-analysis", "remote.delivery", "remote.events", "disclose"]),
+  buyer: new Set(["status", "doctor", "capability.discover", "settlement.plan", "settlement.approve-review", "memory.policy", "wallet.deposit", "wallet.balance", "wallet.recover", "wallet.withdraw", "wallet.exit.queue", "wallet.exit.status", "wallet.exit.finalize", "offer.open", "offer.propose", "offer.accept", "offer.show", "pay.quote", "pay.shielded", "pay.x402", "pay.status", "resource.fetch", "memory.remember", "memory.recall", "memory.status", "memory.inventory", "remote.catalog", "remote.rank-briefs", "remote.negotiate", "remote.quote", "remote.purchase-brief", "remote.agreement", "remote.settle-analysis", "remote.delivery", "remote.events", "remote.research", "disclose"]),
   seller: new Set(["status", "doctor", "capability.publish", "wallet.balance", "wallet.recover", "wallet.withdraw", "wallet.exit.queue", "wallet.exit.status", "wallet.exit.finalize", "offer.counter", "offer.show", "pay.status", "resource.serve", "resource.fetch", "memory.remember", "memory.recall", "memory.status", "memory.inventory"]),
   auditor: new Set(["status", "doctor", "audit.verify"]),
 };
@@ -563,6 +563,7 @@ export class Phase3App {
     if (command === "offer.counter") return output(command, typeof args.agreement === "string" ? runtime.prepareSellerAgreement(required(args, "session"), args.agreement) : this.localOffer(command, args));
     if (command === "pay.shielded") { const receipt = await runtime.settleShielded(required(args, "session"), required(args, "operation-id"), (actual) => { this.bindSettlementPlan(command, args, actual); }); this.enqueueVerifiedOutcome("settlement", required(args, "operation-id"), receipt, typeof args["plan-hash"] === "string" ? args["plan-hash"] : undefined, { counterparty: String(receipt.counterparty), asset: String(receipt.asset) }); return output(command, receipt); }
     if (command === "pay.x402") { const receipt = await runtime.payX402Resource(required(args, "operation-id"), required(args, "resource-url"), (actual) => { this.bindSettlementPlan(command, args, actual); }); const { response: _response, ...evidence } = receipt; this.enqueueVerifiedOutcome("settlement", required(args, "operation-id"), evidence, typeof args["plan-hash"] === "string" ? args["plan-hash"] : undefined, { counterparty: String(receipt.counterparty), asset: String(receipt.asset) }); return output(command, receipt); }
+    if (command === "pay.status") return output(command, await runtime.paymentStatus(required(args, "operation-id"), args.reconcile === true));
     if (command === "resource.serve") {
       const requestId = required(args, "request-id"), body = required(args, "body"), resource = { requestId, responseHash: hash(Buffer.from(body, "base64")), body, deliveryStatus: "ready" }; record(this.store, "resource", requestId, resource); return output(command, { requestId, responseHash: resource.responseHash, deliveryStatus: resource.deliveryStatus });
     }
@@ -759,12 +760,21 @@ export class Phase3App {
 export function output(command: string, data: Record<string, unknown>): CommandResult { return { schemaVersion: "supercuts.v1", ok: true, command, data }; }
 export function errorOutput(error: unknown): Record<string, unknown> {
   const known = error instanceof SupercutsError ? error : new SupercutsError("INTERNAL_ERROR", error instanceof Error ? error.message : "unknown error");
-  return { schemaVersion: "supercuts.v1", ok: false, error: { code: known.code, message: known.message, recovery: recovery(known.code) } };
+  const retryable = ["BROADCAST_UNRESOLVED", "DELIVERY_IN_PROGRESS", "DELIVERY_PENDING", "ONBOARDING_SERVICE_UNAVAILABLE", "SELLER_DIRECTORY_UNAVAILABLE", "WALRUS_WRITE_FAILED", "WALRUS_READ_FAILED", "X402_FACILITATOR_UNAVAILABLE"].includes(known.code);
+  const sameOperation = retryable || ["OPERATION_ID_CONFLICT", "DEAL_OPERATION_CONFLICT"].includes(known.code);
+  return { schemaVersion: "supercuts.v1", ok: false, error: { code: known.code, message: known.message, recovery: recovery(known.code), retryable, retryWithSameOperationId: sameOperation } };
 }
 function recovery(code: string): string {
   if (code === "LOCAL_AUTH_REQUIRED") return "repeat with --authorize after reviewing the operation";
   if (code === "PROFILE_NOT_FOUND") return "run supercuts init --role <role> --mock";
   if (code.startsWith("POLICY_")) return "change the request or update the owner-controlled profile policy";
   if (code === "ARTIFACT_HASH_MISMATCH") return "restore the pinned artifact or reinitialize with an audited manifest";
+  if (code === "SESSION_MISMATCH") return "read status.session.runId and retry with that session, or omit runId on the v2 deal path";
+  if (code === "DEAL_MANDATE_INACTIVE") return "renew the owner mandate locally, then resume the same deal operation ID";
+  if (code === "BROADCAST_UNRESOLVED") return "reconcile or resume with the same operation ID; never create a replacement payment";
+  if (code === "DELIVERY_PENDING") return "resume the same root operation ID; completed selection, payment, and agreement stages will not run again";
+  if (code === "X402_FACILITATOR_UNAVAILABLE") return "the signed transaction remains journaled; resume the same operation ID after facilitator health recovers";
+  if (code === "OPERATION_ID_CONFLICT" || code === "DEAL_OPERATION_CONFLICT") return "reuse the original exact input for this operation ID or start a deliberately new deal";
+  if (code === "X402_TRANSACTION_EXPIRY_INVALID") return "run onboarding doctor against the configured Sui RPC and retry the same operation ID after compatibility is restored";
   return "inspect the stable error code and retry with corrected input";
 }

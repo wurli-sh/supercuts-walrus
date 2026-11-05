@@ -23,6 +23,18 @@ export function x402ResourceFailure(status: number, response: Uint8Array): strin
   return code || message ? `${fallback}: ${[code, message].filter(Boolean).join(": ")}` : fallback;
 }
 
+export function timestampExpirationUnsupported(value: unknown): boolean {
+  const messages: string[] = [];
+  const visit = (item: unknown, depth = 0): void => {
+    if (depth > 3 || item == null) return;
+    if (typeof item === "string") messages.push(item);
+    else if (item instanceof Error) { messages.push(item.message); visit(item.cause, depth + 1); }
+    else if (typeof item === "object") for (const nested of Object.values(item as Record<string, unknown>)) visit(nested, depth + 1);
+  };
+  visit(value);
+  return messages.some((message) => /timestamp-based transaction expiration is not yet supported|timestamp.*expiration.*not supported/i.test(message));
+}
+
 export interface LiveRuntimeProfile {
   role: "buyer" | "seller" | "auditor"; packageId: string; poolId: string; coinType: string; verifierVersion: number;
   live: {
@@ -132,6 +144,23 @@ export class LiveRuntime {
   }
   private async confirmTatum(digest: string, checkpoint: string): Promise<void> {
     assertTatumFinality(await this.tatum.getTransaction(digest), digest, checkpoint);
+  }
+  async paymentStatus(operationId: string, reconcile = false): Promise<Record<string, unknown>> {
+    const row = this.store.db.prepare("SELECT digest,status,updated_at AS updatedAt FROM live_signed_transactions WHERE operation_id=?").get(operationId) as { digest: string; status: string; updatedAt: number } | undefined;
+    if (!row) fail("OPERATION_NOT_FOUND", "payment operation was not found in the live transaction journal");
+    const payment = row as { digest: string; status: string; updatedAt: number };
+    const context = this.store.db.prepare("SELECT kind FROM live_operation_context WHERE operation_id=?").get(operationId) as { kind: string } | undefined;
+    const delivered = Boolean(this.store.db.prepare("SELECT 1 FROM live_x402_deliveries WHERE operation_id=?").get(operationId));
+    if (payment.status === "finalized") return { operationId, status: "finalized", transactionDigest: payment.digest, kind: context?.kind ?? "unknown", deliveryStatus: delivered ? "delivered" : "not-applicable-or-pending", finalized: true, safeToResumeSameOperationId: true };
+    if (!reconcile) return { operationId, status: payment.status, transactionDigest: payment.digest, kind: context?.kind ?? "unknown", deliveryStatus: delivered ? "delivered" : "pending", finalized: false, chainStatus: "unchecked", safeToResumeSameOperationId: true };
+    try {
+      const transaction = await this.client.waitForTransaction({ digest: payment.digest, timeout: 5_000, include: { effects: true } });
+      const checkpoint = assertSuiFinality(transaction, payment.digest); await this.confirmTatum(payment.digest, checkpoint);
+      this.store.db.prepare("UPDATE live_signed_transactions SET status='finalized',updated_at=? WHERE operation_id=?").run(Date.now(), operationId);
+      return { operationId, status: "finalized", transactionDigest: payment.digest, kind: context?.kind ?? "unknown", deliveryStatus: delivered ? "delivered" : "pending", finalized: true, checkpoint, tatumVerified: true, safeToResumeSameOperationId: true };
+    } catch {
+      return { operationId, status: payment.status, transactionDigest: payment.digest, kind: context?.kind ?? "unknown", deliveryStatus: delivered ? "delivered" : "pending", finalized: false, chainStatus: "not-found-or-pending", safeToResumeSameOperationId: true };
+    }
   }
   private prepareOpening(opening: NoteOpeningData, role: "input" | "change", operationId: string, leaves: bigint[]): void {
     const commitment = hex(opening.commitment), key = `note:${commitment}`;
@@ -365,6 +394,14 @@ export class LiveRuntime {
     const validity = resolvedExpiration?.$kind === "ValidDuring" ? resolvedExpiration.ValidDuring : fail("X402_TRANSACTION_EXPIRY_INVALID", "Sui did not resolve a bounded transaction validity window");
     if (validity.minEpoch == null || validity.maxEpoch == null || !validity.chain || validity.nonce == null) fail("X402_TRANSACTION_EXPIRY_INVALID", "Sui resolved an incomplete transaction validity window");
     tx.setExpiration({ ValidDuring: { minEpoch: validity.minEpoch, maxEpoch: validity.maxEpoch, minTimestamp: validity.minTimestamp ?? null, maxTimestamp: expiresAt, chain: validity.chain, nonce: validity.nonce } });
+    try {
+      const probe = await this.client.simulateTransaction({ transaction: tx, include: { effects: true } });
+      const simulated = probe.Transaction ?? probe.FailedTransaction;
+      if (!simulated?.status.success && timestampExpirationUnsupported(simulated?.status?.error)) tx.setExpiration({ ValidDuring: { minEpoch: validity.minEpoch, maxEpoch: validity.maxEpoch, minTimestamp: validity.minTimestamp ?? null, maxTimestamp: null, chain: validity.chain, nonce: validity.nonce } });
+    } catch (error) {
+      if (!timestampExpirationUnsupported(error)) throw error;
+      tx.setExpiration({ ValidDuring: { minEpoch: validity.minEpoch, maxEpoch: validity.maxEpoch, minTimestamp: validity.minTimestamp ?? null, maxTimestamp: null, chain: validity.chain, nonce: validity.nonce } });
+    }
     const legacyIntentHash = hash(JSON.stringify({ domain: "supercuts-x402-v2", operationId, resourceUrl, payTo, asset, amount: amount.toString() }));
     const intentHash = hash(JSON.stringify({ domain: "supercuts-x402-v2", operationId, resourceUrl, payTo, asset, amount: amount.toString(), requestId, requirementsHash: String(extra?.requirementsHash) })), signed = await this.signed(operationId, intentHash, tx, legacyIntentHash);
     const unsignedBinding = { requestId, nonce, requirementsHash: requirementsHash(unsignedRequirements), transactionDigest: signed.digest, payer: this.signer.toSuiAddress() };

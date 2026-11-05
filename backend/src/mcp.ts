@@ -9,15 +9,18 @@ import { createConfiguredDealEngine } from "./deal-adapter.js";
 import { LiveDealPorts } from "./live-deal-ports.js";
 import type { SettlementPlanV1 } from "./settlement.js";
 import { createRequire } from "node:module";
+import { fail } from "./errors.js";
+import { acquireRoleHomeLease } from "./role-lock.js";
 
 const PACKAGE_VERSION = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
 const home = homePath({});
 const app = new Phase3App(home);
+const roleLease = acquireRoleHomeLease(home);
 const mandate = loadMandate(home);
-const remote = app.profile.role === "buyer" && !app.profile.mock && process.env.SUPERCUTS_SELLER_URL ? new RemoteBuyer(app, mandate, process.env.SUPERCUTS_SELLER_URL) : undefined;
-const eventLog = process.env.SUPERCUTS_EVENT_PATH && process.env.SUPERCUTS_RUN_ID ? new DemoEventLog(process.env.SUPERCUTS_EVENT_PATH, process.env.SUPERCUTS_RUN_ID) : undefined;
+const remote = roleLease.acquired && app.profile.role === "buyer" && !app.profile.mock && process.env.SUPERCUTS_SELLER_URL ? new RemoteBuyer(app, mandate, process.env.SUPERCUTS_SELLER_URL) : undefined;
+const eventLog = roleLease.acquired && process.env.SUPERCUTS_EVENT_PATH && process.env.SUPERCUTS_RUN_ID ? new DemoEventLog(process.env.SUPERCUTS_EVENT_PATH, process.env.SUPERCUTS_RUN_ID) : undefined;
 if (eventLog) eventLog.append({ actor: "operator", stage: "run", status: "started", publicDetails: { flow: remote ? "codex-remote" : "codex-deal-v2" }, evidenceHashes: [], explorerLinks: [] });
 let memoryTickRunning = false;
 const memoryTick = async () => {
@@ -27,12 +30,12 @@ const memoryTick = async () => {
   catch (error) { process.stderr.write(`${error && typeof error === "object" && "code" in error ? String(error.code) : "MEMORY_WORKER_ERROR"}\n`); }
   finally { memoryTickRunning = false; }
 };
-const memoryConfigured = app.profile.role === "buyer" && !app.profile.mock && Boolean(app.store.getSecret("live:memory-config"));
+const memoryConfigured = roleLease.acquired && app.profile.role === "buyer" && !app.profile.mock && Boolean(app.store.getSecret("live:memory-config"));
 if (memoryConfigured) app.recoverStaleMemorySubmissions();
 const memoryTimer = memoryConfigured ? setInterval(() => { void memoryTick(); }, 30_000) : undefined;
 if (memoryTimer) { memoryTimer.unref(); void memoryTick(); }
 const tools: Record<string, string> = {
-  buyer: "status,doctor,deal.catalog,deal.policy,deal.execute,deal.get,deal.resume,deal.reconcile,deal.evidence,deal.delivery,capability.discover,settlement.plan,wallet.deposit,wallet.balance,wallet.recover,wallet.withdraw,wallet.exit.queue,wallet.exit.status,wallet.exit.finalize,offer.open,offer.propose,offer.accept,offer.show,pay.quote,pay.shielded,pay.x402,pay.status,resource.fetch,memory.remember,memory.recall,memory.status,memory.inventory,remote.catalog,remote.rank-briefs,remote.negotiate,remote.quote,remote.purchase-brief,remote.agreement,remote.settle-analysis,remote.delivery,remote.events,disclose",
+  buyer: "status,doctor,deal.catalog,deal.policy,deal.execute,deal.get,deal.resume,deal.reconcile,deal.evidence,deal.delivery,capability.discover,settlement.plan,wallet.deposit,wallet.balance,wallet.recover,wallet.withdraw,wallet.exit.queue,wallet.exit.status,wallet.exit.finalize,offer.open,offer.propose,offer.accept,offer.show,pay.quote,pay.shielded,pay.x402,pay.status,resource.fetch,memory.remember,memory.recall,memory.status,memory.inventory,remote.catalog,remote.rank-briefs,remote.negotiate,remote.quote,remote.purchase-brief,remote.agreement,remote.settle-analysis,remote.delivery,remote.events,remote.research,disclose",
   seller: "status,doctor,capability.publish,wallet.balance,wallet.recover,wallet.withdraw,wallet.exit.queue,wallet.exit.status,wallet.exit.finalize,offer.counter,offer.show,pay.status,resource.serve,resource.fetch,memory.remember,memory.recall,memory.status",
   auditor: "status,doctor,audit.verify",
 };
@@ -40,6 +43,15 @@ const send = (value: unknown) => process.stdout.write(`${JSON.stringify(value)}\
 function logTool(name: string, data: Record<string, unknown>): void {
   if (!eventLog) return;
   const append = (actor: "buyer" | "supercuts" | "confidential-seller", stage: string, details: Record<string, unknown>, hashes: string[] = []) => eventLog.append({ actor, stage, status: "complete", publicDetails: details, evidenceHashes: hashes, explorerLinks: [] });
+  if (name === "remote.research") {
+    if (data.replayed === true) return;
+    logTool("remote.rank-briefs", data.selection as Record<string, unknown>);
+    logTool("remote.purchase-brief", data.brief as Record<string, unknown>);
+    logTool("remote.agreement", data.agreement as Record<string, unknown>);
+    logTool("remote.settle-analysis", data.settlement as Record<string, unknown>);
+    logTool("remote.delivery", data.analysis as Record<string, unknown>);
+    return;
+  }
   if (name === "remote.rank-briefs") append("buyer", "seller-selection", { winner: (data.winner as Record<string, unknown> | undefined)?.capabilityId, rankings: (data.rankings as Array<Record<string, unknown>> | undefined)?.map((item) => ({ capabilityId: item.capabilityId, score: item.score, priceMist: item.priceMist })) });
   if (name === "remote.negotiate") append("buyer", "negotiation", { capabilityId: data.capabilityId, sessionId: data.sessionId, requestBlobId: data.requestBlobId, replyBlobId: data.replyBlobId, transcriptHash: data.transcriptHash }, typeof data.transcriptHash === "string" ? [data.transcriptHash] : []);
   if (name === "remote.purchase-brief") {
@@ -77,7 +89,7 @@ rl.on("line", (line) => { queue = queue.then(async () => {
   try {
     if (request.method === "initialize") return send({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: `supercuts-${app.profile.role}`, version: PACKAGE_VERSION } } });
     if (request.method === "notifications/initialized") return;
-    const available = tools[app.profile.role]!.split(",").filter((name) => (remote || !name.startsWith("remote.")) && (app.profile.mock || memoryConfigured || !name.startsWith("memory.")) && (!name.startsWith("deal.") || mandate.version === "supercuts.mandate.v2") && (["status", "doctor"].includes(name) || mandate.allowedCommands.includes(name === "deal.reconcile" ? "deal.resume" : name)));
+    const available = tools[app.profile.role]!.split(",").filter((name) => (roleLease.acquired || name === "status") && (remote || !name.startsWith("remote.")) && (app.profile.mock || memoryConfigured || !name.startsWith("memory.")) && (!name.startsWith("deal.") || mandate.version === "supercuts.mandate.v2") && (["status", "doctor"].includes(name) || mandate.allowedCommands.includes(name === "deal.reconcile" ? "deal.resume" : name)));
     if (request.method === "tools/list") return send({ jsonrpc: "2.0", id: request.id, result: { tools: available.map((name) => { const spec = toolSchema(name); return { name, description: spec.description, inputSchema: spec.inputSchema }; }) } });
     if (request.method === "tools/call") {
       const name = String(request.params?.name ?? ""), raw = (request.params?.arguments ?? {}) as Record<string, unknown>;
@@ -86,7 +98,7 @@ rl.on("line", (line) => { queue = queue.then(async () => {
       let data: Record<string, unknown>;
       if (name.startsWith("deal.")) {
         const spec = toolSchema(name); const { validateToolArguments } = await import("./mandate.js"); validateToolArguments(spec, raw);
-        if (mandate.version !== "supercuts.mandate.v2" || !mandate.allowedCommands.includes(name === "deal.reconcile" ? "deal.resume" : name) || (name === "deal.execute" || name === "deal.resume") && Date.now() > mandate.expiresAt) throw new Error("deal tool is not authorized by an active v2 mandate");
+        if (mandate.version !== "supercuts.mandate.v2" || !mandate.allowedCommands.includes(name === "deal.reconcile" ? "deal.resume" : name) || (name === "deal.execute" || name === "deal.resume") && Date.now() > mandate.expiresAt) fail("DEAL_MANDATE_INACTIVE", "deal tool is not authorized by an active v2 mandate");
         if (name === "deal.catalog") data = { capabilities: (await new LiveDealPorts(app, mandate).catalog()).map(({ origin, registration }) => ({ origin, manifest: registration.manifest, manifestBlobId: registration.manifestBlobId })) };
         else if (name === "deal.policy") {
           const hasTable = Boolean(app.store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mandate_operations'").get());
@@ -106,19 +118,23 @@ rl.on("line", (line) => { queue = queue.then(async () => {
         } else if (name === "deal.resume") data = await (await createConfiguredDealEngine(app)).resume(String(raw.operationId)) as unknown as Record<string, unknown>;
         else data = new DealJournal(app.store).get(String(raw.operationId)) as unknown as Record<string, unknown>;
       } else if (name.startsWith("remote.")) {
-        if (!remote || !mandate.allowedCommands.includes(name) || Date.now() > mandate.expiresAt) throw new Error("remote buyer tool is not authorized or configured");
+        const buyer = remote ?? fail("REMOTE_MANDATE_INACTIVE", "remote buyer tool is not configured");
+        if (!mandate.allowedCommands.includes(name) || Date.now() > mandate.expiresAt) fail("REMOTE_MANDATE_INACTIVE", "remote buyer tool is not authorized by an active mandate");
+        if (!["remote.catalog", "remote.rank-briefs"].includes(name) && raw.runId === undefined && process.env.SUPERCUTS_RUN_ID) raw.runId = process.env.SUPERCUTS_RUN_ID;
         const spec = toolSchema(name); const { validateToolArguments } = await import("./mandate.js"); validateToolArguments(spec, raw);
-        if (process.env.SUPERCUTS_RUN_ID && name !== "remote.catalog" && name !== "remote.rank-briefs" && raw.runId !== undefined && raw.runId !== process.env.SUPERCUTS_RUN_ID) throw new Error("remote tool run ID differs from this buyer demo run");
-        data = name === "remote.catalog" ? await remote.catalog() :
-          name === "remote.rank-briefs" ? await remote.rankBriefs(raw as { budget: string; topic: string }) :
-          name === "remote.negotiate" ? await remote.negotiate(raw as { capabilityId: string; sessionId: string; runId: string; task: string; opening: string; maximum: string; briefHash?: string }) :
-          name === "remote.quote" ? await remote.quote(raw as { capabilityId: string; operationId: string; requestId: string; runId: string; task: string; briefHash?: string }) :
-          name === "remote.purchase-brief" ? await remote.purchaseBrief(raw as { capabilityId: string; operationId: string; requestId: string; runId: string; task: string; budget: string }) :
-          name === "remote.agreement" ? await remote.agreement(raw as { capabilityId: string; operationId: string; sessionId: string; runId: string; briefHash: string }) :
-          name === "remote.settle-analysis" ? await remote.settleAnalysis(raw as { sessionId: string; operationId: string }) :
-          name === "remote.delivery" ? await remote.delivery(raw as { sessionId: string; operationId: string }) :
-          name === "remote.events" ? await remote.events(String(raw.runId)) : {};
+        if (process.env.SUPERCUTS_RUN_ID && name !== "remote.catalog" && name !== "remote.rank-briefs" && raw.runId !== undefined && raw.runId !== process.env.SUPERCUTS_RUN_ID) fail("SESSION_MISMATCH", "remote tool run ID differs from the active buyer session");
+        data = name === "remote.catalog" ? await buyer.catalog() :
+          name === "remote.rank-briefs" ? await buyer.rankBriefs(raw as { budget: string; topic: string }) :
+          name === "remote.negotiate" ? await buyer.negotiate(raw as { capabilityId: string; sessionId: string; runId: string; task: string; opening: string; maximum: string; briefHash?: string }) :
+          name === "remote.quote" ? await buyer.quote(raw as { capabilityId: string; operationId: string; requestId: string; runId: string; task: string; briefHash?: string }) :
+          name === "remote.purchase-brief" ? await buyer.purchaseBrief(raw as { capabilityId: string; operationId: string; requestId: string; runId: string; task: string; budget: string }) :
+          name === "remote.agreement" ? await buyer.agreement(raw as { capabilityId: string; operationId: string; sessionId: string; runId: string; briefHash: string }) :
+          name === "remote.settle-analysis" ? await buyer.settleAnalysis(raw as { sessionId: string; operationId: string }) :
+          name === "remote.delivery" ? await buyer.delivery(raw as { sessionId: string; operationId: string }) :
+          name === "remote.events" ? await buyer.events(String(raw.runId)) :
+          name === "remote.research" ? await buyer.research({ operationId: String(raw["operation-id"]), runId: String(raw.runId), topic: String(raw.topic), budget: String(raw.budget) }) : {};
       } else data = await executeMandated(app, mandate, name, raw);
+      if (name === "status") data = { ...data, session: { runId: process.env.SUPERCUTS_RUN_ID ?? null }, roleHomeLease: roleLease.acquired ? "acquired" : "busy", ...(roleLease.ownerPid ? { roleHomeOwnerPid: roleLease.ownerPid } : {}) };
       logTool(name, data);
       const result = { schemaVersion: "supercuts.v1", ok: true, command: name, data };
       return send({ jsonrpc: "2.0", id: request.id, result: { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result } });
@@ -126,5 +142,6 @@ rl.on("line", (line) => { queue = queue.then(async () => {
     return send({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: "Method not found" } });
   } catch (error) { return send({ jsonrpc: "2.0", id: request.id, result: { isError: true, content: [{ type: "text", text: JSON.stringify(errorOutput(error)) }], structuredContent: errorOutput(error) } }); }
   }).catch((error) => send({ jsonrpc: "2.0", error: { code: -32603, message: error instanceof Error ? error.message : "Internal error" }, id: null })); });
-const close = () => { if (memoryTimer) clearInterval(memoryTimer); app.close(); process.exit(0); };
+const close = () => { if (memoryTimer) clearInterval(memoryTimer); roleLease.release(); app.close(); process.exit(0); };
 process.on("SIGINT", close); process.on("SIGTERM", close);
+process.on("exit", () => roleLease.release());

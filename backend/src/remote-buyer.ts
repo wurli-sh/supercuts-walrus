@@ -6,12 +6,30 @@ import { validateCapabilityManifest, verifySignedCapability, type CapabilityMani
 import { fail } from "./errors.js";
 import { executeMandated, type AgentMandate } from "./mandate.js";
 import type { Phase3App } from "./phase3.js";
+
+export function analysisAgreementDraft(input: {
+  sessionId: string; transcriptHash: string; serviceHash: string; paymentAmount: string;
+  buyerPublicKey: string[]; counterparty: string; capabilityId: string; manifestHash: string;
+  now?: number; scalar?: () => string;
+}): Record<string, unknown> {
+  const scalar = input.scalar ?? (() => BigInt(`0x${randomBytes(16).toString("hex")}`).toString());
+  return {
+    sessionId: input.sessionId, rail: "shielded", dealId: scalar(), revision: "1",
+    transcriptRootLo: BigInt(`0x${input.transcriptHash.slice(0, 32)}`).toString(),
+    transcriptRootHi: BigInt(`0x${input.transcriptHash.slice(32)}`).toString(),
+    serviceDigestLo: BigInt(`0x${input.serviceHash.slice(0, 32)}`).toString(),
+    serviceDigestHi: BigInt(`0x${input.serviceHash.slice(32)}`).toString(),
+    settlementNonceLo: scalar(), settlementNonceHi: scalar(), paymentAmount: input.paymentAmount,
+    blinding: scalar(), expiry: String((input.now ?? Date.now()) + 30 * 60_000),
+    buyerPublicKey: input.buyerPublicKey, counterparty: input.counterparty,
+    capabilityId: input.capabilityId, manifestHash: input.manifestHash,
+  };
+}
 import { decryptSessionMessage, encryptSessionMessage } from "./negotiation.js";
 
 interface Entry { manifest: CapabilityManifest; blobId: string; signature: string; transportPublicKey: string; preview: Record<string, unknown>; }
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const num = (value: unknown, name: string) => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : fail("SELLER_PREVIEW_INVALID", `${name} must be between zero and one`);
-const halves = (content: string): [string, string] => { const hash = sha256(content); return [BigInt(`0x${hash.slice(0, 32)}`).toString(), BigInt(`0x${hash.slice(32)}`).toString()]; };
 
 export class RemoteBuyer {
   readonly #origin: URL;
@@ -149,10 +167,13 @@ export class RemoteBuyer {
     if (plan.status !== "approved" || plan.rail !== "shielded" || !Array.isArray(plan.reasonCodes) || !plan.reasonCodes.includes("MEMORY_PRIVACY_APPLIED")) fail("BUYER_PRIVACY_REQUIRED", "saved owner privacy rule did not select shielded settlement");
     const publicKey = this.app.store.getSecret("identity:x25519-public")?.toString("base64url") ?? fail("IDENTITY_MISSING", "buyer delivery key is missing");
     const identity = (await this.app.execute("doctor", {})).data as { babyJubPublicKey: string[] };
-    const [transcriptRootLo, transcriptRootHi] = [BigInt(`0x${String(negotiated.transcriptHash).slice(0, 32)}`).toString(), BigInt(`0x${String(negotiated.transcriptHash).slice(32)}`).toString()];
-    const [serviceDigestLo, serviceDigestHi] = halves(JSON.stringify({ capabilityId: input.capabilityId, briefHash: input.briefHash, artifactSha256, deliveryPublicKey: publicKey }));
-    const scalar = () => BigInt(`0x${randomBytes(16).toString("hex")}`).toString();
-    const draft = { dealId: scalar(), revision: "1", transcriptRootLo, transcriptRootHi, serviceDigestLo, serviceDigestHi, settlementNonceLo: scalar(), settlementNonceHi: scalar(), paymentAmount: entry.manifest.priceBand.minimum, blinding: scalar(), expiry: String(Date.now() + 30 * 60_000), buyerPublicKey: identity.babyJubPublicKey, counterparty: entry.manifest.sellerId, capabilityId: entry.manifest.capabilityId, manifestHash: entry.manifest.manifestHash };
+    const serviceHash = sha256(JSON.stringify({ capabilityId: input.capabilityId, briefHash: input.briefHash, artifactSha256, deliveryPublicKey: publicKey }));
+    this.app.store.db.exec("CREATE TABLE IF NOT EXISTS remote_buyer_agreements(session_id TEXT PRIMARY KEY,context_hash TEXT NOT NULL,draft_json TEXT NOT NULL,created_at INTEGER NOT NULL)");
+    const contextHash = sha256(JSON.stringify({ capabilityId: input.capabilityId, operationId: input.operationId, sessionId: input.sessionId, runId: input.runId, briefHash: input.briefHash, transcriptHash: negotiated.transcriptHash, serviceHash, artifactSha256 }));
+    const priorDraft = this.app.store.db.prepare("SELECT context_hash AS contextHash,draft_json AS draftJson FROM remote_buyer_agreements WHERE session_id=?").get(input.sessionId) as { contextHash: string; draftJson: string } | undefined;
+    if (priorDraft && priorDraft.contextHash !== contextHash) fail("AGREEMENT_SESSION_CONFLICT", "analysis session identifies a different agreement context");
+    const draft = priorDraft ? JSON.parse(priorDraft.draftJson) as Record<string, unknown> : analysisAgreementDraft({ sessionId: input.sessionId, transcriptHash: String(negotiated.transcriptHash), serviceHash, paymentAmount: entry.manifest.priceBand.minimum, buyerPublicKey: identity.babyJubPublicKey, counterparty: entry.manifest.sellerId, capabilityId: entry.manifest.capabilityId, manifestHash: entry.manifest.manifestHash });
+    if (!priorDraft) this.app.store.db.prepare("INSERT INTO remote_buyer_agreements(session_id,context_hash,draft_json,created_at) VALUES(?,?,?,?)").run(input.sessionId, contextHash, JSON.stringify(draft), Date.now());
     const signed = await this.request("/v1/agreement", { method: "POST", body: JSON.stringify({ capabilityId: input.capabilityId, sessionId: input.sessionId, runId: input.runId, briefHash: input.briefHash, deliveryPublicKey: publicKey, agreement: Buffer.from(JSON.stringify(draft)).toString("base64url") }) });
     if (signed.artifactSha256 !== artifactSha256 || signed.capabilityId !== input.capabilityId || signed.sessionId !== input.sessionId) fail("AGREEMENT_BINDING_MISMATCH", "seller response changed the prepared artifact or session");
     const accepted = await executeMandated(this.app, this.mandate, "offer.accept", { "operation-id": `accept-${input.sessionId}`, session: input.sessionId, agreement: signed.agreement, "plan-hash": String(plan.planHash) });
@@ -181,6 +202,37 @@ export class RemoteBuyer {
     if (sha256(artifact) !== response.artifactSha256) fail("DELIVERY_HASH_MISMATCH", "seller artifact differs from its accepted hash");
     const recorded = (await this.app.execute("resource.fetch", { "request-id": input.sessionId, "operation-id": input.operationId, response: artifact.toString("base64url") })).data;
     return { status: "delivered", sessionId: input.sessionId, artifactSha256: response.artifactSha256, body: artifact.toString("utf8"), record: { deliveryStatus: recorded.deliveryStatus, responseHash: recorded.responseHash } };
+  }
+
+  async research(input: { operationId: string; runId: string; topic: string; budget: string }): Promise<Record<string, unknown>> {
+    if (!input.operationId || input.operationId.length > 256 || !/^[1-9][0-9]*$/.test(input.budget)) fail("BUYER_WORKFLOW_INVALID", "research requires a stable operation ID and positive total budget");
+    this.app.store.db.exec("CREATE TABLE IF NOT EXISTS remote_research_workflows(operation_id TEXT PRIMARY KEY,input_hash TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,completed_at INTEGER)");
+    const inputHash = sha256(JSON.stringify({ runId: input.runId, topic: input.topic, budget: input.budget })), existing = this.app.store.db.prepare("SELECT input_hash AS inputHash,completed_at AS completedAt FROM remote_research_workflows WHERE operation_id=?").get(input.operationId) as { inputHash: string; completedAt: number | null } | undefined;
+    if (existing && existing.inputHash !== inputHash) fail("DEAL_OPERATION_CONFLICT", "research operation ID identifies another topic, budget, or run");
+    if (!existing) this.app.store.db.prepare("INSERT INTO remote_research_workflows(operation_id,input_hash,created_at,updated_at) VALUES(?,?,?,?)").run(input.operationId, inputHash, Date.now(), Date.now());
+    const checkpoint = async (stage: string, action: () => Promise<Record<string, unknown>>): Promise<Record<string, unknown>> => {
+      const key = `research:${input.operationId}:${stage}`, prior = this.app.store.getSecret(key);
+      if (prior) return JSON.parse(prior.toString()) as Record<string, unknown>;
+      const value = await action(); this.app.store.putSecretOnce(key, Buffer.from(JSON.stringify(value)));
+      this.app.store.db.prepare("UPDATE remote_research_workflows SET updated_at=? WHERE operation_id=?").run(Date.now(), input.operationId);
+      return value;
+    };
+    const child = (stage: string) => `research:${stage}:${sha256(`${input.operationId}:${stage}`).slice(0, 40)}`;
+    const ranked = await checkpoint("selection", () => this.rankBriefs({ topic: input.topic, budget: input.budget }));
+    const winnerCapabilityId = String((ranked.winner as { capabilityId?: string } | undefined)?.capabilityId ?? "");
+    const analysisCapabilityId = String(ranked.analysisCapabilityId ?? "");
+    if (!winnerCapabilityId || !analysisCapabilityId) fail("ANALYSIS_UNAVAILABLE", "ranked catalog has no affordable brief and matching analysis");
+    const brief = await checkpoint("brief", () => this.purchaseBrief({ capabilityId: winnerCapabilityId, operationId: child("brief-payment"), requestId: child("brief-request"), runId: input.runId, task: `Sui research: ${input.topic}`, budget: input.budget }));
+    const briefHash = String(brief.artifactSha256);
+    const sessionId = child("analysis-session"), paymentOperationId = child("analysis-payment");
+    const agreement = await checkpoint("agreement", () => this.agreement({ capabilityId: analysisCapabilityId, operationId: paymentOperationId, sessionId, runId: input.runId, briefHash }));
+    const settlement = await checkpoint("settlement", () => this.settleAnalysis({ sessionId, operationId: paymentOperationId }));
+    const analysis = await checkpoint("delivery", async () => {
+      const value = await this.delivery({ sessionId, operationId: paymentOperationId });
+      return value.status === "delivered" ? value : fail("DELIVERY_PENDING", "analysis payment is finalized and seller delivery is still pending; resume the same research operation");
+    });
+    this.app.store.db.prepare("UPDATE remote_research_workflows SET completed_at=COALESCE(completed_at,?),updated_at=? WHERE operation_id=?").run(Date.now(), Date.now(), input.operationId);
+    return { operationId: input.operationId, state: "complete", replayed: Boolean(existing?.completedAt), selection: ranked, brief, agreement, settlement, analysis };
   }
 
   async events(runId: string): Promise<Record<string, unknown>> { return this.request(`/v1/events?runId=${encodeURIComponent(runId)}`); }
