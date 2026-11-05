@@ -48,8 +48,9 @@ try {
   assert.equal(installed.version, packedSdk.version);
   const bin = join(project, "node_modules/.bin");
   assert.match(run(join(bin, "supercuts"), ["help"], project), /setup buyer/);
+  assert.match(run(join(bin, "supercuts-demo"), ["--help"], project), /funding\[0\]\.address/);
   const noProfile = await rpc(join(bin, "supercuts-mcp"), { jsonrpc: "2.0", id: 1, method: "tools/list" }, project, { SUPERCUTS_HOME: join(root, "unconfigured") });
-  assert.deepEqual(noProfile.result.tools.map((tool) => tool.name), ["setup.status"]);
+  assert.deepEqual(noProfile.result.tools.map((tool) => tool.name), ["setup.status", "setup.refresh"]);
   const seam = await rpc(join(bin, "supercuts-seam"), { protocol: 1, requestId: "release", method: "version" }, project);
   assert.equal(seam.result.packageVersion, packedSdk.version);
   const malformedSeam = await rpc(join(bin, "supercuts-seam"), { protocol: 1, requestId: "bad", method: "initialize", home: join(root, "invalid"), params: [] }, project);

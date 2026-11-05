@@ -97,7 +97,7 @@ export class LiveRuntime {
       catch { fixes.push(`Walrus ${name} is unreachable; check the configured URL and network access.`); }
     }
     if (this.profile.role === "buyer" && !this.store.getSecret("live:memory-config")) fixes.push("Configure an owner-only Walrus Memory file using the local 1536-dimensional embedding adapter.");
-    return { healthy: true, readyForDemo: fixes.length === 0, fixes, runtime: "testnet-live", signer: this.signer.toSuiAddress(), babyJubPublicKey: identity.publicKey.map(String), x25519PublicKey: this.store.getSecret("identity:x25519-public")?.toString("base64"), rapidSnark: artifacts.rapidSnark, artifacts: artifacts.artifacts, poolObjectVerified: true, tatumServiceVerified: true };
+    return { role: this.profile.role, network: "testnet", packageId: this.profile.packageId, poolId: this.profile.poolId, asset: this.profile.coinType, verifierVersion: this.profile.verifierVersion, keyPermissions: "owner-only", rpc: this.profile.live.writeGrpcEndpoint, healthy: true, readyForDemo: fixes.length === 0, fixes, runtime: "testnet-live", signer: this.signer.toSuiAddress(), babyJubPublicKey: identity.publicKey.map(String), x25519PublicKey: this.store.getSecret("identity:x25519-public")?.toString("base64"), rapidSnark: artifacts.rapidSnark, artifacts: artifacts.artifacts, poolObjectVerified: true, tatumServiceVerified: true };
   }
   async balance(): Promise<Record<string, unknown>> {
     const state = await this.index.sync(); let available = 0n, notes = 0;

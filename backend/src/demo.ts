@@ -24,6 +24,7 @@ const value = (name: string, fallback?: string): string => typeof args[name] ===
 const stateDir = (): string => resolve(value("state-dir", ".supercuts-demo"));
 const homes = (root: string) => ({ buyer: join(root, "buyer"), publicSeller: join(root, "public-seller"), secondPublicSeller: join(root, "second-public-seller"), confidentialSeller: join(root, "confidential-seller"), auditor: join(root, "auditor") });
 const send = (data: Record<string, unknown>) => process.stdout.write(`${JSON.stringify({ schemaVersion: "supercuts.demo.v1", ok: true, command, data })}\n`);
+const help = (): Record<string, unknown> => ({ commands: ["setup", "doctor", "seed-policy", "reuse-memories", "live", "replay", "check"], setup: "Run supercuts-demo setup --state-dir <owner-only-directory> with the pinned live configuration. Fund only the buyer address in funding[0].address.", live: "The live demo uses Sui Testnet and Mainnet-backed Walrus services; mock receipts are never settlement evidence." });
 
 function keyAddress(path: string): string { const decoded = decodeSuiPrivateKey(readFileSync(path, "utf8").trim()); if (decoded.scheme !== "ED25519") fail("SIGNER_UNSUPPORTED", "demo requires ED25519 Sui keys"); return Ed25519Keypair.fromSecretKey(decoded.secretKey).toSuiAddress(); }
 function createKey(path: string): void { if (!existsSync(path)) writeFileSync(path, Ed25519Keypair.generate().getSecretKey(), { mode: 0o600 }); chmodSync(path, 0o600); }
@@ -43,6 +44,7 @@ async function setup(): Promise<Record<string, unknown>> {
     if (profile.role !== role || profile.mock !== mock || !mock && profile.verifierVersion !== 2) fail("DEMO_ROLE_PROFILE_MISMATCH", "demo setup needs fresh isolated live v2 role homes; choose a new --state-dir instead of reusing v1 or mock profiles");
   }
   const workflowPath = typeof args.workflow === "string" ? resolve(args.workflow) : !mock && typeof args["seller-url"] !== "string" ? resolve(value("workflow")) : undefined;
+  let activeCapabilities: CapabilityManifest[] = [];
   if (workflowPath) {
     const workflow = JSON.parse(readFileSync(workflowPath, "utf8")) as { capabilities?: CapabilityManifest[] }, configured = workflow.capabilities ?? [];
     if (!configured.length) fail("DEMO_CAPABILITIES_REQUIRED", "live workflow must provide capability manifests for the buyer mandate"); for (const manifest of configured) validateCapabilityManifest(manifest);
@@ -61,6 +63,7 @@ async function setup(): Promise<Record<string, unknown>> {
       } finally { app.close(); }
       capabilities = entries.map((item) => item.manifest!);
     }
+    activeCapabilities = capabilities;
     const mandatePath = join(roles.buyer, "mandate.json"), mandate = JSON.parse(readFileSync(mandatePath, "utf8")) as Record<string, unknown>;
     mandate.requireSettlementPlan = true; mandate.allowedCommands = [...new Set([...(Array.isArray(mandate.allowedCommands) ? mandate.allowedCommands as string[] : []), "settlement.plan"])]; mandate.allowedCounterparties = [...new Set(capabilities.map((item) => item.sellerId))]; mandate.allowedCapabilityIds = [...new Set(capabilities.map((item) => item.capabilityId))]; mandate.allowedCapabilityClasses = [...new Set(capabilities.map((item) => item.capability))]; mandate.allowedRails = [...new Set(capabilities.flatMap((item) => item.supportedRails))];
     writeFileSync(mandatePath, `${JSON.stringify(mandate, null, 2)}\n`, { mode: 0o600 }); chmodSync(mandatePath, 0o600);
@@ -82,7 +85,9 @@ async function setup(): Promise<Record<string, unknown>> {
   }
   const remote = typeof args["seller-url"] === "string";
   writeFileSync(join(root, "run.json"), `${JSON.stringify({ schema: "supercuts.demo.run.v1", createdAt: new Date().toISOString(), runId, ...(remote ? { eventPath, sellerUrl: new URL(String(args["seller-url"])).toString() } : {}), mock, homes: roles, addresses }, null, 2)}\n`, { mode: 0o600 });
-  return { stateDir: root, mock, funding: mock ? [] : [{ address: addresses.buyer, needs: ["Testnet SUI gas", "configured x402 asset", "shielded deposit value"] }], sellerPayTo: addresses.publicSeller, sellerAddresses: { publicA: addresses.publicSeller, publicB: addresses.secondPublicSeller, analysis: addresses.confidentialSeller }, files: { mcp: join(root, "mcp.json"), run: join(root, "run.json"), events: remote ? eventPath : join(root, "events.jsonl"), ...(remote ? { codex: join(root, "buyer-codex.toml") } : {}) } };
+  const publicSellers = activeCapabilities.filter((item) => item.capability === "sui.market-brief"), analysisSeller = activeCapabilities.find((item) => item.capability === "sui.competitor-analysis");
+  const settlementSellers = activeCapabilities.length ? { publicA: publicSellers[0]?.sellerId, publicB: publicSellers[1]?.sellerId, analysis: analysisSeller?.sellerId } : { publicA: addresses.publicSeller, publicB: addresses.secondPublicSeller, analysis: addresses.confidentialSeller };
+  return { stateDir: root, mock, funding: mock ? [] : [{ address: addresses.buyer, needs: ["Testnet SUI gas", "configured x402 asset", "shielded deposit value"] }], sellerPayTo: settlementSellers.publicA, sellerAddresses: settlementSellers, localRoleAddresses: { publicA: addresses.publicSeller, publicB: addresses.secondPublicSeller, analysis: addresses.confidentialSeller, auditor: addresses.auditor }, files: { mcp: join(root, "mcp.json"), run: join(root, "run.json"), events: remote ? eventPath : join(root, "events.jsonl"), ...(remote ? { codex: join(root, "buyer-codex.toml") } : {}) } };
 }
 
 async function doctor(): Promise<Record<string, unknown>> {
@@ -353,5 +358,5 @@ async function replay(): Promise<Record<string, unknown>> {
   return { label: "recorded funded run", freshTransaction: false, events };
 }
 
-try { const data = command === "setup" ? await setup() : command === "doctor" ? await doctor() : command === "seed-policy" ? await seedPolicy() : command === "reuse-memories" ? reuseMemories() : command === "check" ? await check() : command === "live" ? await live() : command === "replay" ? await replay() : fail("COMMAND_UNKNOWN", "use setup, doctor, seed-policy, reuse-memories, live, replay, or check"); send(data); }
+try { const data = ["help", "--help", "-h"].includes(command) ? help() : command === "setup" ? await setup() : command === "doctor" ? await doctor() : command === "seed-policy" ? await seedPolicy() : command === "reuse-memories" ? reuseMemories() : command === "check" ? await check() : command === "live" ? await live() : command === "replay" ? await replay() : fail("COMMAND_UNKNOWN", "use setup, doctor, seed-policy, reuse-memories, live, replay, or check"); send(data); }
 catch (error) { process.stdout.write(`${JSON.stringify(errorOutput(error))}\n`); process.exitCode = 1; }

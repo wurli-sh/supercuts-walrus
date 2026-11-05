@@ -12,7 +12,7 @@ inside the Supercuts process; the SDK receives intents and verified receipts.
 Install the SDK. It installs the matching backend runtime automatically:
 
 ```sh
-pnpm add @supercuts-walrus/sdk@0.1.0
+pnpm add @supercuts-walrus/sdk@0.1.1
 ```
 
 ```ts

@@ -45,6 +45,19 @@ test("live initialization provisions separate encrypted signing and transport id
   try { assert.equal(app.profile.version, 2); assert.equal(app.store.getSecret("identity:babyjub-seed")?.length, 32); assert.notDeepEqual(app.store.getSecret("identity:x25519-private"), app.store.getSecret("identity:x25519-public")); assert.equal(app.store.getSecret("live:tatum-api-key")?.toString(), "test-key-not-used"); } finally { app.close(); }
 });
 
+test("live doctor preserves the role fields required by the typed SDK", async () => {
+  const runtime = Object.create(LiveRuntime.prototype) as any;
+  Object.assign(runtime, {
+    profile: { role: "buyer", packageId: "0xpackage", poolId: "0xpool", coinType: "0x2::sui::SUI", verifierVersion: 1, live: { writeGrpcEndpoint: "https://fullnode.testnet.sui.io:443" } },
+    prover: { doctor: () => ({ rapidSnark: true, artifacts: {} }) },
+    tatum: { getServiceInfo: async () => ({}) }, client: { getObject: async () => ({ object: {} }) },
+    store: { getSecret: (key: string) => key === "identity:babyjub-seed" ? Buffer.alloc(32, 1) : key === "identity:x25519-public" ? Buffer.alloc(32, 2) : undefined },
+    engine: { identity: () => ({ publicKey: [1n, 2n] }) }, signer: { toSuiAddress: () => `0x${"11".repeat(32)}` },
+  });
+  const report = await runtime.doctor();
+  assert.equal(report.role, "buyer"); assert.equal(report.network, "testnet"); assert.equal(report.asset, "0x2::sui::SUI"); assert.equal(report.rpc, "https://fullnode.testnet.sui.io:443");
+});
+
 test("an unsigned prepared note can follow a new root but an indexed note cannot move", () => {
   const store = new RoleStore(join(mkdtempSync(join(tmpdir(), "supercuts-note-rebase-")), "state.sqlite"), randomBytes(32));
   try {

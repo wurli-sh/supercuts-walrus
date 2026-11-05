@@ -5,6 +5,13 @@ import { Phase3App } from "./phase3.js";
 import { writeClient } from "./sui.js";
 
 const amount = (value: string, name: string): bigint => /^[0-9]+$/.test(value) ? BigInt(value) : fail("FUNDING_INPUT_INVALID", `${name} must be unsigned MIST`);
+const POOL_DEPOSIT_DENOMINATIONS = [10_000_000n, 100_000_000n] as const;
+
+const standardPoolDeposit = (shortfall: bigint): bigint => {
+  if (shortfall === 0n) return 0n;
+  const denomination = POOL_DEPOSIT_DENOMINATIONS.find((candidate) => candidate >= shortfall);
+  return denomination ?? fail("FUNDING_PLAN_UNSUPPORTED", `shielded funding needs ${shortfall} MIST, above the largest supported single deposit of ${POOL_DEPOSIT_DENOMINATIONS.at(-1)} MIST`);
+};
 
 export interface FundingPlan {
   address: string; publicBalanceMist: string; shieldedBalanceMist: string; publicPaymentMist: string;
@@ -14,7 +21,8 @@ export interface FundingPlan {
 
 export function calculateFundingPlan(input: { address: string; publicBalance: bigint; shieldedBalance: bigint; publicPayment: bigint; shieldedPayment: bigint; gasReserve: bigint; changeReserve: bigint }): FundingPlan {
   const shieldedTarget = input.shieldedPayment > 0n ? input.shieldedPayment + input.changeReserve : 0n;
-  const poolDeposit = shieldedTarget > input.shieldedBalance ? shieldedTarget - input.shieldedBalance : 0n;
+  const poolShortfall = shieldedTarget > input.shieldedBalance ? shieldedTarget - input.shieldedBalance : 0n;
+  const poolDeposit = standardPoolDeposit(poolShortfall);
   const requiredPublic = input.publicPayment + poolDeposit + input.gasReserve;
   const publicShortfall = requiredPublic > input.publicBalance ? requiredPublic - input.publicBalance : 0n;
   return { address: input.address, publicBalanceMist: input.publicBalance.toString(), shieldedBalanceMist: input.shieldedBalance.toString(), publicPaymentMist: input.publicPayment.toString(), shieldedPaymentMist: input.shieldedPayment.toString(), gasReserveMist: input.gasReserve.toString(), changeReserveMist: input.changeReserve.toString(), poolDepositMist: poolDeposit.toString(), requiredPublicMist: requiredPublic.toString(), publicShortfallMist: publicShortfall.toString(), faucetRequired: publicShortfall > 0n, depositRequired: poolDeposit > 0n };

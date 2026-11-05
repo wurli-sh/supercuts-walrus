@@ -69,9 +69,9 @@ test("research workflow derives stable child identities from one root operation"
 
 test("guided funding reserves public spend, gas, and positive shielded change", () => {
   const plan = calculateFundingPlan({ address: `0x${"11".repeat(32)}`, publicBalance: 1_000_000n, shieldedBalance: 0n, publicPayment: 1_000_000n, shieldedPayment: 2_000_000n, gasReserve: 100_000_000n, changeReserve: 1_000_000n });
-  assert.equal(plan.poolDepositMist, "3000000");
-  assert.equal(plan.requiredPublicMist, "104000000");
-  assert.equal(plan.publicShortfallMist, "103000000");
+  assert.equal(plan.poolDepositMist, "10000000");
+  assert.equal(plan.requiredPublicMist, "111000000");
+  assert.equal(plan.publicShortfallMist, "110000000");
   assert.equal(plan.faucetRequired, true); assert.equal(plan.depositRequired, true);
 });
 
