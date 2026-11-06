@@ -119,12 +119,13 @@ export class LiveRuntime {
     return { role: this.profile.role, network: "testnet", packageId: this.profile.packageId, poolId: this.profile.poolId, asset: this.profile.coinType, verifierVersion: this.profile.verifierVersion, keyPermissions: "owner-only", rpc: this.profile.live.writeGrpcEndpoint, healthy: true, readyForDemo: fixes.length === 0 && (!proofsRequired || shieldedFixes.length === 0), fixes: [...fixes, ...(proofsRequired ? shieldedFixes : [])], publicFixes: fixes, shieldedProofs, shieldedFixes, warnings, readyForPublicRail: fixes.length === 0, runtime: "testnet-live", signer: this.signer.toSuiAddress(), babyJubPublicKey: identity.publicKey.map(String), x25519PublicKey: this.store.getSecret("identity:x25519-public")?.toString("base64"), memoryConfigured: Boolean(this.store.getSecret("live:memory-config")), proofsRequired, rapidSnark: artifacts.rapidSnark, artifacts: artifacts.artifacts, poolObjectVerified: true, tatumServiceVerified: true };
   }
   async balance(): Promise<Record<string, unknown>> {
-    const state = await this.index.sync(); let available = 0n, notes = 0;
+    const state = await this.index.sync(); let available = 0n, notes = 0; const noteCommitments: string[] = [];
     for (const row of this.store.db.prepare("SELECT commitment FROM notes WHERE spent=0 ORDER BY commitment").all() as Array<{ commitment: string }>) {
       const secret = this.store.getSecret(`note:${row.commitment}`); if (!secret) continue;
-      const opening = parseOpening(secret); if (state.leaves[Number(opening.leafIndex)] === opening.commitment) { available += opening.amount; notes++; }
+      const opening = parseOpening(secret); if (state.leaves[Number(opening.leafIndex)] === opening.commitment) { available += opening.amount; notes++; noteCommitments.push(row.commitment); }
     }
-    return { available: available.toString(), notes, root: hex(state.root), nextLeaf: state.nextLeaf.toString(), checkpoint: state.lastCheckpoint.toString(), evidence: "event-derived-and-pool-object-verified",
+    // Commitments are public pool leaves; owners pass one to `wallet exit queue --commitment`. Openings stay sealed.
+    return { available: available.toString(), notes, noteCommitments, root: hex(state.root), nextLeaf: state.nextLeaf.toString(), checkpoint: state.lastCheckpoint.toString(), evidence: "event-derived-and-pool-object-verified",
       ...(state.activity ? { poolActivity: state.activity, privacyWarning: state.activity.reducedPrivacy ? "Sparse observed pool use reduces privacy; distinct depositing addresses do not prove independent users" : undefined } : {}) };
   }
   private async signTransaction(tx: Transaction): Promise<{ digest: string; transaction: Uint8Array; signature: string }> {

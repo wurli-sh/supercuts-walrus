@@ -16,7 +16,12 @@ directory lists signed public capabilities; it holds no role secrets.
    `rapidsnark`. `deploymentConfig` may be omitted for an x402-only seller;
    npm includes the pinned experimental Testnet metadata. Sellers offering the
    `shielded` rail run `supercuts proofs install` once per machine (about 370 MB,
-   every file SHA-256 checked against the pinned index) to recover and exit notes. When `suiKeyFile` is omitted, Supercuts generates a fresh
+   every file SHA-256 checked against the pinned index) to recover and exit notes.
+   Shielded payments arrive as pool notes. `supercuts wallet balance --home
+   <seller-home>` lists the spendable `noteCommitments`; queue a standard
+   delayed exit for one with `supercuts wallet exit queue --home <seller-home>
+   --operation-id <id> --commitment <commitment> --amount 1000000
+   --window-start <unix-ms> --window-end <unix-ms> --authorize`. When `suiKeyFile` is omitted, Supercuts generates a fresh
    seller signer inside the seller home and also writes `seller-codex.toml`.
    The command explicitly reports that the seller does not need faucet funds.
    Keep the setup JSON and credentials at mode `0600` and the home at `0700`.

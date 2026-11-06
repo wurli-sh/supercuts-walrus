@@ -12,6 +12,7 @@ import { installProofs, proofsStatus } from "./proofs-install.js";
 const words = process.argv.slice(2);
 let command = words.shift() ?? "";
 if (["wallet", "offer", "pay", "resource", "memory", "audit", "capability", "settlement", "setup", "policy", "onboarding", "onboard", "funding", "seller", "proofs"].includes(command)) command += `.${words.shift() ?? ""}`;
+if (command === "wallet.exit" && ["queue", "status", "finalize"].includes(words[0] ?? "")) command += `.${words.shift()}`;
 try {
   if (!command || command === "help" || command === "--help" || command === "setup.") {
     process.stdout.write(`${JSON.stringify({ schemaVersion: "supercuts.help.v1", ok: true, commands: ["onboard buyer", "onboard seller", "seller scaffold", "seller research", "seller package", "funding prepare", "funding execute", "setup buyer", "setup seller", "setup renew", "setup session", "init", "doctor", "status", "wallet", "offer", "pay", "memory", "memory insights", "proofs install", "proofs status", "capability", "audit"], setup: "Run supercuts onboard buyer or supercuts onboard seller with an isolated --home. Then use seller scaffold to generate a capability. Research sellers can use seller research to create a cited owner-review draft before packaging.", live: "Fund only the generated buyer address. A seller does not need faucet funds to publish or receive a capability payment." })}\n`);
