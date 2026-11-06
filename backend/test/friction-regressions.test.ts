@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { analysisAgreementDraft, RemoteBuyer } from "../src/remote-buyer.js";
-import { timestampExpirationUnsupported } from "../src/live-runtime.js";
+import { timestampExpirationUnsupported, x402TransactionValidityEnded } from "../src/live-runtime.js";
 import { acquireRoleHomeLease } from "../src/role-lock.js";
 import { errorOutput } from "../src/phase3.js";
 import { SupercutsError } from "../src/errors.js";
@@ -32,6 +32,16 @@ test("timestamp expiration compatibility recognizes thrown and simulated RPC fai
   assert.equal(timestampExpirationUnsupported(new Error("insufficient gas")), false);
 });
 
+test("x402 replacement signatures require a conclusively ended validity window", () => {
+  const timestampBound = { $kind: "ValidDuring", ValidDuring: { minEpoch: "10", maxEpoch: "11", minTimestamp: null, maxTimestamp: 1_000, chain: "testnet", nonce: 1 } } as any;
+  assert.equal(x402TransactionValidityEnded(timestampBound, "10", 60_999), false);
+  assert.equal(x402TransactionValidityEnded(timestampBound, "10", 61_001), true);
+  const epochBound = { $kind: "ValidDuring", ValidDuring: { minEpoch: "10", maxEpoch: "11", minTimestamp: null, maxTimestamp: null, chain: "testnet", nonce: 2 } } as any;
+  assert.equal(x402TransactionValidityEnded(epochBound, "11", 999_999), false);
+  assert.equal(x402TransactionValidityEnded(epochBound, "12", 999_999), true);
+  assert.equal(x402TransactionValidityEnded(null, "12", 999_999), false);
+});
+
 test("one MCP writer owns a role home and a released lease can be reacquired", () => {
   const home = mkdtempSync(join(tmpdir(), "supercuts-role-lock-"));
   const first = acquireRoleHomeLease(home), second = acquireRoleHomeLease(home);
@@ -47,6 +57,8 @@ test("structured errors tell callers whether exact-ID retry is safe", () => {
   assert.match(mismatch.error.recovery, /status\.session\.runId/);
   const cold = errorOutput(new SupercutsError("X402_FACILITATOR_UNAVAILABLE", "cold")) as { error: { retryable: boolean; retryWithSameOperationId: boolean; recovery: string } };
   assert.equal(cold.error.retryable, true); assert.equal(cold.error.retryWithSameOperationId, true); assert.match(cold.error.recovery, /same operation ID/);
+  const renewal = errorOutput(new SupercutsError("X402_RESIGN_UNSAFE", "wait")) as { error: { retryable: boolean; retryWithSameOperationId: boolean; recovery: string } };
+  assert.equal(renewal.error.retryable, true); assert.equal(renewal.error.retryWithSameOperationId, true); assert.match(renewal.error.recovery, /never start a second payment/);
 });
 
 test("research workflow derives stable child identities from one root operation", async () => {

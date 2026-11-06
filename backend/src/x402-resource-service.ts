@@ -55,10 +55,13 @@ export class X402ResourceService {
     return { scheme: "exact", network: this.config.network, amount: this.config.amount, asset: this.config.asset, payTo: this.config.payTo, maxTimeoutSeconds: this.config.maxTimeoutSeconds ?? 300, extra: { requestId: artifact.requestId, operationId: artifact.operationId } };
   }
   private resourceUrl(requestId: string): string { return new URL(`${this.#prefix}/${encodeURIComponent(requestId)}`, this.#origin).toString(); }
-  private challenge(artifact: RegisteredArtifact): Record<string, unknown> {
+  private challenge(artifact: RegisteredArtifact, renewExpired: boolean): Record<string, unknown> {
     // The live Sui exact facilitator requires the x402 nonce to be exactly
     // 32 random bytes (hex encoded), not merely an application nonce.
-    const requirements = this.requirements(artifact), baseHash = requirementsHash(requirements), nonce = this.#ledger.challenge(artifact.requestId, baseHash, () => randomBytes(32).toString("hex"));
+    const requirements = this.requirements(artifact), baseHash = requirementsHash(requirements), timeoutMs = requirements.maxTimeoutSeconds * 1_000;
+    const nonce = renewExpired
+      ? this.#ledger.challenge(artifact.requestId, baseHash, () => randomBytes(32).toString("hex"), timeoutMs)
+      : this.#ledger.getChallenge(artifact.requestId, baseHash)?.nonce ?? fail("X402_CHALLENGE_MISSING", "resource challenge was not persisted");
     const stored = this.#ledger.getChallenge(artifact.requestId, baseHash) ?? fail("X402_CHALLENGE_MISSING", "resource challenge was not persisted");
     const expiresAt = stored.createdAt + requirements.maxTimeoutSeconds * 1_000;
     requirements.extra = { ...requirements.extra, nonce, expiresAt };
@@ -73,11 +76,11 @@ export class X402ResourceService {
       if (!url.pathname.startsWith(prefix)) return this.send(response, 404, Buffer.from("Not Found"));
       const requestId = decodeURIComponent(url.pathname.slice(prefix.length)), artifact = this.#artifacts.get(requestId);
       if (!artifact) return this.send(response, 404, Buffer.from("Not Found"));
-      const challenge = this.challenge(artifact), requirements = challenge.accepts instanceof Array ? challenge.accepts[0] as ExactRequirements : fail("X402_STATE_INVALID", "challenge omitted requirements");
       const paymentHeader = Array.isArray(request.headers["payment-signature"]) ? request.headers["payment-signature"][0] : request.headers["payment-signature"];
+      const challenge = this.challenge(artifact, !paymentHeader), requirements = challenge.accepts instanceof Array ? challenge.accepts[0] as ExactRequirements : fail("X402_STATE_INVALID", "challenge omitted requirements");
       if (!paymentHeader) { await this.persist?.(); return this.send(response, 402, Buffer.from("Payment Required"), { "payment-required": encode(challenge) }); }
       const stored = this.#ledger.getChallenge(artifact.requestId, requirementsHash(this.requirements(artifact))) ?? fail("X402_CHALLENGE_MISSING", "resource challenge was not persisted");
-      if (!this.#ledger.isDeliveryComplete(artifact.requestId) && Date.now() > stored.createdAt + requirements.maxTimeoutSeconds * 1_000) fail("X402_CHALLENGE_EXPIRED", "payment challenge has expired");
+      if (!this.#ledger.hasClaim(artifact.requestId) && Date.now() > stored.createdAt + requirements.maxTimeoutSeconds * 1_000) fail("X402_CHALLENGE_EXPIRED", "payment challenge has expired");
       const payload = decode(paymentHeader, "X402_PAYMENT_INVALID"), bindingValue = Array.isArray(request.headers["x-supercuts-binding"]) ? request.headers["x-supercuts-binding"][0] : request.headers["x-supercuts-binding"], binding = decode(bindingValue, "X402_REQUEST_BINDING_INVALID") as unknown as PaymentBinding;
       const offered = payload.accepted as ExactRequirements;
       if (!offered || requirementsHash(offered) !== requirementsHash(requirements)) fail("X402_REQUIREMENTS_MISMATCH", "payment payload changed the challenged requirements");

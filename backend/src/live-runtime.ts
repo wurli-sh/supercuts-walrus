@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
-import type { Transaction } from "@mysten/sui/transactions";
+import { Transaction } from "@mysten/sui/transactions";
+import { TransactionError } from "@mysten/sui/client";
 import { fail, SupercutsError } from "./errors.js";
 import { assertSuiFinality, assertTatumFinality } from "./finality.js";
 import { LivePoolIndex } from "./live-index.js";
@@ -35,6 +36,16 @@ export function timestampExpirationUnsupported(value: unknown): boolean {
   return messages.some((message) => /timestamp-based transaction expiration is not yet supported|timestamp.*expiration.*not supported/i.test(message));
 }
 
+/** A replacement signature is safe only after every validator must reject the old bytes.
+ * Timestamp expiry gets a clock/finality margin; epoch expiry is checked conservatively. */
+export function x402TransactionValidityEnded(expiration: ReturnType<Transaction["getData"]>["expiration"], currentEpoch: string | undefined, now = Date.now(), safetyMarginMs = 60_000): boolean {
+  if (!expiration || expiration.$kind !== "ValidDuring") return false;
+  const validity = expiration.ValidDuring;
+  if (validity.maxTimestamp != null && now > Number(validity.maxTimestamp) + safetyMarginMs) return true;
+  if (validity.maxEpoch != null && currentEpoch !== undefined && BigInt(currentEpoch) > BigInt(validity.maxEpoch)) return true;
+  return false;
+}
+
 export interface LiveRuntimeProfile {
   role: "buyer" | "seller" | "auditor"; packageId: string; poolId: string; coinType: string; verifierVersion: number;
   live: {
@@ -63,6 +74,10 @@ export class LiveRuntime {
       signature TEXT NOT NULL, digest TEXT NOT NULL UNIQUE, status TEXT NOT NULL, updated_at INTEGER NOT NULL
     ); CREATE TABLE IF NOT EXISTS live_x402_deliveries (
       operation_id TEXT PRIMARY KEY, resource_url TEXT NOT NULL, receipt TEXT NOT NULL, response BLOB NOT NULL, updated_at INTEGER NOT NULL
+    ); CREATE TABLE IF NOT EXISTS live_superseded_x402_transactions (
+      operation_id TEXT NOT NULL, intent_hash TEXT NOT NULL, transaction_bytes BLOB NOT NULL,
+      signature TEXT NOT NULL, digest TEXT NOT NULL UNIQUE, status TEXT NOT NULL, superseded_at INTEGER NOT NULL,
+      PRIMARY KEY(operation_id, digest)
     ); CREATE TABLE IF NOT EXISTS live_agreements (
       session_id TEXT PRIMARY KEY, agreement TEXT NOT NULL, deal_commitment TEXT NOT NULL, accepted_at INTEGER NOT NULL
     ); CREATE TABLE IF NOT EXISTS live_seller_agreements (
@@ -111,15 +126,67 @@ export class LiveRuntime {
     return { available: available.toString(), notes, root: hex(state.root), nextLeaf: state.nextLeaf.toString(), checkpoint: state.lastCheckpoint.toString(), evidence: "event-derived-and-pool-object-verified",
       ...(state.activity ? { poolActivity: state.activity, privacyWarning: state.activity.reducedPrivacy ? "Sparse observed pool use reduces privacy; distinct depositing addresses do not prove independent users" : undefined } : {}) };
   }
-  private async signed(operationId: string, intentHash: string, tx: Transaction, legacyIntentHash?: string): Promise<{ digest: string; transaction: Uint8Array; signature: string }> {
-    const existing = this.store.db.prepare("SELECT intent_hash,transaction_bytes,signature,digest FROM live_signed_transactions WHERE operation_id=?").get(operationId) as { intent_hash: string; transaction_bytes: Buffer; signature: string; digest: string } | undefined;
-    if (existing) { if (existing.intent_hash !== intentHash && existing.intent_hash !== legacyIntentHash) fail("OPERATION_ID_CONFLICT", "operation ID identifies different transaction intent"); return { digest: existing.digest, transaction: existing.transaction_bytes, signature: existing.signature }; }
+  private async signTransaction(tx: Transaction): Promise<{ digest: string; transaction: Uint8Array; signature: string }> {
     tx.setSender(this.signer.toSuiAddress());
     const simulation = await this.client.simulateTransaction({ transaction: tx, include: { effects: true } });
     const simulated = simulation.Transaction ?? simulation.FailedTransaction; if (!simulated?.status.success) fail("TRANSACTION_SIMULATION_FAILED", "Sui rejected the transaction during simulation");
     const transaction = await tx.build({ client: this.client }), digest = await tx.getDigest({ client: this.client }), signature = (await this.signer.signTransaction(transaction)).signature;
+    return { transaction, signature, digest };
+  }
+  private async signed(operationId: string, intentHash: string, tx: Transaction, legacyIntentHash?: string): Promise<{ digest: string; transaction: Uint8Array; signature: string }> {
+    const existing = this.store.db.prepare("SELECT intent_hash,transaction_bytes,signature,digest FROM live_signed_transactions WHERE operation_id=?").get(operationId) as { intent_hash: string; transaction_bytes: Buffer; signature: string; digest: string } | undefined;
+    if (existing) { if (existing.intent_hash !== intentHash && existing.intent_hash !== legacyIntentHash) fail("OPERATION_ID_CONFLICT", "operation ID identifies different transaction intent"); return { digest: existing.digest, transaction: existing.transaction_bytes, signature: existing.signature }; }
+    const { transaction, signature, digest } = await this.signTransaction(tx);
     this.store.db.prepare("INSERT INTO live_signed_transactions(operation_id,intent_hash,transaction_bytes,signature,digest,status,updated_at) VALUES(?,?,?,?,?,'signed',?)").run(operationId, intentHash, Buffer.from(transaction), signature, digest, Date.now());
     return { transaction, signature, digest };
+  }
+  private async signedX402(operationId: string, intentHash: string, tx: Transaction, legacyIntentHash?: string): Promise<{ digest: string; transaction: Uint8Array; signature: string }> {
+    const existing = this.store.db.prepare("SELECT intent_hash,transaction_bytes,signature,digest,status FROM live_signed_transactions WHERE operation_id=?").get(operationId) as { intent_hash: string; transaction_bytes: Buffer; signature: string; digest: string; status: string } | undefined;
+    if (!existing || existing.intent_hash === intentHash || existing.intent_hash === legacyIntentHash) return this.signed(operationId, intentHash, tx, legacyIntentHash);
+
+    // A fresh seller nonce does not itself authorize another transfer. First reuse the exact old
+    // signed bytes. Replace them only if the old digest is finalized-failed, or is absent from the
+    // authoritative RPC after its validity window and safety margin have ended.
+    let observed: any;
+    try { observed = await this.client.getTransaction({ digest: existing.digest, include: { effects: true } }); }
+    catch (error) {
+      if (!(error instanceof TransactionError) || error.reason !== "notFound") fail("X402_RESIGN_UNSAFE", "could not prove the prior signed payment absent; retry the same operation without creating another signature", error);
+    }
+    if (observed) {
+      const envelope = observed.Transaction ?? observed.FailedTransaction ?? observed, observedDigest = envelope?.digest ?? envelope?.effects?.transactionDigest;
+      if (observedDigest !== existing.digest || !envelope?.checkpoint) fail("X402_RESIGN_UNSAFE", "prior payment lookup returned ambiguous settlement evidence");
+      if (envelope.status?.success === true) {
+        const checkpoint = assertSuiFinality(observed.Transaction || observed.FailedTransaction ? observed : { Transaction: envelope }, existing.digest); await this.confirmTatum(existing.digest, checkpoint);
+        this.store.db.prepare("UPDATE live_signed_transactions SET status='finalized',updated_at=? WHERE operation_id=?").run(Date.now(), operationId);
+        return { digest: existing.digest, transaction: existing.transaction_bytes, signature: existing.signature };
+      }
+      if (envelope.status?.success !== false) fail("X402_RESIGN_UNSAFE", "prior payment finality is ambiguous; refusing a replacement signature");
+    } else {
+      let expiration: ReturnType<Transaction["getData"]>["expiration"];
+      try { expiration = Transaction.from(existing.transaction_bytes).getData().expiration; }
+      catch (error) { return fail("X402_RESIGN_UNSAFE", "prior signed payment validity could not be decoded", error); }
+      let currentEpoch: string | undefined;
+      if (expiration?.$kind === "ValidDuring" && expiration.ValidDuring.maxTimestamp == null && expiration.ValidDuring.maxEpoch != null) {
+        try { currentEpoch = (await this.client.core.getCurrentSystemState()).systemState.epoch; }
+        catch (error) { return fail("X402_RESIGN_UNSAFE", "could not verify that the prior payment validity window ended", error); }
+      }
+      if (!x402TransactionValidityEnded(expiration, currentEpoch)) {
+        if (expiration?.$kind === "ValidDuring" && expiration.ValidDuring.maxTimestamp != null && Date.now() > Number(expiration.ValidDuring.maxTimestamp)) {
+          fail("X402_RESIGN_UNSAFE", "prior payment expired but its finality safety margin has not ended; retry this same operation ID shortly");
+        }
+        return { digest: existing.digest, transaction: existing.transaction_bytes, signature: existing.signature };
+      }
+    }
+
+    const replacement = await this.signTransaction(tx), now = Date.now();
+    this.store.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.store.db.prepare("INSERT OR IGNORE INTO live_superseded_x402_transactions(operation_id,intent_hash,transaction_bytes,signature,digest,status,superseded_at) VALUES(?,?,?,?,?,?,?)").run(operationId, existing.intent_hash, existing.transaction_bytes, existing.signature, existing.digest, existing.status, now);
+      const updated = this.store.db.prepare("UPDATE live_signed_transactions SET intent_hash=?,transaction_bytes=?,signature=?,digest=?,status='signed',updated_at=? WHERE operation_id=? AND digest=?").run(intentHash, Buffer.from(replacement.transaction), replacement.signature, replacement.digest, now, operationId, existing.digest);
+      if (updated.changes !== 1) fail("X402_RESIGN_UNSAFE", "payment journal changed while replacing an expired signature; retry the same operation ID");
+      this.store.db.exec("COMMIT");
+    } catch (error) { this.store.db.exec("ROLLBACK"); throw error; }
+    return replacement;
   }
   private operationContext(operationId: string, kind: string, subject: string): void {
     const existing = this.store.db.prepare("SELECT kind,subject FROM live_operation_context WHERE operation_id=?").get(operationId) as { kind: string; subject: string } | undefined;
@@ -404,7 +471,7 @@ export class LiveRuntime {
       tx.setExpiration({ ValidDuring: { minEpoch: validity.minEpoch, maxEpoch: validity.maxEpoch, minTimestamp: validity.minTimestamp ?? null, maxTimestamp: null, chain: validity.chain, nonce: validity.nonce } });
     }
     const legacyIntentHash = hash(JSON.stringify({ domain: "supercuts-x402-v2", operationId, resourceUrl, payTo, asset, amount: amount.toString() }));
-    const intentHash = hash(JSON.stringify({ domain: "supercuts-x402-v2", operationId, resourceUrl, payTo, asset, amount: amount.toString(), requestId, requirementsHash: String(extra?.requirementsHash) })), signed = await this.signed(operationId, intentHash, tx, legacyIntentHash);
+    const intentHash = hash(JSON.stringify({ domain: "supercuts-x402-v2", operationId, resourceUrl, payTo, asset, amount: amount.toString(), requestId, requirementsHash: String(extra?.requirementsHash) })), signed = await this.signedX402(operationId, intentHash, tx, legacyIntentHash);
     const unsignedBinding = { requestId, nonce, requirementsHash: requirementsHash(unsignedRequirements), transactionDigest: signed.digest, payer: this.signer.toSuiAddress() };
     const payerSignature = (await this.signer.signPersonalMessage(paymentBindingBytes(unsignedBinding))).signature;
     const paymentPayload = { x402Version: 2, resource, accepted: requirements, payload: { signature: signed.signature, transaction: Buffer.from(signed.transaction).toString("base64") } };

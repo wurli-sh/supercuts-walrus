@@ -75,6 +75,17 @@ test("payment consumption binds one finalized payment to one resource", () => {
   state.close();
 });
 
+test("expired unclaimed x402 challenges rotate but claimed challenges stay stable", () => {
+  const state = store(), ledger = new PaymentConsumptionLedger(state);
+  try {
+    const first = ledger.challenge("request", "requirements", () => "nonce-1", 100, 1_000);
+    assert.equal(first, "nonce-1");
+    assert.equal(ledger.challenge("request", "requirements", () => "nonce-2", 100, 1_101), "nonce-2");
+    ledger.claim({ digest: "digest", network: "sui:testnet", asset: "0x2::sui::SUI", amount: 1n, payTo: "seller", finalized: true }, "request");
+    assert.equal(ledger.challenge("request", "requirements", () => "nonce-3", 100, 2_000), "nonce-2");
+  } finally { state.close(); }
+});
+
 test("operation transitions cannot finalize a different transaction digest", () => {
   const state = store(); state.beginOperation("op", "payload"); state.reserveNote("note", "op");
   state.putSecretOnce("proof:op", Buffer.from("proof")); state.transitionOperation("op", "proof_persisted");

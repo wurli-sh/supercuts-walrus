@@ -69,8 +69,13 @@ test("seller-owned x402 service challenges, settles once, and rejects cross-requ
     const secondUnsignedRequirements = { ...secondRequirements, extra: { requestId: secondExtra.requestId, operationId: secondExtra.operationId, nonce: secondExtra.nonce, expiresAt: secondExtra.expiresAt } }, secondBinding = { requestId: "request-b", nonce: secondExtra.nonce, requirementsHash: requirementsHash(secondUnsignedRequirements), transactionDigest: digest, payer: payer.toSuiAddress() }, secondSignature = (await payer.signPersonalMessage(paymentBindingBytes(secondBinding))).signature;
     const consumed = await fetch(`${origin}/capability/request-b`, { headers: { "payment-signature": Buffer.from(JSON.stringify({ x402Version: 2, resource: secondChallenge.resource, accepted: secondRequirements, payload: { signature: "transaction-signature", transaction: "bytes" } })).toString("base64"), "x-supercuts-binding": Buffer.from(JSON.stringify({ ...secondBinding, payerSignature: secondSignature })).toString("base64") } }); assert.equal(consumed.status, 409);
     const expiredChallenge = await fetch(`${origin}/capability/request-expired`); assert.equal(expiredChallenge.status, 402);
+    const firstExpired = JSON.parse(Buffer.from(expiredChallenge.headers.get("payment-required")!, "base64").toString()) as any;
     store2.db.prepare("UPDATE x402_challenges SET created_at=? WHERE request_id=?").run(Date.now() - 301_000, "request-expired");
     const expiredPayment = await fetch(`${origin}/capability/request-expired`, { headers: { "payment-signature": "e30=" } });
     assert.equal(expiredPayment.status, 400); assert.equal((await expiredPayment.json() as { error: string }).error, "X402_CHALLENGE_EXPIRED");
+    const renewedResponse = await fetch(`${origin}/capability/request-expired`); assert.equal(renewedResponse.status, 402);
+    const renewed = JSON.parse(Buffer.from(renewedResponse.headers.get("payment-required")!, "base64").toString()) as any;
+    assert.notEqual(renewed.accepts[0].extra.nonce, firstExpired.accepts[0].extra.nonce);
+    assert.ok(renewed.accepts[0].extra.expiresAt > Date.now());
   } finally { await new Promise<void>((resolve) => server2.close(() => resolve())); store2.close(); }
 });

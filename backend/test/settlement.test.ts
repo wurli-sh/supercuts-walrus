@@ -123,6 +123,12 @@ test("mandate-gated execution resolves and consumes the identical stored plan", 
   try {
     const plan = await execute("settlement.plan", { "operation-id": "pay-live", manifest: JSON.stringify(capability), "requested-amount": "30" });
     assert.equal(plan.status, "approved");
+    const bind = (app as unknown as { bindSettlementPlan: (command: "pay.x402", args: Record<string, string | boolean>, actual: Record<string, string>) => unknown }).bindSettlementPlan.bind(app);
+    const paymentArgs = { "operation-id": "pay-live", "plan-hash": String(plan.planHash) };
+    const stable = { amount: "25", counterparty: "seller-a", asset: capability.asset, endpoint: capability.endpoint, requestId: "request-1" };
+    bind("pay.x402", paymentArgs, { ...stable, requirementsHash: "challenge-a" });
+    assert.doesNotThrow(() => bind("pay.x402", paymentArgs, { ...stable, requirementsHash: "challenge-b" }));
+    assert.throws(() => bind("pay.x402", paymentArgs, { ...stable, requestId: "request-2", requirementsHash: "challenge-c" }), { code: "SETTLEMENT_PLAN_CONSUMED" });
     const receipt = await execute("pay.x402", { "operation-id": "pay-live", amount: "25", counterparty: "seller-a", "resource-url": capability.endpoint, "request-id": "request-1", "plan-hash": String(plan.planHash) });
     assert.equal(receipt.amount, "25");
     const wrong = { "operation-id": "pay-other", amount: "25", counterparty: "seller-a", "resource-url": capability.endpoint, "request-id": "request-2", "plan-hash": String(plan.planHash) };

@@ -589,9 +589,18 @@ export class Phase3App {
       if (!agreement && !this.profile.mock) fail("SETTLEMENT_PLAN_BINDING_MISMATCH", "shielded payment has no accepted agreement bound to this plan");
     }
     const value = BigInt(actual.amount); if (value < BigInt(plan.manifestMinimum) || value > BigInt(plan.maximumAmount)) fail("SETTLEMENT_PLAN_AMOUNT_EXCEEDED", "execution amount is outside the planned manifest bounds");
-    const binding = { planHash: plan.planHash, operationId, capabilityId: plan.capabilityId, manifestHash: plan.manifestHash, rail, amount: actual.amount, counterparty: actual.counterparty, asset: actual.asset, endpoint: actual.endpoint ?? null, requestId: actual.requestId, session: actual.session ?? null, requirementsHash: actual.requirementsHash ?? null };
-    const bindingHash = hash(canonicalJson({ domain: "supercuts-settlement-execution-v1", binding })), existing = this.store.db.prepare("SELECT binding_hash FROM settlement_execution_bindings WHERE operation_id=? OR plan_hash=?").get(operationId, plan.planHash) as { binding_hash: string } | undefined;
-    if (existing && existing.binding_hash !== bindingHash) fail("SETTLEMENT_PLAN_CONSUMED", "plan or operation is already bound to another execution");
+    const stableBinding = { planHash: plan.planHash, operationId, capabilityId: plan.capabilityId, manifestHash: plan.manifestHash, rail, amount: actual.amount, counterparty: actual.counterparty, asset: actual.asset, endpoint: actual.endpoint ?? null, requestId: actual.requestId, session: actual.session ?? null };
+    const binding = { ...stableBinding, requirementsHash: actual.requirementsHash ?? null };
+    // A renewed x402 challenge changes only its nonce-derived requirements hash. The plan remains
+    // consumed by the same economic payment and request; treating the ephemeral hash as the plan
+    // identity would make an expired challenge permanently strand the reserved buyer budget.
+    const bindingHash = hash(canonicalJson({ domain: "supercuts-settlement-execution-v2", binding: stableBinding })), existing = this.store.db.prepare("SELECT binding_hash,binding_json FROM settlement_execution_bindings WHERE operation_id=? OR plan_hash=?").get(operationId, plan.planHash) as { binding_hash: string; binding_json: string } | undefined;
+    if (existing && existing.binding_hash !== bindingHash) {
+      let old: Record<string, unknown>;
+      try { old = JSON.parse(existing.binding_json) as Record<string, unknown>; } catch (error) { return fail("SETTLEMENT_PLAN_CONSUMED", "saved settlement execution binding is invalid", error); }
+      const oldStable = Object.fromEntries(Object.keys(stableBinding).map((key) => [key, old[key]]));
+      if (canonicalJson(oldStable) !== canonicalJson(stableBinding)) fail("SETTLEMENT_PLAN_CONSUMED", "plan or operation is already bound to another execution");
+    }
     if (!existing && now >= plan.expiresAt) fail("SETTLEMENT_PLAN_EXPIRED", "settlement plan has expired");
     if (!existing) { this.store.db.prepare("INSERT INTO settlement_execution_bindings(operation_id,plan_hash,binding_hash,binding_json,created_at) VALUES(?,?,?,?,?)").run(operationId, plan.planHash, bindingHash, canonicalJson(binding), now); this.store.db.prepare("UPDATE settlement_plans SET consumed_at=? WHERE plan_hash=?").run(now, plan.planHash); }
     return plan;
@@ -856,13 +865,14 @@ export class Phase3App {
 export function output(command: string, data: Record<string, unknown>): CommandResult { return { schemaVersion: "supercuts.v1", ok: true, command, data }; }
 export function errorOutput(error: unknown): Record<string, unknown> {
   const known = error instanceof SupercutsError ? error : new SupercutsError("INTERNAL_ERROR", error instanceof Error ? error.message : "unknown error");
-  const retryable = ["BROADCAST_UNRESOLVED", "DELIVERY_IN_PROGRESS", "DELIVERY_PENDING", "DEAL_SELLER_UNAVAILABLE", "ONBOARDING_SERVICE_UNAVAILABLE", "SELLER_DIRECTORY_UNAVAILABLE", "WALRUS_WRITE_FAILED", "WALRUS_READ_FAILED", "X402_FACILITATOR_UNAVAILABLE"].includes(known.code);
+  const retryable = ["BROADCAST_UNRESOLVED", "DELIVERY_IN_PROGRESS", "DELIVERY_PENDING", "DEAL_SELLER_UNAVAILABLE", "ONBOARDING_SERVICE_UNAVAILABLE", "SELLER_DIRECTORY_UNAVAILABLE", "WALRUS_WRITE_FAILED", "WALRUS_READ_FAILED", "X402_FACILITATOR_UNAVAILABLE", "X402_RESIGN_UNSAFE"].includes(known.code);
   const sameOperation = retryable || ["OPERATION_ID_CONFLICT", "DEAL_OPERATION_CONFLICT"].includes(known.code);
   return { schemaVersion: "supercuts.v1", ok: false, error: { code: known.code, message: known.message, recovery: recovery(known.code), retryable, retryWithSameOperationId: sameOperation } };
 }
 function recovery(code: string): string {
   if (code === "LOCAL_AUTH_REQUIRED") return "repeat with --authorize after reviewing the operation";
   if (code === "PROFILE_NOT_FOUND") return "run supercuts init --role <role> --mock";
+  if (code === "X402_RESIGN_UNSAFE") return "retry with the same operation ID; never start a second payment while the prior signed transaction can still settle";
   if (code.startsWith("POLICY_")) return "change the request or update the owner-controlled profile policy";
   if (code === "ARTIFACT_HASH_MISMATCH") return "restore the pinned artifact or reinitialize with an audited manifest";
   if (code === "SESSION_MISMATCH") return "read status.session.runId and retry with that session, or omit runId on the v2 deal path";

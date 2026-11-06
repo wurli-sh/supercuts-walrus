@@ -19,6 +19,9 @@ export function paymentBindingBytes(binding: Omit<PaymentBinding, "payerSignatur
 
 export class PaymentConsumptionLedger {
   constructor(private readonly store: RoleStore) {}
+  hasClaim(requestId: string): boolean {
+    return Boolean(this.store.db.prepare("SELECT 1 FROM deliveries WHERE request_id = ?").get(requestId));
+  }
   claim(payment: FinalPayment, requestId: string): void {
     if (!payment.finalized) fail("PAYMENT_PENDING", "payment is not finalized");
     if (!payment.network || !payment.digest || payment.network.length > 256 || payment.digest.length > 256 || !requestId || requestId.length > 256) fail("PAYMENT_ID_INVALID", "payment or request identity is invalid");
@@ -63,15 +66,26 @@ export class PaymentConsumptionLedger {
       this.store.db.exec("COMMIT");
     } catch (error) { this.store.db.exec("ROLLBACK"); throw error; }
   }
-  challenge(requestId: string, requirementsHashValue: string, createNonce: () => string): string {
-    const existing = this.store.db.prepare("SELECT nonce, requirements_hash FROM x402_challenges WHERE request_id = ?").get(requestId) as { nonce: string; requirements_hash: string } | undefined;
-    if (existing) {
-      if (existing.requirements_hash !== requirementsHashValue) fail("X402_REQUEST_CONFLICT", "request identity was reused with different requirements");
-      return existing.nonce;
-    }
-    const nonce = createNonce();
-    this.store.db.prepare("INSERT INTO x402_challenges(request_id, nonce, requirements_hash, created_at) VALUES (?, ?, ?, ?)").run(requestId, nonce, requirementsHashValue, Date.now());
-    return nonce;
+  challenge(requestId: string, requirementsHashValue: string, createNonce: () => string, renewAfterMs?: number, now = Date.now()): string {
+    this.store.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.store.db.prepare("SELECT nonce, requirements_hash, created_at FROM x402_challenges WHERE request_id = ?").get(requestId) as { nonce: string; requirements_hash: string; created_at: number } | undefined;
+      if (existing) {
+        if (existing.requirements_hash !== requirementsHashValue) fail("X402_REQUEST_CONFLICT", "request identity was reused with different requirements");
+        if (renewAfterMs !== undefined && now > existing.created_at + renewAfterMs && !this.hasClaim(requestId)) {
+          const nonce = createNonce();
+          this.store.db.prepare("UPDATE x402_challenges SET nonce = ?, created_at = ? WHERE request_id = ?").run(nonce, now, requestId);
+          this.store.db.exec("COMMIT");
+          return nonce;
+        }
+        this.store.db.exec("COMMIT");
+        return existing.nonce;
+      }
+      const nonce = createNonce();
+      this.store.db.prepare("INSERT INTO x402_challenges(request_id, nonce, requirements_hash, created_at) VALUES (?, ?, ?, ?)").run(requestId, nonce, requirementsHashValue, now);
+      this.store.db.exec("COMMIT");
+      return nonce;
+    } catch (error) { this.store.db.exec("ROLLBACK"); throw error; }
   }
   getChallenge(requestId: string, requirementsHashValue: string): { nonce: string; createdAt: number } | undefined {
     const row = this.store.db.prepare("SELECT nonce, requirements_hash, created_at FROM x402_challenges WHERE request_id = ?").get(requestId) as { nonce: string; requirements_hash: string; created_at: number } | undefined;
