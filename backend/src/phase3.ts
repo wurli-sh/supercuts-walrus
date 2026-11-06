@@ -7,10 +7,11 @@ import { RoleStore } from "./store.js";
 import { DealJournal } from "./deal.js";
 import { LiveRuntime, type LiveRuntimeProfile } from "./live-runtime.js";
 import { V2ExitQueue } from "./v2-exits.js";
-import { validateCapabilityManifest, type CapabilityManifest } from "./capability.js";
-import { ManualMemory, type ManualMemoryConfig } from "./memwal.js";
+import { validateCapabilityManifest, type CapabilityManifest, type CapabilityRail } from "./capability.js";
+import { ManualMemory, openMemoryText, withMemoryDefaults, type ManualMemoryConfig } from "./memwal.js";
 import { WorkflowMemory } from "./workflow-memory.js";
-import { canonicalJson, createSettlementPlan, settlementMandateHash, settlementPlanHash, validateSettlementMemory, validateSettlementPlan, type PlanningMandate, type RecalledSettlementMemory, type SettlementMemoryV1, type SettlementPlanV1 } from "./settlement.js";
+import { buildScorecard, type SellerScorecard } from "./memory-scorecard.js";
+import { canonicalJson, createSettlementPlan, explainMemoryInfluence, isRelevantMemory, settlementMandateHash, settlementPlanHash, validateSettlementMemory, validateSettlementPlan, type MemoryInfluence, type PlanningMandate, type RecalledSettlementMemory, type SettlementMemoryV1, type SettlementPlanV1 } from "./settlement.js";
 
 export type Role = "buyer" | "seller" | "auditor";
 export interface Profile {
@@ -65,6 +66,7 @@ function matchesPlannedEndpoint(planned: string, actual: string, requestId: stri
       resource.pathname === `${base.pathname.replace(/\/$/, "")}/${encodeURIComponent(requestId)}`;
   } catch { return false; }
 }
+const memoryQuery = (manifest: CapabilityManifest): string => `${manifest.capabilityId} ${manifest.capability} ${manifest.sellerId}`;
 function record(store: RoleStore, scope: string, id: string, value: unknown): void {
   store.db.prepare("INSERT INTO app_records(scope,id,value,updated_at) VALUES(?,?,?,?) ON CONFLICT(scope,id) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at")
     .run(scope, id, json(value), Date.now());
@@ -111,7 +113,8 @@ export function initialize(home: string, args: Record<string, string | boolean>)
   const credential = (name: string): Buffer => { const path = resolve(required(args, name)); if ((statSync(path).mode & 0o077) !== 0) fail("CREDENTIAL_PERMISSIONS", `${name} must be owner-only`); const value = readFileSync(path); if (!value.length || value.length > 4096) fail("CREDENTIAL_INVALID", `${name} is empty or too large`); return Buffer.from(value.toString().trim()); };
   const liveCredentials = deployment ? { sui: credential("sui-key-file"), tatum: credential("tatum-key-file"), ...(typeof args["memory-config-file"] === "string" ? { memory: credential("memory-config-file") } : {}) } : undefined;
   if (liveCredentials?.memory) {
-    let memoryConfig: ManualMemoryConfig; try { memoryConfig = JSON.parse(liveCredentials.memory.toString()) as ManualMemoryConfig; } catch (error) { return fail("LIVE_MEMORY_CONFIG_INVALID", "memory config is not valid JSON", error); }
+    let memoryConfig: ManualMemoryConfig; try { memoryConfig = withMemoryDefaults(JSON.parse(liveCredentials.memory.toString()) as Partial<ManualMemoryConfig>, role); } catch (error) { return fail("LIVE_MEMORY_CONFIG_INVALID", `memory config is invalid: ${error instanceof TypeError ? error.message : "not valid JSON"}`, error); }
+    liveCredentials.memory = Buffer.from(JSON.stringify(memoryConfig));
     let embedding: URL; try { embedding = new URL(memoryConfig.embeddingApiBase); } catch (error) { return fail("LIVE_MEMORY_CONFIG_INVALID", "embeddingApiBase is invalid", error); }
     if (!["localhost", "127.0.0.1", "::1"].includes(embedding.hostname)) fail("LIVE_MEMORY_EMBEDDING_UNTRUSTED", "live memory embeddings must use the loopback 1536-dimension adapter");
   }
@@ -298,8 +301,10 @@ export class Phase3App {
     });
   }
 
-  private authenticatedMemory(blobId: string, memory: SettlementMemoryV1): SettlementMemoryV1 {
+  /** Trusted provenance needs local authority or this owner's memory-key signature (portable across machines). */
+  private authenticatedMemory(blobId: string, memory: SettlementMemoryV1, signedByOwner = false): SettlementMemoryV1 {
     if (memory.provenance !== "owner_policy" && memory.provenance !== "verified_outcome") return memory;
+    if (signedByOwner && (memory.provenance !== "verified_outcome" || memory.evidenceHash)) { this.registerMemoryAuthority(blobId, memory); return memory; }
     const authority = this.store.db.prepare("SELECT fact_hash,provenance,evidence_hash FROM memory_authority WHERE blob_id=?").get(blobId) as { fact_hash: string; provenance: string; evidence_hash: string | null } | undefined;
     if (authority?.fact_hash === hash(canonicalJson(memory)) && authority.provenance === memory.provenance && (memory.provenance !== "verified_outcome" || authority.evidence_hash === memory.evidenceHash)) return memory;
     return { ...memory, provenance: "legacy_untrusted" };
@@ -330,14 +335,96 @@ export class Phase3App {
       }
       return existing as unknown as Record<string, unknown>;
     }
-    let recalled = this.recalledMockMemories();
-    if (!this.profile.mock && this.store.getSecret("live:memory-config")) {
-      const encoded = this.store.getSecret("live:memory-config")!; let config: ManualMemoryConfig; try { config = JSON.parse(encoded.toString()) as ManualMemoryConfig; } catch (error) { return fail("LIVE_MEMORY_CONFIG_INVALID", "encrypted memory config is invalid", error); }
-      const manual = new ManualMemory(this.store, config);
-      try { recalled = (await manual.recall(`${primary.capabilityId} ${primary.capability} ${primary.sellerId}`, 20)).map((item) => { let memory: SettlementMemoryV1 | undefined; try { const value = JSON.parse(item.text) as unknown; validateSettlementMemory(value); memory = this.authenticatedMemory(item.blobId, value); } catch { /* malformed or legacy memory remains advisory */ } return { blobId: item.blobId, distance: item.distance, ...(memory ? { memory } : { legacy: true }) }; }); } finally { manual.destroy(); }
-    }
-    const plan = createSettlementPlan({ operationId, mandate, manifests: [primary, ...alternatives], ...(typeof args["requested-amount"] === "string" ? { requestedAmount: args["requested-amount"] } : {}), ...(args["privacy-hint"] === "shielded" ? { privacyHint: "shielded" as const } : {}), ...(args["requested-rail"] === "x402" || args["requested-rail"] === "shielded" ? { requestedRail: args["requested-rail"] } : {}), recalled, maxMemoryDistance: this.profile.policy.maxMemoryDistance ?? 0.35 });
-    return this.persistPlan(plan) as unknown as Record<string, unknown>;
+    const manifests = [primary, ...alternatives], recalled = await this.recallSettlementMemories(manifests.map(memoryQuery));
+    const input = { operationId, mandate, manifests, ...(typeof args["requested-amount"] === "string" ? { requestedAmount: args["requested-amount"] } : {}), ...(args["privacy-hint"] === "shielded" ? { privacyHint: "shielded" as const } : {}), ...(args["requested-rail"] === "x402" || args["requested-rail"] === "shielded" ? { requestedRail: args["requested-rail"] as CapabilityRail } : {}), recalled, maxMemoryDistance: this.profile.policy.maxMemoryDistance ?? 0.35 };
+    const plan = this.persistPlan(createSettlementPlan(input));
+    if (!get(this.store, "memory-influence", plan.planHash)) record(this.store, "memory-influence", plan.planHash, explainMemoryInfluence(input, plan));
+    return plan as unknown as Record<string, unknown>;
+  }
+
+  /** Recall settlement memories for several scoped queries; plaintext stays in this process. */
+  private async recallSettlementMemories(queries: string[], limit = 20): Promise<RecalledSettlementMemory[]> {
+    const local = this.localVerifiedOutcomes(), merge = (recalled: RecalledSettlementMemory[]) => [...local, ...recalled.filter((item) => !local.some((other) => other.blobId === item.blobId))]; // the local authoritative copy wins
+    const encoded = this.profile.mock ? undefined : this.store.getSecret("live:memory-config");
+    if (!encoded) return merge(this.recalledMockMemories());
+    let config: ManualMemoryConfig; try { config = JSON.parse(encoded.toString()) as ManualMemoryConfig; } catch (error) { return fail("LIVE_MEMORY_CONFIG_INVALID", "encrypted memory config is invalid", error); }
+    const manual = new ManualMemory(this.store, config), byBlob = new Map<string, RecalledSettlementMemory>();
+    try {
+      for (const query of [...new Set(queries)]) for (const item of await manual.recall(query, limit)) {
+        const prior = byBlob.get(item.blobId); if (prior && prior.distance <= item.distance) continue;
+        let memory: SettlementMemoryV1 | undefined; try { const opened = openMemoryText(item.text); validateSettlementMemory(opened.memory); memory = this.authenticatedMemory(item.blobId, opened.memory, Boolean(opened.signedBy && opened.signedBy === manual.signerAddress)); } catch { /* malformed or legacy memory remains advisory */ }
+        byBlob.set(item.blobId, { blobId: item.blobId, distance: item.distance, ...(memory ? { memory } : { legacy: true }) });
+      }
+    } finally { manual.destroy(); }
+    return merge([...byBlob.values()]);
+  }
+
+  /**
+   * Verified outcomes this runtime wrote itself, including ones still queued for Walrus. They are authoritative
+   * for spend and reliability on this machine; semantic recall alone can miss or lag them.
+   */
+  private localVerifiedOutcomes(): RecalledSettlementMemory[] {
+    const rows = this.store.db.prepare("SELECT operation_id,blob_id FROM memory_jobs WHERE operation_id LIKE 'verified:deal:%' OR operation_id LIKE 'verified:deal-failure:%' ORDER BY created_at").all() as Array<{ operation_id: string; blob_id: string | null }>;
+    return rows.flatMap((row) => {
+      const payload = this.store.getSecret(`memory-outbox:${row.operation_id}`); if (!payload) return [];
+      try { const memory = JSON.parse(payload.toString()) as unknown; validateSettlementMemory(memory, "verified_outcome"); return [{ blobId: row.blob_id ?? `local:${row.operation_id}`, distance: 0, memory }]; } catch { return []; }
+    });
+  }
+
+  /**
+   * Orders candidate sellers by what Walrus Memory has verified about them, instead of by price alone.
+   * Sellers outside the owner mandate are dropped first so memory can never widen authority.
+   */
+  async rankDealCandidates(operationId: string, candidates: CapabilityManifest[], mandate: PlanningMandate, request: { budgetMaximum?: string; requestedRail?: CapabilityRail; privacyHint?: "any" | "shielded" } = {}): Promise<{ ordered: CapabilityManifest[]; scorecards: Array<SellerScorecard & { capabilityId: string; priceMinimum: string }> }> {
+    const permitted = candidates.filter((item) => mandate.allowedCounterparties.includes(item.sellerId) && (!mandate.allowedCapabilityIds || mandate.allowedCapabilityIds.includes(item.capabilityId)) && (!mandate.allowedCapabilityClasses || mandate.allowedCapabilityClasses.includes(item.capability)));
+    const allowed = permitted.length ? permitted : candidates;
+    const recalled = await this.recallSettlementMemories(allowed.map(memoryQuery)), now = Date.now(), maxDistance = this.profile.policy.maxMemoryDistance ?? 0.35;
+    const relevant = recalled.filter((item) => isRelevantMemory(item, maxDistance));
+    // Only rank sellers that the deal could actually plan and pay: budget, rail, privacy, and price bounds.
+    const payable = allowed.filter((manifest) => {
+      try {
+        const plan = createSettlementPlan({ operationId: `rank:${operationId}`, mandate, manifests: [manifest], requestedAmount: manifest.priceBand.minimum, recalled, maxMemoryDistance: maxDistance, now, ...(request.requestedRail ? { requestedRail: request.requestedRail } : {}), ...(request.privacyHint ? { privacyHint: request.privacyHint } : {}) });
+        if (request.budgetMaximum !== undefined && BigInt(plan.maximumAmount) > BigInt(request.budgetMaximum)) return false;
+        return request.requestedRail ? plan.rail === request.requestedRail : mandate.version !== "supercuts.mandate.v2" || !manifest.supportedRails.includes("shielded") || plan.rail === "shielded";
+      } catch { return false; }
+    });
+    const pool = payable.length ? payable : allowed;
+    const scored = pool.map((manifest) => ({ manifest, card: buildScorecard(relevant, { counterparty: manifest.sellerId, capabilityClass: manifest.capability }, now) }));
+    const review = (card: SellerScorecard) => Number(card.lastOutcome === "unresolved" || card.observations > 0 && card.reliability < 0.5);
+    scored.sort((a, b) => review(a.card) - review(b.card) || b.card.reliability - a.card.reliability || (BigInt(a.manifest.priceBand.minimum) < BigInt(b.manifest.priceBand.minimum) ? -1 : BigInt(a.manifest.priceBand.minimum) > BigInt(b.manifest.priceBand.minimum) ? 1 : 0) || a.manifest.capabilityId.localeCompare(b.manifest.capabilityId));
+    const result = { ordered: scored.map((item) => item.manifest), scorecards: scored.map((item) => ({ ...item.card, capabilityId: item.manifest.capabilityId, priceMinimum: item.manifest.priceBand.minimum })) };
+    record(this.store, "deal-ranking", operationId, { candidates: pool, scorecards: result.scorecards, chosen: result.ordered[0]?.capabilityId, createdAt: now });
+    return result;
+  }
+
+  /** Stores the counterfactual (same mandate, no memory, every candidate) next to the binding deal plan. */
+  recordDealMemoryInfluence(dealOperationId: string, plan: SettlementPlanV1, mandate: PlanningMandate, request: { requestedRail?: CapabilityRail; privacyHint?: "any" | "shielded" } = {}): MemoryInfluence | undefined {
+    const ranking = get<{ candidates: CapabilityManifest[]; scorecards: Array<{ citedBlobIds: string[] }> }>(this.store, "deal-ranking", dealOperationId);
+    if (!ranking) return undefined;
+    const existing = get<MemoryInfluence>(this.store, "memory-influence", `deal:${dealOperationId}`); if (existing) return existing;
+    const influence = explainMemoryInfluence({ operationId: plan.operationId, mandate, manifests: ranking.candidates, requestedAmount: plan.openingAmount, ...request }, plan);
+    const cited = [...new Set([...influence.citedBlobIds, ...ranking.scorecards.flatMap((item) => item.citedBlobIds)])].sort();
+    const value = { ...influence, citedBlobIds: cited };
+    record(this.store, "memory-influence", `deal:${dealOperationId}`, value);
+    return value;
+  }
+
+  memoryInfluence(id: string): MemoryInfluence | undefined { return get<MemoryInfluence>(this.store, "memory-influence", id); }
+
+  /**
+   * Owner view of what Supercuts has learned: fresh scorecards recalled from Walrus Memory for every seller
+   * it has ranked, plus how often memory changed a payment decision. Counts and blob IDs only, never plaintext.
+   */
+  async memoryInsights(): Promise<Record<string, unknown>> {
+    const rankings = all<{ candidates: CapabilityManifest[]; createdAt: number }>(this.store, "deal-ranking");
+    const manifests = [...new Map(rankings.flatMap((item) => item.candidates).map((item) => [item.capabilityId, item])).values()];
+    const recalled = manifests.length ? await this.recallSettlementMemories(manifests.map(memoryQuery)) : [], now = Date.now(), maxDistance = this.profile.policy.maxMemoryDistance ?? 0.35;
+    const relevant = recalled.filter((item) => isRelevantMemory(item, maxDistance));
+    const sellers = manifests.map((manifest) => { const card = buildScorecard(relevant, { counterparty: manifest.sellerId, capabilityClass: manifest.capability }, now); return { capabilityId: manifest.capabilityId, capabilityClass: manifest.capability, priceMinimum: manifest.priceBand.minimum, ...card }; }).sort((a, b) => b.reliability - a.reliability || a.capabilityId.localeCompare(b.capabilityId));
+    const influences = (this.store.db.prepare("SELECT value FROM app_records WHERE scope='memory-influence' AND id LIKE 'deal:%'").all() as Array<{ value: string }>).map((row) => JSON.parse(row.value) as MemoryInfluence);
+    const jobs = this.store.db.prepare("SELECT status, COUNT(*) AS count FROM memory_jobs GROUP BY status").all() as Array<{ status: string; count: number }>;
+    const indexed = (this.store.db.prepare("SELECT COUNT(*) AS count FROM memory_inventory WHERE deleted=0").get() as { count: number }).count;
+    return { version: "supercuts.memory-insights.v1", memories: { byStatus: Object.fromEntries(jobs.map((row) => [row.status, row.count])), indexed, recalled: recalled.length }, decisions: { deals: influences.length, changedSeller: influences.filter((item) => item.changedSeller).length, changedRail: influences.filter((item) => item.changedRail).length, changedRisk: influences.filter((item) => item.changedRisk).length, changedMaximum: influences.filter((item) => item.changedMaximum).length }, sellers };
   }
 
   private typedMemory(args: Record<string, string | boolean>, provenance: "agent_observation" | "owner_policy" | "verified_outcome"): SettlementMemoryV1 {
@@ -366,7 +453,7 @@ export class Phase3App {
     } finally { manual.destroy(); }
   }
 
-  private enqueueVerifiedOutcome(event: string, operationId: string, evidence: Record<string, unknown>, planHash?: string, fallback?: { counterparty?: string; asset?: string }): void {
+  private enqueueVerifiedOutcome(event: string, operationId: string, evidence: Record<string, unknown>, planHash?: string, fallback?: { counterparty?: string; asset?: string }, telemetry: Pick<SettlementMemoryV1["signal"], "amount" | "latencyMs" | "rail"> = {}): void {
     const plan = planHash ? this.storedPlan(planHash) : undefined, jobId = `verified:${event}:${operationId}`, evidenceHash = hash(canonicalJson(evidence));
     const prior = this.store.getSecret(`memory-outbox:${jobId}`);
     if (prior) {
@@ -375,17 +462,26 @@ export class Phase3App {
       if (saved.evidenceHash !== evidenceHash || plan && (saved.scope.capabilityId !== plan.capabilityId || saved.scope.counterparty !== plan.sellerId || saved.scope.asset !== plan.asset)) fail("MEMORY_OPERATION_CONFLICT", "verified outcome ID identifies different evidence or scope");
       return;
     }
-    const memory: SettlementMemoryV1 = { version: "supercuts.settlement-memory.v1", kind: "outcome", provenance: "verified_outcome", scope: { ...(plan ? { capabilityId: plan.capabilityId, capabilityClass: plan.capabilityClass, counterparty: plan.sellerId, network: plan.network, asset: plan.asset } : { ...(fallback?.counterparty ? { counterparty: fallback.counterparty } : {}), ...(fallback?.asset ? { asset: fallback.asset } : {}), network: "sui:testnet" as const }) }, createdAt: Date.now(), evidenceHash, signal: { outcome: String(evidence.status ?? "") === "unresolved" ? "unresolved" : String(evidence.status ?? "") === "failed" ? "failed" : "succeeded" } };
+    const memory: SettlementMemoryV1 = { version: "supercuts.settlement-memory.v1", kind: "outcome", provenance: "verified_outcome", scope: { ...(plan ? { capabilityId: plan.capabilityId, capabilityClass: plan.capabilityClass, counterparty: plan.sellerId, network: plan.network, asset: plan.asset } : { ...(fallback?.counterparty ? { counterparty: fallback.counterparty } : {}), ...(fallback?.asset ? { asset: fallback.asset } : {}), network: "sui:testnet" as const }) }, createdAt: Date.now(), evidenceHash, signal: { outcome: String(evidence.status ?? "") === "unresolved" ? "unresolved" : String(evidence.status ?? "") === "failed" ? "failed" : "succeeded", ...telemetry } };
     validateSettlementMemory(memory, "verified_outcome"); const factHash = hash(canonicalJson(memory));
     if (this.profile.mock) { const blobId = `mockwalrus_${factHash.slice(0, 40)}`; record(this.store, "verified-memory", jobId, { operationId: jobId, namespace: `supercuts:${this.profile.role}`, blobId, memory, status: "complete" }); this.registerMemoryAuthority(blobId, memory); return; }
     this.store.putSecretOnce(`memory-outbox:${jobId}`, Buffer.from(canonicalJson(memory)));
     this.store.db.prepare("INSERT OR IGNORE INTO memory_jobs(operation_id,kind,fact_hash,blob_id,status,created_at) VALUES(?,?,?,NULL,'pending',?)").run(jobId, memory.kind, factHash, Date.now());
   }
 
+  /** Queues a verified seller fault as a Walrus outcome memory so later discovery demotes that seller. */
+  recordVerifiedDealFailure(operationId: string, planHash: string, fault: { stage: string; code: string; paymentDigest?: string }): void {
+    if (this.profile.mock || this.profile.role !== "buyer") fail("DEAL_LIVE_REQUIRED", "verified deal failures require a live buyer role");
+    if (this.store.getSecret(`memory-outbox:verified:deal-failure:${operationId}`)) return;
+    const plan = this.storedPlan(planHash);
+    this.enqueueVerifiedOutcome("deal-failure", operationId, { status: "failed", stage: fault.stage, code: fault.code, ...(fault.paymentDigest ? { paymentDigest: fault.paymentDigest } : {}) }, planHash, undefined, { rail: plan.rail, ...(fault.paymentDigest ? { amount: plan.openingAmount } : {}) });
+  }
+
   recordVerifiedDealOutcome(operationId: string, planHash: string, paymentDigest: string, artifactSha256: string): { payloadHash: string; queued: true } {
     if (this.profile.mock || this.profile.role !== "buyer") fail("DEAL_LIVE_REQUIRED", "verified deal outcome requires a live buyer role");
     const jobId = `verified:deal:${operationId}`;
-    this.enqueueVerifiedOutcome("deal", operationId, { status: "succeeded", paymentDigest, artifactSha256 }, planHash);
+    const plan = this.storedPlan(planHash), timings = this.store.db.prepare("SELECT COALESCE(SUM(duration_ms),0) AS total FROM deal_timings WHERE operation_id=? AND stage IN ('negotiation','payment','delivery')").get(operationId) as { total: number };
+    this.enqueueVerifiedOutcome("deal", operationId, { status: "succeeded", paymentDigest, artifactSha256 }, planHash, undefined, { amount: plan.openingAmount, rail: plan.rail, ...(Number.isSafeInteger(timings.total) && timings.total > 0 ? { latencyMs: timings.total } : {}) });
     const payload = this.store.getSecret(`memory-outbox:${jobId}`) ?? fail("DEAL_MEMORY_INVALID", "verified outcome payload is missing");
     return { payloadHash: hash(payload), queued: true };
   }
@@ -447,7 +543,7 @@ export class Phase3App {
     try {
       const query = [memory.scope.capabilityId, memory.scope.counterparty, memory.signal.outcome].filter(Boolean).join(" ");
       const recalled = await manual.recall(query, 100);
-      blobId = recalled.find((item) => { try { return canonicalJson(JSON.parse(item.text)) === canonicalJson(memory); } catch { return false; } })?.blobId;
+      blobId = recalled.find((item) => { try { return canonicalJson(openMemoryText(item.text).memory) === canonicalJson(memory); } catch { return false; } })?.blobId;
       if (blobId) await manual.listMetadata(config);
     } finally { manual.destroy(); }
     if (!blobId) return { resolved: false, state: "unresolved" };
@@ -635,7 +731,7 @@ export class Phase3App {
       }
       if (command === "memory.recall") {
         const recalled = await manual.recall(required(args, "query"));
-        const citations = recalled.filter((item) => item.distance <= (this.profile.policy.maxMemoryDistance ?? 0.35)).map((item) => { try { const memory = JSON.parse(item.text) as unknown; validateSettlementMemory(memory); const trusted = this.authenticatedMemory(item.blobId, memory); return { blobId: item.blobId, kind: trusted.kind, provenance: trusted.provenance, distance: item.distance }; } catch { return { blobId: item.blobId, kind: "legacy", provenance: "legacy_untrusted", distance: item.distance }; } });
+        const citations = recalled.filter((item) => item.distance <= (this.profile.policy.maxMemoryDistance ?? 0.35)).map((item) => { try { const opened = openMemoryText(item.text), memory = opened.memory; validateSettlementMemory(memory); const trusted = this.authenticatedMemory(item.blobId, memory, Boolean(opened.signedBy && opened.signedBy === manual.signerAddress)); return { blobId: item.blobId, kind: trusted.kind, provenance: trusted.provenance, distance: item.distance }; } catch { return { blobId: item.blobId, kind: "legacy", provenance: "legacy_untrusted", distance: item.distance }; } });
         return { namespace: config.namespace, citations, effect: citations.length ? "candidate-preference-adjusted" : "no-policy-change" };
       }
       const target = typeof args["operation-id"] === "string" ? args["operation-id"] : undefined;

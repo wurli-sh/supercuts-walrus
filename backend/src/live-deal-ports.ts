@@ -3,15 +3,15 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
-import { verifySignedCapability, type SignedCapabilityRegistration } from "./capability.js";
-import type { DealArtifact, DealNegotiation, DealOutcome, DealPayment, DealPorts } from "./deal-engine.js";
+import { verifySignedCapability, type SignedCapabilityRegistration, validateCapabilityPayload } from "./capability.js";
+import type { DealArtifact, DealNegotiation, DealOutcome, DealPayment, DealPorts, SellerFault } from "./deal-engine.js";
 import type { ExecuteDealInput } from "./deal.js";
 import { WalrusDealBlobs, wireDecrypt, wireEncrypt, wireHash, wireJsonHash, wireKey } from "./deal-wire.js";
 import { fail } from "./errors.js";
 import { LiveRuntime, type LiveRuntimeProfile } from "./live-runtime.js";
 import { executeMandated, type AgentMandate } from "./mandate.js";
 import type { Phase3App } from "./phase3.js";
-import { canonicalJson, settlementMandateHash, validateSettlementPlan, type SettlementPlanV1 } from "./settlement.js";
+import { canonicalJson, settlementMandateHash, validateSettlementPlan, type PlanningMandate, type SettlementPlanV1 } from "./settlement.js";
 import type { SellerDelivery, ServiceRequest } from "./seller-runtime.js";
 import { validateDirectoryOrigin } from "./seller-directory.js";
 
@@ -96,8 +96,14 @@ export class LiveDealPorts implements DealPorts {
     const candidates = (await this.catalog()).map(({ registration }) => registration).filter((registration) =>
       (input.capabilityId && registration.manifest.capabilityId === input.capabilityId || input.capabilityClass && registration.manifest.capability === input.capabilityClass) && registration.manifest.asset === input.budget.asset);
     if (!candidates.length) fail("DEAL_CAPABILITY_NOT_FOUND", "configured sellers have no matching signed capability");
-    candidates.sort((a, b) => BigInt(a.manifest.priceBand.minimum) < BigInt(b.manifest.priceBand.minimum) ? -1 : BigInt(a.manifest.priceBand.minimum) > BigInt(b.manifest.priceBand.minimum) ? 1 : a.manifest.capabilityId.localeCompare(b.manifest.capabilityId));
-    return candidates[0]!;
+    // Same capability class can carry different signed input schemas; only rank sellers that accept this task.
+    const accepting = candidates.filter((registration) => { try { validateCapabilityPayload(registration.manifest, "input", input.input); return true; } catch { return false; } });
+    if (!accepting.length) fail("DEAL_INPUT_UNSUPPORTED", "no matching seller's signed input schema accepts this task input; check deal.catalog for the expected fields");
+    candidates.splice(0, candidates.length, ...accepting);
+    // Walrus Memory decides which seller gets paid: verified outcomes outrank a lower list price.
+    const ranking = await this.app.rankDealCandidates(input.operationId, candidates.map((item) => item.manifest), this.mandate as unknown as PlanningMandate, { budgetMaximum: input.budget.maximum, ...(input.requestedRail ? { requestedRail: input.requestedRail } : {}), ...(input.privacyHint ? { privacyHint: input.privacyHint } : {}) });
+    const chosen = ranking.ordered[0]!;
+    return candidates.find((item) => item.manifest.manifestHash === chosen.manifestHash)!;
   }
   async plan(input: ExecuteDealInput, registration: SignedCapabilityRegistration, paymentOperationId: string): Promise<SettlementPlanV1> {
     const existing = this.app.store.db.prepare("SELECT plan_json FROM settlement_plans WHERE operation_id=?").get(paymentOperationId) as { plan_json: string } | undefined;
@@ -105,10 +111,13 @@ export class LiveDealPorts implements DealPorts {
       const saved = JSON.parse(existing.plan_json) as SettlementPlanV1;
       validateSettlementPlan(saved);
       if (saved.mandateHash !== settlementMandateHash(this.mandate) || saved.manifestHash !== registration.manifest.manifestHash || saved.operationId !== paymentOperationId) fail("DEAL_PLAN_MISMATCH", "persisted plan differs from the owner mandate or seller capability");
+      this.app.recordDealMemoryInfluence(input.operationId, saved, this.mandate as unknown as PlanningMandate, { ...(input.requestedRail ? { requestedRail: input.requestedRail } : {}), ...(input.privacyHint ? { privacyHint: input.privacyHint } : {}) });
       return saved;
     }
     const result = await executeMandated(this.app, this.mandate, "settlement.plan", { "operation-id": paymentOperationId, manifest: registration.manifest, "requested-amount": registration.manifest.priceBand.minimum, ...(input.privacyHint ? { "privacy-hint": input.privacyHint } : {}), ...(input.requestedRail ? { "requested-rail": input.requestedRail } : {}) });
-    return result as unknown as SettlementPlanV1;
+    const plan = result as unknown as SettlementPlanV1;
+    this.app.recordDealMemoryInfluence(input.operationId, plan, this.mandate as unknown as PlanningMandate, { ...(input.requestedRail ? { requestedRail: input.requestedRail } : {}), ...(input.privacyHint ? { privacyHint: input.privacyHint } : {}) });
+    return plan;
   }
   async negotiate(input: ExecuteDealInput, registration: SignedCapabilityRegistration, plan: SettlementPlanV1, agreementOperationId: string): Promise<LiveNegotiation> {
     const sessionId = agreementOperationId, capabilityId = registration.manifest.capabilityId, buyerPublicKey = this.app.store.getSecret("identity:x25519-public")?.toString("base64url") ?? fail("IDENTITY_MISSING", "buyer transport key is missing");
@@ -164,6 +173,9 @@ export class LiveDealPorts implements DealPorts {
     const artifact = wireDecrypt<{ artifactBase64: string; contentType: string; metadata: Record<string, unknown> }>(key, prepared.sessionId, "delivery", Buffer.from(encrypted).toString("base64"));
     if (wireHash(Buffer.from(artifact.artifactBase64, "base64")) !== receipt.artifactSha256 || artifact.contentType !== receipt.contentType || canonicalJson(artifact.metadata) !== canonicalJson(receipt.metadata)) fail("DEAL_DELIVERY_UNVERIFIED", "seller delivery bytes or metadata differ from the receipt");
     return { blobId: receipt.blobId, ciphertextHash: receipt.ciphertextHash, artifactSha256: receipt.artifactSha256, contentType: receipt.contentType, metadata: receipt.metadata, artifactBase64: artifact.artifactBase64 };
+  }
+  async rememberFailure(input: ExecuteDealInput, plan: SettlementPlanV1, fault: SellerFault): Promise<void> {
+    this.app.recordVerifiedDealFailure(input.operationId, plan.planHash, fault);
   }
   async rememberOutcome(input: ExecuteDealInput, plan: SettlementPlanV1, payment: DealPayment, artifact: DealArtifact, _outcomeOperationId: string): Promise<{ queued: true; payloadHash: string }> {
     return this.app.recordVerifiedDealOutcome(input.operationId, plan.planHash, payment.transactionDigest, artifact.artifactSha256);

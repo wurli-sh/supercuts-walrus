@@ -39,6 +39,10 @@ export interface DealEvidenceView {
   inventory: "pending" | "indexed" | "missing" | "unresolved";
   paymentFinalized: boolean;
   paymentDigest?: string;
+  /** What Walrus Memory changed about this payment versus the same mandate with no memory. */
+  memoryInfluence?: { changedSeller: boolean; changedRail: boolean; changedRisk: boolean; changedMaximum: boolean; withoutMemory?: { sellerId: string; capabilityId: string; rail: string; riskLevel: string; maximumAmount: string }; withMemory: { sellerId: string; capabilityId: string; rail: string; riskLevel: string; maximumAmount: string }; citedBlobIds: string[] };
+  /** Learned seller scorecards used for discovery; counts and blob IDs only, never memory plaintext. */
+  memoryRanking?: Array<{ capabilityId: string; counterparty: string; reliability: number; observations: number; successes: number; failures: number; unresolved: number; lastOutcome?: string; medianLatencyMs?: number; priceMinimum: string }>;
 }
 export interface DealDelivery { dealId: string; contentType: string; artifactSha256: string; artifact: Uint8Array; }
 
@@ -188,7 +192,12 @@ export class DealJournal {
     const blobs = this.store.db.prepare("SELECT kind,blob_id,status FROM deal_blobs WHERE operation_id=?").all(row.operation_id) as Array<{ kind: string; blob_id: string | null; status: string }>;
     const memory = this.store.db.prepare("SELECT blob_id,status FROM deal_memory_outbox WHERE operation_id=? AND event_kind='outcome'").get(row.operation_id) as { blob_id: string | null; status: string } | undefined;
     const transcript = this.step<{ transcriptBlobs?: Array<{ blobId: string }> }>(row.operation_id, "negotiation");
-    return { version: "supercuts.deal-evidence.v1", dealId, transcriptBlobIds: transcript?.transcriptBlobs?.map((item) => item.blobId) ?? [], ...(blobs.find((item) => item.kind === "agreement")?.blob_id ? { agreementBlobId: blobs.find((item) => item.kind === "agreement")!.blob_id! } : {}), ...(blobs.find((item) => item.kind === "delivery")?.blob_id ? { deliveryBlobId: blobs.find((item) => item.kind === "delivery")!.blob_id! } : {}), ...(memory?.blob_id ? { outcomeMemoryBlobId: memory.blob_id } : {}), ciphertextReadback: blobs.some((item) => item.status === "unresolved") ? "unresolved" : ["agreement", "delivery"].every((kind) => blobs.some((item) => item.kind === kind && item.status === "verified")) ? "verified" : "pending", inventory: memory?.status === "indexed" ? "indexed" : memory?.status === "unresolved" ? "unresolved" : "pending", paymentFinalized: view.evidence.payment === "finalized", ...(view.paymentDigest ? { paymentDigest: view.paymentDigest } : {}) };
+    const hasRecords = Boolean(this.store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_records'").get());
+    const record = <T>(scope: string, id: string): T | undefined => { if (!hasRecords) return undefined; const found = this.store.db.prepare("SELECT value FROM app_records WHERE scope=? AND id=?").get(scope, id) as { value: string } | undefined; return found ? JSON.parse(found.value) as T : undefined; };
+    const influence = record<NonNullable<DealEvidenceView["memoryInfluence"]>>("memory-influence", `deal:${row.operation_id}`);
+    const ranking = record<{ scorecards: Array<NonNullable<DealEvidenceView["memoryRanking"]>[number] & { citedBlobIds?: string[]; lastOutcomeAt?: number }> }>("deal-ranking", row.operation_id);
+    const memoryRanking = ranking?.scorecards.map(({ capabilityId, counterparty, reliability, observations, successes, failures, unresolved, lastOutcome, medianLatencyMs, priceMinimum }) => ({ capabilityId, counterparty, reliability, observations, successes, failures, unresolved, ...(lastOutcome ? { lastOutcome } : {}), ...(medianLatencyMs !== undefined ? { medianLatencyMs } : {}), priceMinimum }));
+    return { version: "supercuts.deal-evidence.v1", dealId, transcriptBlobIds: transcript?.transcriptBlobs?.map((item) => item.blobId) ?? [], ...(blobs.find((item) => item.kind === "agreement")?.blob_id ? { agreementBlobId: blobs.find((item) => item.kind === "agreement")!.blob_id! } : {}), ...(blobs.find((item) => item.kind === "delivery")?.blob_id ? { deliveryBlobId: blobs.find((item) => item.kind === "delivery")!.blob_id! } : {}), ...(memory?.blob_id ? { outcomeMemoryBlobId: memory.blob_id } : {}), ciphertextReadback: blobs.some((item) => item.status === "unresolved") ? "unresolved" : ["agreement", "delivery"].every((kind) => blobs.some((item) => item.kind === kind && item.status === "verified")) ? "verified" : "pending", inventory: memory?.status === "indexed" ? "indexed" : memory?.status === "unresolved" ? "unresolved" : "pending", paymentFinalized: view.evidence.payment === "finalized", ...(view.paymentDigest ? { paymentDigest: view.paymentDigest } : {}), ...(influence ? { memoryInfluence: influence } : {}), ...(memoryRanking ? { memoryRanking } : {}) };
   }
 
   delivery(dealId: string): DealDelivery {

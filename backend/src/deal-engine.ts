@@ -33,6 +33,13 @@ export interface DealOutcomeQueued { queued: true; payloadHash: string; }
 
 /** A port owns transport, signing, and finality checks. It must be safe to call
  * again with the same child IDs after a process crash. */
+export interface SellerFault { stage: "negotiation" | "delivery"; code: string; paymentDigest?: string; }
+/**
+ * Codes the buyer runtime verified against seller-supplied evidence. Buyer-side, network, and Walrus readback
+ * errors are excluded: a readback mismatch can come from an aggregator, not the seller.
+ */
+export const SELLER_FAULT_CODES = new Set(["AGREEMENT_BINDING_MISMATCH", "DEAL_RESOURCE_MISMATCH", "DEAL_AGREEMENT_INVALID", "DEAL_DELIVERY_UNVERIFIED", "CAPABILITY_PAYLOAD_INVALID"]);
+
 export interface DealPorts {
   readBlob(blobId: string): Promise<Uint8Array>;
   discover(input: ExecuteDealInput): Promise<SignedCapabilityRegistration>;
@@ -42,6 +49,8 @@ export interface DealPorts {
   deliver(input: ExecuteDealInput, plan: SettlementPlanV1, negotiation: DealNegotiation, payment: DealPayment, deliveryOperationId: string): Promise<DealArtifact | { pending: true }>;
   rememberOutcome(input: ExecuteDealInput, plan: SettlementPlanV1, payment: DealPayment, artifact: DealArtifact, outcomeOperationId: string): Promise<DealOutcome | DealOutcomeQueued | { unresolved: true }>;
   inventory(blobId: string): Promise<boolean>;
+  /** Optional: queue a verified seller-fault memory so later discovery demotes this seller. Best effort. */
+  rememberFailure?(input: ExecuteDealInput, plan: SettlementPlanV1, fault: SellerFault): Promise<void>;
 }
 
 const hash = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
@@ -103,18 +112,20 @@ export class DealEngine {
 
     let negotiation = this.journal.step<DealNegotiation>(operationId, "negotiation");
     if (view.state === "planned") view = this.journal.advance(operationId, "planned", "negotiating");
-    if (!negotiation) {
-      const started = Date.now();
-      negotiation = await this.ports.negotiate(input, registration, plan, dealChildId(operationId, "agreement"));
-      if (!negotiation.agreementBlobId || !/^[0-9a-f]{64}$/.test(negotiation.agreementCiphertextHash) || !Array.isArray(negotiation.transcriptBlobs) || !negotiation.transcriptBlobs.length) fail("DEAL_AGREEMENT_INVALID", "seller agreement or Walrus transcript evidence is incomplete");
-      this.journal.saveStep(operationId, "negotiation", { planHash: plan.planHash }, negotiation);
-      this.journal.recordTiming(operationId, "negotiation", Date.now() - started);
-    }
-    const agreementReadStarted = Date.now();
-    for (const item of [...negotiation.transcriptBlobs, { blobId: negotiation.agreementBlobId, ciphertextHash: negotiation.agreementCiphertextHash }]) {
-      if (!item.blobId || !/^[0-9a-f]{64}$/.test(item.ciphertextHash) || createHash("sha256").update(await this.ports.readBlob(item.blobId)).digest("hex") !== item.ciphertextHash) fail("WALRUS_BLOB_MISMATCH", "encrypted negotiation or agreement differs from Walrus readback");
-    }
-    this.journal.recordTiming(operationId, "agreement_readback", Date.now() - agreementReadStarted);
+    try {
+      if (!negotiation) {
+        const started = Date.now();
+        negotiation = await this.ports.negotiate(input, registration, plan, dealChildId(operationId, "agreement"));
+        if (!negotiation.agreementBlobId || !/^[0-9a-f]{64}$/.test(negotiation.agreementCiphertextHash) || !Array.isArray(negotiation.transcriptBlobs) || !negotiation.transcriptBlobs.length) fail("DEAL_AGREEMENT_INVALID", "seller agreement or Walrus transcript evidence is incomplete");
+        this.journal.saveStep(operationId, "negotiation", { planHash: plan.planHash }, negotiation);
+        this.journal.recordTiming(operationId, "negotiation", Date.now() - started);
+      }
+      const agreementReadStarted = Date.now();
+      for (const item of [...negotiation.transcriptBlobs, { blobId: negotiation.agreementBlobId, ciphertextHash: negotiation.agreementCiphertextHash }]) {
+        if (!item.blobId || !/^[0-9a-f]{64}$/.test(item.ciphertextHash) || createHash("sha256").update(await this.ports.readBlob(item.blobId)).digest("hex") !== item.ciphertextHash) fail("WALRUS_BLOB_MISMATCH", "encrypted negotiation or agreement differs from Walrus readback");
+      }
+      this.journal.recordTiming(operationId, "agreement_readback", Date.now() - agreementReadStarted);
+    } catch (error) { await this.rememberSellerFault(input, plan, "negotiation", undefined, error); throw error; }
     if (view.state === "negotiating") view = this.journal.advance(operationId, "negotiating", "agreed");
     this.journal.recordBlob(operationId, "agreement", negotiation.agreementCiphertextHash, negotiation.agreementBlobId);
     if (view.state === "agreed") view = this.journal.advance(operationId, "agreed", "evidence_ready");
@@ -140,28 +151,35 @@ export class DealEngine {
 
     let artifact = this.journal.step<DealArtifact>(operationId, "delivery");
     if (view.state === "paid") view = this.journal.advance(operationId, "paid", "delivery_pending");
-    if (!artifact) {
-      const started = Date.now();
-      const candidate = await this.ports.deliver(input, plan, negotiation, payment, dealChildId(operationId, "delivery"));
-      if ("pending" in candidate) return this.journal.get(operationId);
-      if (!candidate.blobId || !/^[0-9a-f]{64}$/.test(candidate.ciphertextHash) || !/^[0-9a-f]{64}$/.test(candidate.artifactSha256)) fail("DEAL_DELIVERY_UNVERIFIED", "seller delivery evidence is incomplete");
-      if (typeof candidate.artifactBase64 !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(candidate.artifactBase64)) fail("DEAL_DELIVERY_UNVERIFIED", "seller artifact encoding is invalid");
-      const artifactBytes = Buffer.from(candidate.artifactBase64, "base64");
-      if (!artifactBytes.length || artifactBytes.length > 512 * 1024 || createHash("sha256").update(artifactBytes).digest("hex") !== candidate.artifactSha256) fail("DEAL_DELIVERY_UNVERIFIED", "seller artifact hash or size is invalid");
-      validateCapabilityPayload(registration.manifest, "output", candidate.metadata);
-      artifact = candidate;
-      this.journal.saveStep(operationId, "delivery", { paymentDigest: payment.transactionDigest }, artifact);
-      this.journal.recordTiming(operationId, "delivery", Date.now() - started);
-    }
-    if (createHash("sha256").update(Buffer.from(artifact.artifactBase64, "base64")).digest("hex") !== artifact.artifactSha256) fail("DEAL_DELIVERY_UNVERIFIED", "saved artifact hash differs from delivery evidence");
-    const deliveryReadStarted = Date.now();
-    if (createHash("sha256").update(await this.ports.readBlob(artifact.blobId)).digest("hex") !== artifact.ciphertextHash) fail("WALRUS_BLOB_MISMATCH", "encrypted delivery differs from Walrus readback");
-    this.journal.recordTiming(operationId, "delivery_readback", Date.now() - deliveryReadStarted);
+    try {
+      if (!artifact) {
+        const started = Date.now();
+        const candidate = await this.ports.deliver(input, plan, negotiation, payment, dealChildId(operationId, "delivery"));
+        if ("pending" in candidate) return this.journal.get(operationId);
+        if (!candidate.blobId || !/^[0-9a-f]{64}$/.test(candidate.ciphertextHash) || !/^[0-9a-f]{64}$/.test(candidate.artifactSha256)) fail("DEAL_DELIVERY_UNVERIFIED", "seller delivery evidence is incomplete");
+        if (typeof candidate.artifactBase64 !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(candidate.artifactBase64)) fail("DEAL_DELIVERY_UNVERIFIED", "seller artifact encoding is invalid");
+        const artifactBytes = Buffer.from(candidate.artifactBase64, "base64");
+        if (!artifactBytes.length || artifactBytes.length > 512 * 1024 || createHash("sha256").update(artifactBytes).digest("hex") !== candidate.artifactSha256) fail("DEAL_DELIVERY_UNVERIFIED", "seller artifact hash or size is invalid");
+        validateCapabilityPayload(registration.manifest, "output", candidate.metadata);
+        artifact = candidate;
+        this.journal.saveStep(operationId, "delivery", { paymentDigest: payment.transactionDigest }, artifact);
+        this.journal.recordTiming(operationId, "delivery", Date.now() - started);
+      }
+      if (createHash("sha256").update(Buffer.from(artifact.artifactBase64, "base64")).digest("hex") !== artifact.artifactSha256) fail("DEAL_DELIVERY_UNVERIFIED", "saved artifact hash differs from delivery evidence");
+      const deliveryReadStarted = Date.now();
+      if (createHash("sha256").update(await this.ports.readBlob(artifact.blobId)).digest("hex") !== artifact.ciphertextHash) fail("WALRUS_BLOB_MISMATCH", "encrypted delivery differs from Walrus readback");
+      this.journal.recordTiming(operationId, "delivery_readback", Date.now() - deliveryReadStarted);
+    } catch (error) { await this.rememberSellerFault(input, plan, "delivery", payment.transactionDigest, error); throw error; }
     this.journal.recordBlob(operationId, "delivery", artifact.ciphertextHash, artifact.blobId);
     if (view.state === "delivery_pending") view = this.journal.advance(operationId, "delivery_pending", "delivered");
     if (view.state === "delivered") view = this.journal.advance(operationId, "delivered", "outcome_pending");
 
     return this.finishOutcome(operationId, input);
+  }
+
+  private async rememberSellerFault(input: ExecuteDealInput, plan: SettlementPlanV1, stage: SellerFault["stage"], paymentDigest: string | undefined, error: unknown): Promise<void> {
+    if (!(error instanceof SupercutsError) || !SELLER_FAULT_CODES.has(error.code) || !this.ports.rememberFailure) return;
+    try { await this.ports.rememberFailure(input, plan, { stage, code: error.code, ...(paymentDigest ? { paymentDigest } : {}) }); } catch { /* the original seller fault stays the reported error */ }
   }
 
   private async finishOutcome(operationId: string, input: ExecuteDealInput): Promise<DealView> {

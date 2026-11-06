@@ -21,7 +21,8 @@ test("composite deal resumes after an inventory delay without another payment", 
   const input: ExecuteDealInput = { operationId: "deal-restart", capabilityId: manifest.capabilityId, input: { task: "private" }, budget: { asset: manifest.asset, maximum: "30" } };
   const home = mkdtempSync(join(tmpdir(), "supercuts-engine-")), path = join(home, "state.sqlite"), key = randomBytes(32);
   const store = new RoleStore(path, key);
-  let paid = 0, remembered = 0, inventoryReads = 0, needsFunding = true, queueMode = false;
+  let paid = 0, remembered = 0, inventoryReads = 0, needsFunding = true, queueMode = false, badDelivery = false;
+  const failures: Array<{ stage: string; code: string; paymentDigest?: string }> = [];
   const artifact = Buffer.from("private artifact"), artifactSha256 = createHash("sha256").update(artifact).digest("hex");
   const transcriptBytes = Buffer.from("encrypted transcript"), agreementBytes = Buffer.from("encrypted agreement"), deliveryBytes = Buffer.from("encrypted delivery");
   const sha = (value: Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -38,9 +39,10 @@ test("composite deal resumes after an inventory delay without another payment", 
       for (const status of ["reserved", "proof_persisted", "broadcast", "finalized", "confirmed"] as const) store.transitionOperation(paymentOperationId, status, status === "broadcast" ? "tx-one" : undefined);
       return { transactionDigest: "tx-one", finalized: true, tatumVerified: true };
     },
-    deliver: async () => ({ blobId: "delivery-one", ciphertextHash: sha(deliveryBytes), artifactSha256, contentType: "application/json", metadata: {}, artifactBase64: artifact.toString("base64") }),
+    deliver: async () => ({ blobId: "delivery-one", ciphertextHash: sha(deliveryBytes), artifactSha256: badDelivery ? "0".repeat(64) : artifactSha256, contentType: "application/json", metadata: {}, artifactBase64: artifact.toString("base64") }),
     rememberOutcome: async () => { remembered++; return queueMode ? { queued: true as const, payloadHash: "d".repeat(64) } : { payloadHash: "d".repeat(64), blobId: "outcome-one", indexed: false }; },
     inventory: async () => ++inventoryReads > 1,
+    rememberFailure: async (_input, _plan, fault) => { failures.push(fault); },
   };
   try {
     const journal = new DealJournal(store), engine = new DealEngine(journal, ports, mandate);
@@ -77,8 +79,13 @@ test("composite deal resumes after an inventory delay without another payment", 
     assert.equal((await engine.resume(queuedInput.operationId)).state, "complete");
     assert.equal(paid, 2);
     blobs.set("agreement-one", Buffer.from("tampered agreement"));
+    assert.deepEqual(failures, [], "buyer funding gaps are not seller faults");
     await assert.rejects(() => engine.execute({ ...input, operationId: "tampered-deal" }), { code: "WALRUS_BLOB_MISMATCH" });
     assert.equal(paid, 2);
+    assert.deepEqual(failures, [], "a Walrus readback mismatch may be an aggregator fault, so it does not blame the seller");
+    blobs.set("agreement-one", agreementBytes); badDelivery = true;
+    await assert.rejects(() => engine.execute({ ...input, operationId: "bad-delivery-deal" }), { code: "DEAL_DELIVERY_UNVERIFIED" });
+    assert.deepEqual(failures, [{ stage: "delivery", code: "DEAL_DELIVERY_UNVERIFIED", paymentDigest: "tx-one" }], "seller-supplied delivery faults become outcome memories");
   } finally { store.close(); }
 });
 
