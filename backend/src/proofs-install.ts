@@ -45,6 +45,14 @@ export interface ProofIndex {
 }
 
 const MARKER = ".supercuts-proofs";
+/**
+ * Circom's witness generators are CommonJS `.js` files. Without a package scope of their own they inherit
+ * `"type": "module"` from an enclosing project and fail to load, so every install pins its own scope.
+ */
+function pinCommonJsScope(dir: string): void {
+  const path = join(dir, "package.json"), body = '{ "type": "commonjs" }\n';
+  if (!existsSync(path) || readFileSync(path, "utf8") !== body) writeFileSync(path, body, { mode: 0o600 });
+}
 const SAFE_PATH =
   /^(?:[a-z0-9_]+_js\/[a-z0-9_.]+|proofs\/[a-z0-9_]+\/[a-z0-9_.-]+|proving-manifest\.json)$/;
 
@@ -173,8 +181,10 @@ export async function installProofs(
     dir = resolve(options.dir ?? defaultProofsDir()),
     fetchImpl = options.fetchImpl ?? fetch;
   const before = await proofsStatus(dir, index);
-  if (before.installed)
+  if (before.installed) {
+    pinCommonJsScope(dir);
     return { dir, alreadyInstalled: true, files: index.files.length };
+  }
   const token = options.token ?? process.env.GITHUB_TOKEN;
   const source = options.source,
     local =
@@ -275,6 +285,7 @@ export async function installProofs(
       bytes += size;
     }
     writeFileSync(join(staging, MARKER), `${index.version}\n`, { mode: 0o600 });
+    pinCommonJsScope(staging);
     // Move the old install aside before swapping, so an interruption leaves either install recoverable.
     rmSync(previous, { recursive: true, force: true });
     if (existsSync(dir)) renameSync(dir, previous);

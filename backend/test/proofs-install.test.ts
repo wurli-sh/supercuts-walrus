@@ -86,6 +86,7 @@ test("install verifies every file, installs owner-only, and is idempotent", asyn
   const first = await installProofs({ dir, source, index });
   assert.equal(first.installed, true);
   assert.equal(statSync(dir).mode & 0o777, 0o700);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")), { type: "commonjs" }, "witness scripts keep CommonJS inside ESM projects");
   assert.equal((await proofsStatus(dir, index)).installed, true);
   assert.equal(
     (await installProofs({ dir, source, index })).alreadyInstalled,
