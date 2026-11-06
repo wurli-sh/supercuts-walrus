@@ -14,6 +14,7 @@ import { verifySignedCapability, type SignedCapabilityRegistration } from "./cap
 import { WalrusDealBlobs } from "./deal-wire.js";
 import { canonicalJson } from "./settlement.js";
 import { validateDirectoryOrigin } from "./seller-directory.js";
+import { TESTNET_DEFAULTS, withTestnetDefaults } from "./testnet-defaults.js";
 
 interface BuyerSetup {
   deploymentConfig: string; tatumKeyFile: string; writeGrpc: string; tatumGrpc: string;
@@ -39,6 +40,8 @@ function origins(values: unknown): string[] {
   });
 }
 function validateConfig(config: BuyerSetup): BuyerSetup {
+  withTestnetDefaults(config);
+  if (!config.sellerOrigins?.length && !config.directoryUrl) config.directoryUrl = TESTNET_DEFAULTS.directoryUrl;
   amount(config.perDealCeiling, "perDealCeiling"); amount(config.totalBudget, "totalBudget");
   if (BigInt(config.totalBudget) < BigInt(config.perDealCeiling)) fail("SETUP_INVALID", "totalBudget must cover one permitted deal");
   if (!Number.isSafeInteger(config.expiresAt) || config.expiresAt <= Date.now()) fail("SETUP_INVALID", "expiresAt must be a future Unix millisecond timestamp");
@@ -70,21 +73,23 @@ export async function promptBuyerSetup(home: string): Promise<Record<string, unk
   if (!process.stdin.isTTY) fail("SETUP_INPUT_REQUIRED", "interactive setup requires a terminal; use --config with an owner-only JSON file");
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   try {
-    const ask = async (label: string) => (await rl.question(`${label}: `)).trim();
-    const days = Number(await ask("Policy duration in days"));
+    const ask = async (label: string, fallback?: string) => (await rl.question(fallback ? `${label} [${fallback}]: ` : `${label}: `)).trim() || fallback || "";
+    process.stderr.write("Press Enter to accept a bracketed default. Credentials are read from owner-only files, never typed here.\n");
+    const days = Number(await ask("Policy duration in days", "14"));
     if (!Number.isSafeInteger(days) || days < 1 || days > 365) fail("SETUP_INVALID", "policy duration must be 1..365 days");
     const config: BuyerSetup = {
-      deploymentConfig: await ask("Pinned Testnet deployment config path"), tatumKeyFile: await ask("Tatum key file path"),
-      writeGrpc: await ask("Sui write gRPC URL"), tatumGrpc: await ask("Tatum read gRPC URL"),
-      walrusPublisher: await ask("Walrus publisher URL"), walrusAggregator: await ask("Walrus aggregator URL"),
+      deploymentConfig: await ask("Pinned Testnet deployment config path", "bundled"), tatumKeyFile: await ask("Owner-only Tatum API key file path"),
+      writeGrpc: await ask("Sui write gRPC URL", TESTNET_DEFAULTS.writeGrpc), tatumGrpc: await ask("Tatum read gRPC URL", TESTNET_DEFAULTS.tatumGrpc),
+      walrusPublisher: await ask("Walrus publisher URL", TESTNET_DEFAULTS.walrusPublisher), walrusAggregator: await ask("Walrus aggregator URL", TESTNET_DEFAULTS.walrusAggregator),
       memoryConfigFile: await ask("Owner-only Walrus Memory config path (blank to skip Memory)"),
-      directoryUrl: await ask("Shared directory origin (blank for direct sellers)"),
+      directoryUrl: await ask("Shared directory origin (type none for direct sellers only)", TESTNET_DEFAULTS.directoryUrl),
       sellerOrigins: (await ask("Additional seller HTTPS origins, comma separated (or blank)")).split(",").map((item) => item.trim()).filter(Boolean),
       allowedCounterparties: (await ask("Initially approved seller Sui addresses, comma separated (or blank)")).split(",").map((item) => item.trim()).filter(Boolean),
-      perDealCeiling: await ask("Maximum per deal in MIST"), totalBudget: await ask("Lifetime cumulative budget in MIST"),
+      perDealCeiling: await ask("Maximum per deal in MIST", "2000000"), totalBudget: await ask("Lifetime cumulative budget in MIST", "10000000"),
       expiresAt: Date.now() + days * 24 * 60 * 60 * 1000, allowPublicX402: (await ask("Allow public x402 when requested? yes/no")).toLowerCase() === "yes",
     };
-    if (!config.directoryUrl) delete config.directoryUrl;
+    if (config.deploymentConfig === "bundled") config.deploymentConfig = "";
+    if (!config.directoryUrl || config.directoryUrl === "none") delete config.directoryUrl;
     return setupBuyerConfig(home, validateConfig(config));
   } finally { rl.close(); }
 }
@@ -99,7 +104,14 @@ function setupBuyerConfig(home: string, config: BuyerSetup): Record<string, unkn
   const session = createBuyerSession(home);
   const decoded = decodeSuiPrivateKey(readFileSync(keyPath, "utf8").trim());
   if (decoded.scheme !== "ED25519") fail("SETUP_INVALID", "buyer key must use ED25519");
-  return { home, address: Ed25519Keypair.fromSecretKey(decoded.secretKey).toSuiAddress(), ...session, policy: "configured" };
+  const address = Ed25519Keypair.fromSecretKey(decoded.secretKey).toSuiAddress();
+  return { home, address, ...session, policy: "configured", nextSteps: [
+    `Fund only this buyer with Testnet SUI: supercuts funding execute --home ${home} --public-payment <MIST> --shielded-payment 0 --operation-id fund-1 --request-faucet --confirm (or use https://faucet.sui.io for ${address})`,
+    ...(config.allowedCounterparties?.length ? [] : [`Review the directory, then approve a seller: supercuts policy approve-seller --home ${home} --capability-id <id>`]),
+    ...(config.memoryConfigFile ? [`Keep the Walrus Memory embedding adapter running (supercuts-embedding-adapter). An MCP agent flushes outcome memories itself; SDK-only hosts also run: supercuts-memory-worker ${home}`] : []),
+    `Check readiness: supercuts onboarding doctor --home ${home}`,
+    `Connect an agent with ${session.mcpConfig}, or call BuyerClient.executeDeal from @supercuts-walrus/sdk.`,
+  ] };
 }
 export function createBuyerSession(home: string): Record<string, unknown> {
   if (!existsSync(join(home, "profile.json"))) fail("SETUP_REQUIRED", "initialize the buyer before creating a Codex session");

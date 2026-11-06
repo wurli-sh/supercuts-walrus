@@ -5,6 +5,7 @@ import { createInterface } from "node:readline/promises";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { fail } from "./errors.js";
+import { TESTNET_DEFAULTS, withTestnetDefaults } from "./testnet-defaults.js";
 import { initialize } from "./phase3.js";
 
 interface SellerSetup {
@@ -25,13 +26,13 @@ function ownerFile(path: string): void {
 }
 
 function validateConfig(config: SellerSetup): SellerSetup {
-  config.deploymentConfig ||= join(dirname(fileURLToPath(import.meta.url)), "../config/phase1.testnet.json");
+  withTestnetDefaults(config);
   for (const key of ["deploymentConfig", "tatumKeyFile", "writeGrpc", "tatumGrpc", "walrusPublisher", "walrusAggregator"] as const) {
     if (typeof config[key] !== "string" || !config[key]) fail("SETUP_INVALID", `${key} is required`);
   }
   ownerFile(resolve(config.tatumKeyFile));
   if (config.suiKeyFile) ownerFile(resolve(config.suiKeyFile));
-  const deployment = JSON.parse(readFileSync(resolve(config.deploymentConfig), "utf8")) as { verifierVersion?: number; network?: string; testOnly?: boolean };
+  const deployment = JSON.parse(readFileSync(resolve(config.deploymentConfig!), "utf8")) as { verifierVersion?: number; network?: string; testOnly?: boolean };
   if (deployment.network !== "testnet" || deployment.testOnly !== true || deployment.verifierVersion !== 2) fail("SETUP_INVALID", "seller setup requires the pinned experimental v2 Testnet deployment");
   return config;
 }
@@ -92,14 +93,15 @@ export async function promptSellerSetup(home: string): Promise<Record<string, un
   if (!process.stdin.isTTY) fail("SETUP_INPUT_REQUIRED", "interactive seller setup requires a terminal; use --config with an owner-only JSON file");
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   try {
-    const ask = async (label: string) => (await rl.question(`${label}: `)).trim();
+    const ask = async (label: string, fallback?: string) => (await rl.question(fallback ? `${label} [${fallback}]: ` : `${label}: `)).trim() || fallback || "";
+    process.stderr.write("Press Enter to accept a bracketed default. Credentials are read from owner-only files, never typed here.\n");
     const config: SellerSetup = {
       deploymentConfig: await ask("Pinned v2 Testnet deployment config path (blank for bundled config)"),
-      tatumKeyFile: await ask("Owner-only Tatum key file path"),
-      writeGrpc: await ask("Sui write gRPC URL"),
-      tatumGrpc: await ask("Tatum read gRPC URL"),
-      walrusPublisher: await ask("Walrus publisher URL"),
-      walrusAggregator: await ask("Walrus aggregator URL"),
+      tatumKeyFile: await ask("Owner-only Tatum API key file path"),
+      writeGrpc: await ask("Sui write gRPC URL", TESTNET_DEFAULTS.writeGrpc),
+      tatumGrpc: await ask("Tatum read gRPC URL", TESTNET_DEFAULTS.tatumGrpc),
+      walrusPublisher: await ask("Walrus publisher URL", TESTNET_DEFAULTS.walrusPublisher),
+      walrusAggregator: await ask("Walrus aggregator URL", TESTNET_DEFAULTS.walrusAggregator),
     };
     const snarkjs = await ask("SnarkJS executable path (blank for deployment-relative default)");
     const converter = await ask("Groth16 converter path (blank for deployment-relative default)");

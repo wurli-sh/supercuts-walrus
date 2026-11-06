@@ -13,7 +13,7 @@ test("one-time buyer setup creates isolated v2 policy and renewal keeps lifetime
   const root = mkdtempSync(join(tmpdir(), "supercuts-buyer-setup-")), home = join(root, "buyer");
   const tatum = join(root, "tatum.key"), memory = join(root, "memory.json"), configPath = join(root, "setup.json");
   writeFileSync(tatum, "test-key", { mode: 0o600 });
-  writeFileSync(memory, JSON.stringify({ embeddingApiBase: "http://127.0.0.1:8787/v1" }), { mode: 0o600 });
+  writeFileSync(memory, JSON.stringify({ key: "delegate-key", accountId: "0xaccount", suiPrivateKey: "memory-signer" }), { mode: 0o600 });
   const seller = Ed25519Keypair.generate().toSuiAddress();
   const config = { deploymentConfig: resolve(fileURLToPath(import.meta.url), "../../../config/phase1.testnet.json"), tatumKeyFile: tatum, writeGrpc: "https://fullnode.testnet.sui.io:443", tatumGrpc: "https://example.invalid:443", walrusPublisher: "https://publisher.example", walrusAggregator: "https://aggregator.example", memoryConfigFile: memory, sellerOrigins: ["https://seller.example"], allowedCounterparties: [seller], perDealCeiling: "100", totalBudget: "500", expiresAt: Date.now() + 86_400_000, allowPublicX402: true };
   writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
@@ -45,7 +45,7 @@ test("directory buyer can start with no approved sellers", () => {
   const root = mkdtempSync(join(tmpdir(), "supercuts-directory-buyer-")), home = join(root, "buyer");
   const tatum = join(root, "tatum.key"), memory = join(root, "memory.json"), configPath = join(root, "setup.json");
   writeFileSync(tatum, "test-key", { mode: 0o600 });
-  writeFileSync(memory, JSON.stringify({ embeddingApiBase: "http://127.0.0.1:8787/v1" }), { mode: 0o600 });
+  writeFileSync(memory, JSON.stringify({ key: "delegate-key", accountId: "0xaccount", suiPrivateKey: "memory-signer" }), { mode: 0o600 });
   writeFileSync(configPath, JSON.stringify({ deploymentConfig: resolve(fileURLToPath(import.meta.url), "../../../config/phase1.testnet.json"), tatumKeyFile: tatum, writeGrpc: "https://fullnode.testnet.sui.io:443", tatumGrpc: "https://example.invalid:443", walrusPublisher: "https://publisher.example", walrusAggregator: "https://aggregator.example", memoryConfigFile: memory, directoryUrl: "https://directory.example", perDealCeiling: "100", totalBudget: "500", expiresAt: Date.now() + 86_400_000 }), { mode: 0o600 });
   setupBuyer(home, configPath);
   assert.deepEqual(loadMandate(home).allowedCounterparties, []);
