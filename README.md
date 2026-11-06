@@ -19,7 +19,21 @@ An agent can find work and agree on a price, but the offer exchange and payment 
 
 **Private negotiation and settlement for agents, boosted by Walrus Memory.** Supercuts is a headless Sui layer for agent deals. Sellers publish signed capabilities; a buyer discovers them, negotiates through an authenticated encrypted transcript, pays within an owner mandate, and verifies delivery.
 
-Public work uses a seller-owned x402 resource and a visible Sui Testnet SUI transfer. Confidential work uses an experimental v2 shielded pool on Sui Testnet: the deal amount and counterparty are committed in a proof rather than published as a direct payment. Walrus stores signed capability registrations and encrypted negotiation transcripts. Walrus Mainnet Memory adds durable, encrypted preferences and outcome facts. A recalled owner rule can change the next settlement choice to shielded; remembered outcomes can inform later agent decisions. The CLI, MCP server, and TypeScript SDK share the same role-scoped runtime.
+Public work uses a seller-owned x402 resource and a visible Sui Testnet SUI transfer. Confidential work uses an experimental v2 shielded pool on Sui Testnet: the deal amount and counterparty are committed in a proof rather than published as a direct payment. Walrus stores signed capability registrations and encrypted negotiation transcripts. The CLI, MCP server, and TypeScript SDK share the same role-scoped runtime.
+
+### Agent payments that learn
+
+Every payment starts with a Walrus Memory recall and ends with a verified Walrus Memory write: **recall → decide → pay → verify → remember**. The runtime does this itself, so buyer and seller agents make no memory calls and need no extra setup.
+
+| Payment decision | What decides it |
+| --- | --- |
+| Which seller to pay | A per-seller scorecard learned from verified outcomes. Recency-weighted, so a seller that failed is demoted even when it is cheaper. |
+| x402 or shielded | Owner privacy rules recalled from memory. Shielded is the default. |
+| How much the agent may spend | Owner budget rules, minus spend that memory has already verified for the period |
+| Pay now or ask the owner | Recent failed or unresolved outcomes for that seller |
+| What is remembered | Amount, rail, and latency of each Sui/Tatum-verified payment, plus verified seller faults |
+
+Trusted memories are signed with the owner's memory key, so they keep their authority when recalled on another machine. Memories an agent writes stay advisory. Each deal's evidence includes `memoryInfluence`: what the same mandate would have paid with no memory, next to what Supercuts actually paid. `supercuts memory insights` and the dashboard show the learned scorecards.
 
 ### Sui Testnet settlement evidence
 
@@ -34,6 +48,16 @@ The pinned test-only pool has a funded deposit, private transfer, seller note re
 | Recorded confidential payment | `3merQzwRfYuQ2y4gr9Qe2VJTFS4TYHJXiwvQbEtbESwW` | [v2 demo record](docs/pool-v2.md) |
 
 ---
+
+## Quick start
+
+```sh
+printf 'allowBuilds:\n  blake-hash: true\n' > pnpm-workspace.yaml   # pnpm 10+ only
+pnpm add @supercuts-walrus/sdk@0.1.4 @supercuts-walrus/backend@0.1.4
+pnpm exec supercuts onboard buyer --home ./buyer --config buyer-setup.json
+```
+
+Buyer setup needs only owner-only credential files, a budget, and an expiry. Endpoints default to public Testnet, Walrus, and the shared seller directory. Follow the [SDK quick start](backend/packages/sdk/README.md#quick-start-a-new-buyer-on-testnet) for the buyer's first deal and the [onboarding guide](docs/testnet-onboarding.md) for sellers.
 
 ## Deployments
 
@@ -149,7 +173,7 @@ The SDK calls the runtime through a one-request subprocess seam, keeping role ke
 - **Owner-bound policy** — allowed counterparties, capabilities, amounts, budgets, and rails constrain every deal.
 - **Public x402 delivery** — the seller's protected resource issues the challenge and releases work after payment verification.
 - **Confidential pool payment** — a local proof commits to terms without a direct public transfer naming the confidential seller and amount.
-- **Memory-guided decisions** — encrypted Walrus Memory records preserve owner privacy rules and verified outcomes across sessions; a recalled rule can require the shielded rail.
+- **Memory-driven payments** — encrypted Walrus Mainnet Memory chooses the seller, the rail, the spend ceiling, and owner review from verified outcomes and owner rules. Each deal reports what memory changed.
 - **Retry-safe operations** — stable operation IDs and signed-transaction journals reconcile uncertain broadcasts.
 - **Scoped audit** — approved Seal disclosure targets one deal and one auditor.
 

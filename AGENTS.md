@@ -133,6 +133,10 @@ logs, browser state, prompts, or the Walrus relayer.
 4. Pay the public seller resource through x402 and show one delivered artifact.
 5. Store ten meaningful encrypted memories, or explicitly label reuse of ten completed live writes; recall the privacy rule.
 6. Show that the privacy rule selects shielded settlement instead of x402.
+   Show the deal evidence `memoryInfluence` and `supercuts memory insights`:
+   verified outcomes rank sellers, and a seller with verified faults is
+   demoted even when cheaper. Only label a seller change when
+   `changedSeller` is true in the live evidence.
 7. Settle the accepted confidential agreement through the pool.
 8. Recover the confidential seller's note and queue a standard delayed exit.
 9. If needed, demonstrate the auditor's scoped Seal disclosure.

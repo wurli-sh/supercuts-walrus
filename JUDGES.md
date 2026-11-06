@@ -37,6 +37,17 @@ The recording should show prefunding before negotiation, capability discovery, s
 
 The recorded demo event stream is owner-only at `.state/v2-demo/events-v2-accepted.jsonl`; it is not checked in. [`docs/pool-v2.md`](docs/pool-v2.md) reports that `supercuts-demo check --require-claude` passed against it.
 
+## The memory learning loop
+
+Walrus Memory is the decision layer for every agent payment, not a log.
+
+1. **Discovery** recalls verified outcomes for every seller that matches the task. It ranks sellers by a recency-weighted reliability scorecard instead of by price alone (`backend/src/memory-scorecard.ts`, `Phase3App.rankDealCandidates`).
+2. **Planning** applies owner privacy rules (shielded vs x402) and budget rules. A periodic budget subtracts spend that memory has already verified. Planning also asks for owner review after a fresh failure (`createSettlementPlan`).
+3. **After payment** the runtime queues a verified outcome memory carrying amount, rail, and latency. A verified seller fault is recorded as a failed outcome, for example a mismatched agreement, a Walrus readback mismatch, or an invalid delivery. Buyer funding gaps are never blamed on the seller.
+4. **Next deal** recalls those memories, possibly from another machine: trusted memories carry the owner's memory-key signature.
+
+To see the change, call `deal.evidence` for any deal and look at `memoryInfluence`. It shows the decision the same mandate would have made without memory (`withoutMemory`) next to the actual one (`withMemory`), with the cited memory blob IDs. Then run `supercuts memory insights --home <buyer-home>` to see the learned per-seller scorecards and how many payments memory changed.
+
 ## What the walkthrough shows
 
 The public x402 resource issues its own `402` challenge and releases the artifact after payment verification; the facilitator validates and relays the buyer-signed transaction. Its amount and payee are public. The confidential pool transfer avoids a direct public payment naming the seller and deal amount. Deposits, exits, gas, timing, payout addresses, and the presence of pool activity remain public. This Testnet pool is not a production custody system and its small activity set does not support a strong anonymity claim.

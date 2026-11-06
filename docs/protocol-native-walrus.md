@@ -67,6 +67,18 @@ indexed and moved the same deal to `complete`. The recorded proof step took
 The observed pool still had only one distinct depositing address, so proof
 privacy must not be presented as a broad anonymity set.
 
+## Memory-driven payment decisions (2026-11-06)
+
+Before this change, discovery picked the cheapest seller and planning used only the latest outcome memory. Now:
+
+- **Seller ranking.** `Phase3App.rankDealCandidates` recalls memory for every matching seller inside the owner mandate. It ranks them by `buildScorecard`, a recency-weighted Beta(1,1) reliability score with a 7-day half-life that counts only `owner_policy` and `verified_outcome` memories. It records the ranking for each deal.
+- **Planning.** `createSettlementPlan` uses the aggregate scorecard instead of only the latest outcome, and adds the reason codes `MEMORY_RELIABILITY_LEARNED` and `MEMORY_SELLER_DEMOTED`. A `budget_limit` that has `signal.periodMs` subtracts spend already verified in memory. Exhausting it requires owner review, with reason `MEMORY_SPEND_LIMIT_REACHED`.
+- **Outcome memories.** These now carry `amount`, `rail`, and `latencyMs`. The deal engine's optional `rememberFailure` port queues verified seller faults (`SELLER_FAULT_CODES`) as failed outcomes through the same outbox and worker.
+- **Signed authority.** Trusted memories are written as a `supercuts.signed-memory.v1` envelope, signed with the owner's memory key. `authenticatedMemory` accepts either the local authority row or a valid signature from that key, so trust survives a move to a new machine. Unsigned memories and memories written by an agent stay advisory.
+- **Explaining the decision.** `explainMemoryInfluence` re-plans across the same candidates with no memory. Its result is stored outside the plan hash and is exposed as `deal.evidence.memoryInfluence`, a `memory-influence` event, and `supercuts memory insights`.
+
+Agents call the same tools as before; all of this happens inside the buyer runtime.
+
 ## Goal and boundary
 
 Supercuts is an agent-to-agent settlement protocol. An agent supplies a task,
