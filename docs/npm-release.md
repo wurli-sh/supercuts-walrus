@@ -25,7 +25,23 @@ supercuts help
 SUPERCUTS_HOME="$PWD/private-buyer" supercuts-mcp
 ```
 
-The unconfigured MCP connection exposes `setup.status`, which gives a local setup command. `supercuts setup buyer --home <buyer-home>` walks the owner through live buyer setup in a terminal. With a configured profile, `supercuts-mcp` exposes tools permitted by its role mandate and configured services. Give each role a separate `SUPERCUTS_HOME`, database, state key, signer, and MCP process. Keep directories at mode `0700` and credentials at mode `0600`.
+The unconfigured MCP connection exposes `setup.status`, which gives local buyer
+and seller setup commands. `supercuts setup buyer --home <buyer-home>` and
+`supercuts setup seller --home <seller-home>` walk the owner through the
+corresponding live setup in a terminal; both also accept an owner-only
+`--config` JSON. With a configured profile, `supercuts-mcp` exposes tools
+permitted by its role mandate and configured services. Give each role a
+separate `SUPERCUTS_HOME`, database, state key, signer, and MCP process. Keep
+directories at mode `0700` and credentials at mode `0600`.
+
+The backend tarball includes pinned Testnet metadata for an x402-only seller.
+`supercuts seller scaffold` creates owner-only offer templates without embedding
+facilitator secrets. Shielded proving artifacts remain a separate verified install.
+
+`supercuts seller research` uses Claude web search to create an owner-only,
+source-validated draft for a market brief or matching competitor analysis. The
+draft is explicitly unapproved and cannot be provisioned by the hosted demo
+until an owner reviews its claims and citations.
 
 ## Live Testnet prerequisites
 

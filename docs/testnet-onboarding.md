@@ -6,13 +6,21 @@ directory lists signed public capabilities; it holds no role secrets.
 
 ## Seller
 
-1. Create a separate live seller home with `supercuts init --role seller
-   --home <seller-home>` and the pinned `config/phase1.testnet.json`, owner-only
-   Sui and Tatum key files, RPC endpoints, Walrus URLs, and RapidSnark path.
-   See the live `supercuts init` example in the backend README for the required
-   flags. Keep the directory and credential files at mode `0600` and the home
-   at `0700`.
-2. Write a capability spec JSON with `capabilityId`, `capability`,
+1. Create a separate live seller home with `supercuts onboard seller --home
+   <seller-home>`. In a noninteractive environment, add `--config
+   <owner-only-setup.json>`. The config keys are `deploymentConfig`,
+   `tatumKeyFile`, `writeGrpc`, `tatumGrpc`, `walrusPublisher`,
+   `walrusAggregator`, and optional `suiKeyFile`, `snarkjs`, `converter`, and
+   `rapidsnark`. `deploymentConfig` may be omitted for an x402-only seller;
+   npm includes the pinned experimental Testnet metadata. When `suiKeyFile` is omitted, Supercuts generates a fresh
+   seller signer inside the seller home and also writes `seller-codex.toml`.
+   The command explicitly reports that the seller does not need faucet funds.
+   Keep the setup JSON and credentials at mode `0600` and the home at `0700`.
+2. Run `supercuts seller scaffold --home <seller-home> --output <offer-dir>
+   --capability-id <id> --capability <class> --description <text> --origin
+   <https-origin> --price <MIST> --rails x402 --expires-in-days 30`. It writes
+   owner-only capability, replaceable handler, and service templates and prints
+   the exact next commands. For manual setup, write a capability spec JSON with `capabilityId`, `capability`,
    `description`, `inputSchema`, `outputSchema`, `supportedRails`,
    `priceBand` (MIST strings), `asset` (`0x2::sui::SUI`), `endpoint`, and a
    future `expiresAt` Unix millisecond timestamp. The endpoint must be the
@@ -29,11 +37,23 @@ directory lists signed public capabilities; it holds no role secrets.
    `capabilities: [{ "registrationFile": "<registration.json>",
    "handler": "<absolute-module-path>" }]`. Start `supercuts-seller-live
    <seller-home> <service.json>` behind HTTPS. The public origin must serve
-   the exact registration at `/v2/catalog`.
+   the exact registration at `/v2/catalog`; `/health` provides a non-secret
+   readiness check. Generated x402 configs reference `X402_FACILITATOR_URL`
+   and `FACILITATOR_SHARED_KEY` instead of embedding secrets. The service holds an exclusive role-home lease. Stop it
+   before running a seller MCP worker or another long-running owner process on
+   that home.
 5. Run `supercuts onboarding doctor --home <seller-home> --config
    <service.json>`, then `supercuts-seller-directory publish
    <registration.json> <directory-origin>`. Re-run the publish command after
    renewing an expired capability with the same seller signer.
+
+The npm package contains the runtime, CLI, MCP server, SDK, and pinned Testnet
+metadata needed by an x402-only seller. It does not bundle the large shielded
+circuit artifacts or native Groth16 converter. A shielded seller points setup
+at separately installed, hash-pinned artifacts and executables. A
+loopback seller is suitable for local validation but cannot enter the shared
+directory; directory listings require a publicly reachable HTTPS origin on a
+standard port.
 
 ## Buyer owner
 

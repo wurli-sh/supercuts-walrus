@@ -114,13 +114,44 @@ protocol path.
 ## Sellers
 
 A self-hosted seller initializes a **separate** seller role home with
-`supercuts init` against the pinned v2 Testnet deployment, publishes a signed capability with
+`supercuts onboard seller --home <seller-home>` against the pinned v2 Testnet
+deployment. Use `--config <owner-only-setup.json>` for noninteractive setup;
+Supercuts generates a fresh seller signer when `suiKeyFile` is omitted and
+prints that the seller must not be faucet-funded. It publishes a signed capability with
 `supercuts-seller-register`, and starts `supercuts-seller-live` with an
 owner-only config naming its registration file and handler module. Its public
 `/v2/catalog`, `/v2/prepare`, `/v2/fulfill`, and protected x402 resource
 endpoints use the same wire protocol as the hosted seller. The default buyer
 access policy is open to valid signed buyers; `allowedBuyers` in the seller
 config restricts private offerings.
+
+`supercuts seller scaffold` generates the capability spec, replaceable handler,
+future expiry, service config, and exact next commands. Its x402 config refers
+to facilitator environment variables rather than storing the secret. Public-only
+sellers can use npm's bundled pinned deployment metadata; shielded sellers still
+install the proof artifacts required for recovery and exits.
+
+The live seller service exposes `/health` and owns the seller role-home process
+lease while running. Stop it before starting the seller MCP worker or another
+long-running process that mutates the same home. Protected resource URLs are
+created only after negotiation; requesting the unsigned endpoint prefix returns
+the structured `NEGOTIATION_REQUIRED` response.
+
+For a research capability, create a cited owner-review draft before packaging:
+
+```sh
+export CLAUDE_API_KEY=...
+supercuts seller research --kind market-brief \
+  --topic "Current Sui ecosystem market structure and risks" \
+  --output <owner-only-draft.json>
+```
+
+For a matching analysis, use `--kind competitor-analysis --context-file
+<approved-brief.json>`. Claude uses web search, the command requires at least
+three observed HTTPS sources, and the output remains
+`draft-needs-owner-review`. It does not register, publish, or start a service.
+Use optional `--allowed-domains domain-a,domain-b` for a strict source policy.
+Review every claim and citation before changing the status to `approved`.
 
 The existing hosted seller keeps its `/v1/*` routes and v1 role homes. Create
 **separate v2 seller role homes and addresses** for shielded v2 capabilities;

@@ -77,7 +77,7 @@ bytes under that operation ID; retrying another payload with the same ID fails.
 
 ## Procurement demo
 
-For the Codex buyer with three remote Claude-backed sellers, Supabase-backed seller state, and the separate Render facilitator, follow [the remote demo guide](../docs/remote-codex-demo.md). The remote path is live-only and gives Codex a buyer role MCP server; the three seller panes use the safe `supercuts-seller-watch` event stream.
+For the Codex buyer with three remote sellers, Claude-researched and owner-reviewed artifacts, Supabase-backed seller state, and the separate Render facilitator, follow [the remote demo guide](../docs/remote-codex-demo.md). The remote path is live-only and gives Codex a buyer role MCP server; the three seller panes use the safe `supercuts-seller-watch` event stream.
 
 `supercuts-demo` is the operator entry point:
 
@@ -116,9 +116,11 @@ For a Claude-agent recording, export `CLAUDE_API_KEY` or provide
 `live --claude-key-file <owner-only-file>`; a repository `.env` file is not
 loaded automatically. Validate the credential against Anthropic before starting
 a funded take.
-The live path calls Claude for bounded buyer and seller decisions and records
-only the model, action, and token counts. The backend still enforces capability,
-amount, rail, and agreement bindings. Validate that recording with
+The recorded workflow can call Claude for bounded buyer decisions and records
+only the model, action, and token counts. Hosted seller price and agreement
+decisions are deterministic after backend validation; Claude web research runs
+before provisioning so model availability cannot interrupt a paid request. The
+backend still enforces capability, amount, rail, and agreement bindings. Validate that recording with
 `supercuts-demo check --require-claude`; an earlier funded run without these
 agent-decision events does not satisfy that gate.
 
@@ -185,7 +187,28 @@ signer, pool notes, Walrus and Walrus Memory configuration. A missing file
 returns `DEAL_SELLERS_NOT_CONFIGURED`. An owner-only `deal-ports.mjs` exporting
 `createDealPorts(app, mandate)` remains available as an advanced override.
 
-The seller service is `supercuts-seller-live <seller-home> <config.json>`.
+Create a seller home with `supercuts onboard seller --home <seller-home>` or
+its noninteractive `--config <owner-only-setup.json>` form. It generates a
+fresh seller signer by default, writes a seller MCP stanza, and explicitly
+reports that the seller should not receive faucet funds. The seller service is
+`supercuts-seller-live <seller-home> <config.json>`.
+Use `supercuts seller scaffold` to generate the offer spec, replaceable handler,
+future expiry, environment-based facilitator config, and exact next commands.
+The npm tarball includes pinned metadata for x402-only sellers; shielded sellers
+still install the proof artifacts required for recovery and exits.
+
+Research sellers can create a source-backed draft before packaging:
+
+```sh
+CLAUDE_API_KEY=... supercuts seller research --kind market-brief \
+  --topic "Current Sui ecosystem market structure and risks" \
+  --output <owner-only-draft.json>
+```
+
+The command uses Anthropic web search, rejects citations absent from the search
+evidence, and writes a mode-0600 draft marked `draft-needs-owner-review`.
+Optional `--allowed-domains` constrains sources. It never publishes or changes
+live seller state; an owner must review and approve the immutable bytes first.
 Register each capability first with
 `supercuts-seller-register <seller-home> <spec.json> <registration.json>`.
 The spec contains `capabilityId`, `capability`, `description`, `inputSchema`,

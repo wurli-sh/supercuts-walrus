@@ -5,13 +5,29 @@ settle on the public or shielded rail, and use Walrus Memory to carry an owner
 privacy rule into the next payment decision. The memory recall must select the
 shielded rail for the confidential analysis.
 
-This path runs a buyer-only `supercuts-mcp` process in Codex. One Render web service hosts three separate seller identities: two prepared Sui market briefs and one competitor analysis with a prepared variant for each brief. The existing x402 facilitator remains a separate Render service. All payments use live Sui Testnet. The seller's research specialty is independent of the payment rail.
+This path runs a buyer-only `supercuts-mcp` process in Codex. One Render web service hosts three separate seller identities: two prepared Sui market briefs and one competitor analysis with a prepared variant for each brief. The existing x402 facilitator remains a separate Render service. All payments use live Sui Testnet. Claude performs source-backed research before provisioning; the live payment service deterministically serves the reviewed, hash-bound artifact without depending on a model call.
 
 The hosted seller path queues the confidential seller's standard delayed exit through a separate owner command after artifact delivery. Use an unused state directory for fresh v2 role homes; the examples below use `.state/remote-demo-v2`. Rerunning setup in the older `.state/remote-demo` directory does not upgrade its v1 profiles or notes.
 
 ## Prepare the reports and roles
 
 Use four owner-only JSON report files in the ignored `.secrets/` directory: two public briefs and two matching competitor analyses. Draft files are provided there for review. Each brief needs `title`, `body`, at least two HTTPS `citations`, and a `preview` object with `summary`, `relevance` and `sourceQuality` in `[0,1]`, and `freshnessDays` in `[0,365]`. Each analysis needs `title` and `body`. Review the claims and sources before recording, then change `reviewStatus` from `draft-needs-owner-review` in each approved file. The analysis files must stay private; the catalog generator records their hashes but does not publish their plaintext.
+
+Generate fresh drafts with Claude Haiku and Anthropic web search instead of hand-writing them. The command searches up to eight times, requires at least three unique citations observed in the search response, prefers primary and dated sources, writes mode `0600`, and never publishes the result:
+
+```sh
+export CLAUDE_API_KEY=...
+supercuts seller research --kind market-brief \
+  --topic "Current Sui market structure, adoption, and execution risks" \
+  --output .secrets/brief-a.json
+
+supercuts seller research --kind competitor-analysis \
+  --topic "Competing projects and counterarguments to the purchased Sui brief" \
+  --context-file .secrets/brief-a.json \
+  --output .secrets/analysis-a.json
+```
+
+Use `--allowed-domains sui.io,docs.sui.io,github.com` when the offering requires a strict source allowlist. Review the generated claims and open every citation. Change `reviewStatus` to `approved` only after that review; provisioning rejects unapproved drafts. Repeat for the second brief and its matching analysis.
 
 For example, a brief file has this shape:
 
@@ -70,7 +86,7 @@ Provision the three live seller homes. This publishes their signed manifests to 
 node backend/dist/seller-provision.js .secrets/seller-provision.json
 ```
 
-The seller provision command reads `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `SELLER_STATE_KEY` from the environment. Its config file must be owner-only. Deploy the `supercuts-sellers-testnet` service from [render.yaml](../render.yaml). Set its secret variables: the same three Supabase values, `FACILITATOR_URL`, `FACILITATOR_SHARED_KEY`, and `CLAUDE_API_KEY`. Omit or empty `SELLER_ALLOWED_BUYERS` for self-service access by any cryptographically valid buyer; set it to a comma-separated address list for a private offering. Use the same facilitator shared key as the existing facilitator deployment. The service exposes `/health`, `/v1/catalog`, encrypted negotiation and agreement APIs, protected x402 resources, and safe event metadata.
+The seller provision command reads `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `SELLER_STATE_KEY` from the environment. Its config file must be owner-only. Deploy the `supercuts-sellers-testnet` service from [render.yaml](../render.yaml). Set its secret variables: the same three Supabase values, `FACILITATOR_URL`, and `FACILITATOR_SHARED_KEY`. The Anthropic key stays in the owner research environment and is not needed by the buyer-facing service. Omit or empty `SELLER_ALLOWED_BUYERS` for self-service access by any cryptographically valid buyer; set it to a comma-separated address list for a private offering. Use the same facilitator shared key as the existing facilitator deployment. The service exposes `/health`, `/v1/catalog`, encrypted negotiation and agreement APIs, protected x402 resources, and safe event metadata.
 
 Seed the saved owner privacy rule for the competitor-analysis capability before the Codex task:
 
@@ -89,9 +105,9 @@ The saved rule requires shielded settlement. A public-rail answer from the buyer
 
 ## Record the buyer and seller panes
 
-Use the buyer stanza from `.state/remote-demo-v2/buyer-codex.toml` in Codex's MCP config, or register the server with `codex mcp add` using its Node command, script path, `SUPERCUTS_HOME`, `SUPERCUTS_SELLER_URL`, `SUPERCUTS_RUN_ID`, and `SUPERCUTS_EVENT_PATH` values. The generated config points to the built local MCP script, so a global `supercuts-mcp` executable is not required. The buyer receives only buyer tools. Seller signing keys and Supabase credentials never enter Codex.
+Use the buyer stanza from `.state/remote-demo-v2/buyer-codex.toml` in Codex's MCP config, or register the server with `codex mcp add` using its Node command, script path, `SUPERCUTS_HOME`, `SUPERCUTS_SELLER_URL`, `SUPERCUTS_RUN_ID`, and `SUPERCUTS_EVENT_PATH` values. The generated config points to the built local MCP script, so a global `supercuts-mcp` executable is not required. The buyer receives only buyer tools. Seller signing keys, research credentials, and Supabase credentials never enter Codex.
 
-On the right, run `supercuts-seller-watch` in three panes, one for each seller address in `run.json`. Each pane shows the live Render service's safe activity for that identity. These are activity views of Claude-backed remote sellers, not separate local Codex sessions. For example, run this in the first pane and substitute `secondPublicSeller` and `confidentialSeller` in the other two:
+On the right, run `supercuts-seller-watch` in three panes, one for each seller address in `run.json`. Each pane shows the live Render service's safe activity for that identity. These are activity views of remote sellers serving Claude-researched, owner-reviewed artifacts, not separate local Codex sessions. For example, run this in the first pane and substitute `secondPublicSeller` and `confidentialSeller` in the other two:
 
 ```sh
 node backend/dist/seller-watch.js \
