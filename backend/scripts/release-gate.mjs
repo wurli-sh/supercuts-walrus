@@ -28,11 +28,18 @@ try {
   const backendTar = join(root, tarballs.find((name) => name.includes("backend")) ?? "");
   const sdkTar = join(root, tarballs.find((name) => name.includes("sdk")) ?? "");
   assert.ok(backendTar.endsWith(".tgz") && sdkTar.endsWith(".tgz") && backendTar !== sdkTar);
-  for (const [tarball, required] of [[backendTar, "package/dist/seam.js"], [sdkTar, "package/dist/index.js"]]) {
+  for (const [tarball, required, allowed] of [
+    [backendTar, "package/dist/seam.js", /^package\/(dist\/|config\/(?:phase1\.testnet|proving-manifest)\.json$|README\.md$|LICENSE$|package\.json$)/],
+    [sdkTar, "package/dist/index.js", /^package\/(dist\/|README\.md$|LICENSE$|package\.json$)/],
+  ]) {
     const files = run("tar", ["-tzf", tarball], root).trim().split("\n");
     assert.ok(files.includes(required), `${tarball} lacks ${required}`);
     assert.ok(files.includes("package/LICENSE"), `${tarball} lacks LICENSE`);
-    assert.ok(files.every((file) => /^package\/(dist\/|README\.md$|LICENSE$|package\.json$)/.test(file)), `${tarball} contains unexpected files`);
+    assert.ok(files.every((file) => allowed.test(file)), `${tarball} contains unexpected files`);
+    if (tarball === backendTar) {
+      assert.ok(files.includes("package/config/phase1.testnet.json"), `${tarball} lacks bundled Testnet deployment metadata`);
+      assert.ok(files.includes("package/config/proving-manifest.json"), `${tarball} lacks bundled proving metadata`);
+    }
   }
   const packedSdk = JSON.parse(run("tar", ["-xOzf", sdkTar, "package/package.json"], root));
   const packedBackend = JSON.parse(run("tar", ["-xOzf", backendTar, "package/package.json"], root));

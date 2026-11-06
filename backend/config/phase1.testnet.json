@@ -1,0 +1,20 @@
+{
+  "network": "testnet",
+  "sender": "0x66fdfe84ff521627c93910c93ec0bc26934ee1fef3a1a0a5ce14b7dc4567ec00",
+  "coinType": "0x2::sui::SUI",
+  "coinTypeHash": "be4507e04f555448ca05c0c9f8345c5ea9f3e40e8616a20f5d5c18b40ef399eb",
+  "packageId": "0x32d104c1ab422d497df4ae3a6861258694949c86428f886ca338e07bd055cf76",
+  "poolId": "0x8fd22140c906495bb5334a497dcdd9112479c638e21c5df4b4cfb66f633a106b",
+  "poolCreateTransaction": "BnzMqokgQVWwSkRYCCrMTyWwHN6HVdDKWwVDJXTZqC6b",
+  "deploymentCheckpoint": "401762744",
+  "deploymentDomain": "3082f331660eb38075e250a810a701bc4b0de2ca329eda70b2d76e3795517305",
+  "initialRoot": "2134e76ac5d21aab186c2be1dd8f84ee880a1e46eaf712f9d371b6df22191f3e",
+  "verifierVersion": 2,
+  "testOnly": true,
+  "artifactManifest": "config/proving-manifest.json",
+  "artifacts": {
+    "deposit": { "r1csSha256": "f36a1a18bf9d243e089e6ab14436e5a921d2b839d81bea95db319a4cdb80a197", "zkeySha256": "d398776a54628c390e8bf822007e47ed8fac00e92e8ea95bb17d20db517998dc", "verifyingKeySha256": "838404ff0ae3a9fc82da0856b68a11428cf3ffef335b4c6539fa1860d8e1ba26" },
+    "transfer": { "r1csSha256": "055ea2ec8f689c48e59f89fe06db6fb980dc575982214bfe60f675e8f08485c3", "zkeySha256": "6e7bcac98b8d2a78fd1811e2caadd83d0d6a301951f8cf27ac55a67006b001c2", "verifyingKeySha256": "8a6896f3f330769aa69e0dc1251a19fb69c4d6264b5729d0104df8d262e573ba" },
+    "withdraw": { "r1csSha256": "85cf1542ab2f2ece4bbd8757def48d526ba0951a832a2e0ebbf97ace2c611308", "zkeySha256": "fd303dd0dd53b9b752dac0de546dabdd03198a7a4defde5e8d6018bccd419c56", "verifyingKeySha256": "445c1982bea5e465fb0f5665023bb279637d820a9425f16a4c2f2ee7460e7e4a" }
+  }
+}

@@ -18,9 +18,9 @@ export async function onboardingDoctor(home: string, sellerConfig?: string): Pro
   const app = new Phase3App(home);
   try {
     if (app.profile.mock) fail("LIVE_PROFILE_REQUIRED", "onboarding doctor requires a live Testnet role home");
-    const runtime = await app.execute("doctor", {});
-    if (runtime.data.readyForDemo === false) fail("ONBOARDING_RUNTIME_NOT_READY", "live runtime doctor reports missing prerequisites");
     if (app.profile.role === "buyer") {
+      const runtime = await app.execute("doctor", {});
+      if (runtime.data.readyForDemo === false) fail("ONBOARDING_RUNTIME_NOT_READY", "live runtime doctor reports missing prerequisites");
       const mandate = loadMandate(home);
       if (mandate.version !== "supercuts.mandate.v2") fail("DEAL_MANDATE_VERSION", "buyer needs a v2 standing mandate");
       if (JSON.stringify([...mandate.allowedCounterparties].sort()) !== JSON.stringify([...app.profile.policy.allowedCounterparties].sort())) fail("POLICY_COUNTERPARTY_MISMATCH", "buyer mandate and payment profile allow different sellers");
@@ -58,13 +58,17 @@ export async function onboardingDoctor(home: string, sellerConfig?: string): Pro
       if (!Array.isArray(config.capabilities) || !config.capabilities.length) fail("SELLER_CONFIG_INVALID", "seller has no registered capabilities");
       const served = await json(new URL("/v2/catalog", config.origin));
       if (!Array.isArray(served.capabilities)) fail("SELLER_CATALOG_INVALID", "seller endpoint has no valid catalog");
+      let proofsRequired = false;
       for (const item of config.capabilities) {
         const registrationPath = resolve(item.registrationFile);
         if ((statSync(registrationPath).mode & 0o077) !== 0) fail("SELLER_CONFIG_PERMISSIONS", "registration file must be owner-only");
         const registration = JSON.parse(readFileSync(registrationPath, "utf8")) as SignedCapabilityRegistration;
+        proofsRequired ||= registration.manifest.supportedRails.includes("shielded");
         await verifySignedCapability(registration);
         if (!(served.capabilities as unknown[]).some((entry: unknown) => JSON.stringify(entry) === JSON.stringify(registration))) fail("SELLER_CATALOG_INVALID", "seller endpoint does not serve its configured registration");
       }
+      const runtime = await app.execute("doctor", { "proofs-required": proofsRequired });
+      if (runtime.data.readyForDemo === false) fail("ONBOARDING_RUNTIME_NOT_READY", "live runtime doctor reports missing prerequisites");
       return { role: "seller", healthy: true, runtime: runtime.data, capabilities: config.capabilities.length, origin: config.origin };
     }
     return fail("ROLE_FORBIDDEN", "onboarding doctor supports buyer and seller homes");

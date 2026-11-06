@@ -14,7 +14,7 @@ function active(pid: number): boolean {
 }
 
 /** Best-effort process lease. SQLite still owns data integrity; this prevents
- * multiple MCP event/memory workers from operating one role home at once. */
+ * multiple long-running role workers from operating one role home at once. */
 export function acquireRoleHomeLease(home: string): RoleHomeLease {
   const path = join(home, ".mcp.lock"), token = randomUUID();
   for (let attempt = 0; attempt < 2; attempt++) {

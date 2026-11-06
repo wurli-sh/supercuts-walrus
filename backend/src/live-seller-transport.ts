@@ -79,13 +79,15 @@ export class LiveSellerTransport {
   async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
       const url = new URL(request.url ?? "/", this.config.origin);
+      if (request.method === "GET" && url.pathname === "/health") return this.respond(response, 200, { ok: true, service: "supercuts-seller", capabilities: this.runtime.catalog().length });
       if (request.method === "GET" && url.pathname === "/v2/catalog") return this.respond(response, 200, { capabilities: this.runtime.catalog() });
       if (request.method === "POST" && url.pathname === "/v2/prepare") return this.respond(response, 200, await this.prepareRequest(await this.body(request)));
       if (request.method === "POST" && url.pathname === "/v2/fulfill") return this.respond(response, 200, await this.fulfillRequest(await this.body(request)));
       if (request.method === "GET") {
         for (const resource of this.#resources.values()) if (url.pathname.startsWith(`${(resource.config.pathPrefix ?? "/capability").replace(/\/$/, "")}/`)) return resource.handle(request, response);
       }
-      return this.respond(response, 404, { error: "NOT_FOUND" });
+      if (request.method === "GET" && [...this.#registrations.values()].some((item) => url.pathname === new URL(item.manifest.endpoint).pathname)) return this.respond(response, 404, { error: "NEGOTIATION_REQUIRED", message: "Protected resource URLs are issued for a negotiated session." });
+      return this.respond(response, 404, { error: "NOT_FOUND", message: "Seller route was not found." });
     } catch (error) { const known = error instanceof SupercutsError ? error : new SupercutsError("SELLER_REQUEST_FAILED", "seller request failed"); if (!response.headersSent) this.respond(response, 400, { error: known.code, message: known.message }); }
   }
   createServer(): Server { return createServer((request, response) => void this.handle(request, response)); }

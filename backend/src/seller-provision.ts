@@ -39,13 +39,19 @@ async function main(): Promise<void> {
           const body = readFileSync(resolve(capability.artifact));
           if (manifest.capability === "sui.market-brief") {
             let report: Record<string, unknown>; try { report = JSON.parse(body.toString()) as Record<string, unknown>; } catch (error) { return fail("BRIEF_INVALID", "market brief must be JSON", error); }
+            if (report.reviewStatus !== "approved") fail("ARTIFACT_REVIEW_REQUIRED", "market brief must be owner-reviewed before provisioning");
             if (typeof report.title !== "string" || typeof report.body !== "string" || !Array.isArray(report.citations) || report.citations.length < 2 || report.citations.some((value) => typeof value !== "string" || !/^https:\/\//.test(value))) fail("BRIEF_INVALID", "market brief needs a title, body, and at least two HTTPS citations");
           }
           artifacts[manifest.capabilityId] = body.toString("base64url");
         }
         for (const [briefHash, artifactPath] of Object.entries(capability.variants ?? {})) {
           if (!/^[0-9a-f]{64}$/.test(briefHash)) fail("SELLER_CONFIG_INVALID", "variant brief hash is invalid");
-          artifacts[`${manifest.capabilityId}:${briefHash}`] = readFileSync(resolve(artifactPath)).toString("base64url");
+          const body = readFileSync(resolve(artifactPath));
+          if (manifest.capability === "sui.competitor-analysis") {
+            let report: Record<string, unknown>; try { report = JSON.parse(body.toString()) as Record<string, unknown>; } catch (error) { return fail("ANALYSIS_INVALID", "competitor analysis must be JSON", error); }
+            if (report.reviewStatus !== "approved") fail("ARTIFACT_REVIEW_REQUIRED", "competitor analysis must be owner-reviewed before provisioning");
+          }
+          artifacts[`${manifest.capabilityId}:${briefHash}`] = body.toString("base64url");
         }
         if (!capability.artifact && !Object.keys(capability.variants ?? {}).length) fail("SELLER_ARTIFACT_MISSING", "capability needs a prepared artifact or brief variants");
         const published = await executeMandated(app, loadMandate(seller.home), "capability.publish", { "operation-id": `publish-${manifest.manifestHash}`, manifest });

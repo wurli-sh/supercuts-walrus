@@ -4,7 +4,6 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BoundedClaude } from "./claude.js";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { isValidPersonalMessageSignature } from "@mysten/sui/verify";
@@ -34,16 +33,13 @@ export class SellerService {
   readonly #v2 = new Map<string, { slot: Slot; transport: LiveSellerTransport; row: CatalogRow }>();
   readonly #v2BySeller = new Map<string, LiveSellerTransport>();
   readonly #root = mkdtempSync(join(tmpdir(), "supercuts-sellers-"));
-  readonly #claude: BoundedClaude;
   #queue: Promise<unknown> = Promise.resolve();
   #healthy = true;
 
-  private constructor(private readonly db: SellerDatabase, private readonly snapshotKey: string, private readonly origin: string, private readonly facilitatorUrl: string, private readonly facilitatorKey: string, private readonly allowedBuyers: ReadonlySet<string>, claudeKey: string, private readonly directoryAggregator?: string) {
-    this.#claude = new BoundedClaude({ apiKey: claudeKey });
-  }
+  private constructor(private readonly db: SellerDatabase, private readonly snapshotKey: string, private readonly origin: string, private readonly facilitatorUrl: string, private readonly facilitatorKey: string, private readonly allowedBuyers: ReadonlySet<string>, private readonly directoryAggregator?: string) {}
 
-  static async create(config: { db: SellerDatabase; snapshotKey: string; origin: string; facilitatorUrl: string; facilitatorKey: string; allowedBuyers: ReadonlySet<string>; claudeKey: string; directoryAggregator?: string }): Promise<SellerService> {
-    const service = new SellerService(config.db, config.snapshotKey, config.origin, config.facilitatorUrl, config.facilitatorKey, config.allowedBuyers, config.claudeKey, config.directoryAggregator);
+  static async create(config: { db: SellerDatabase; snapshotKey: string; origin: string; facilitatorUrl: string; facilitatorKey: string; allowedBuyers: ReadonlySet<string>; claudeKey?: string; directoryAggregator?: string }): Promise<SellerService> {
+    const service = new SellerService(config.db, config.snapshotKey, config.origin, config.facilitatorUrl, config.facilitatorKey, config.allowedBuyers, config.directoryAggregator);
     const rows = (await config.db.listCatalog() as unknown as CatalogRow[]).filter((row) => !(isV2(row) && row.manifest.expiresAt <= Date.now()));
     for (const row of rows) {
       validateCapabilityManifest(row.manifest);
@@ -217,9 +213,6 @@ export class SellerService {
           let offer: Record<string, unknown>; try { offer = asObject(JSON.parse(decryptSessionMessage(key, sessionId, `${sessionId}:buyer:1`, ciphertext).toString())); } catch (error) { return fail("NEGOTIATION_DECRYPT_FAILED", "seller could not read the buyer offer", error); }
           const opening = BigInt(String(offer.opening ?? "0")), maximum = BigInt(String(offer.maximum ?? "0")), minimum = BigInt(row.manifest.priceBand.minimum), briefHash = typeof offer.briefHash === "string" ? offer.briefHash : undefined;
           if (opening <= 0n || opening > maximum || maximum < minimum || maximum > BigInt(row.manifest.priceBand.maximum) || briefHash !== undefined && !/^[0-9a-f]{64}$/.test(briefHash)) fail("NEGOTIATION_BOUNDS_INVALID", "buyer offer exceeds approved price bounds");
-          const task = String(offer.task ?? "").slice(0, 512);
-          const decision = await this.#claude.decide<{ action: string }>({ system: "You are a bounded research seller. Present only the fixed price and service terms approved by Supercuts.", task, candidates: [{ action: "counteroffer", capabilityId, amount: minimum.toString() }], schema: { name: "respond_to_private_offer", description: "Present the approved exact price.", properties: { action: { type: "string", enum: ["counteroffer"] } }, required: ["action"] } });
-          if (decision.action.action !== "counteroffer") fail("SELLER_DECISION_INVALID", "seller did not choose the approved response");
           const reply = { capabilityId, amount: minimum.toString(), asset: row.manifest.asset, railOptions: row.manifest.supportedRails, accepted: true };
           const replyCiphertext = encryptSessionMessage(key, sessionId, `${sessionId}:seller:2`, Buffer.from(JSON.stringify(reply)));
           const requestBlobId = await this.publishCiphertext(slot, ciphertext), replyBlobId = await this.publishCiphertext(slot, replyCiphertext);
@@ -229,7 +222,7 @@ export class SellerService {
           const signature = (await Ed25519Keypair.fromSecretKey(decoded.secretKey).signPersonalMessage(Buffer.from(`${sessionId}:${capabilityId}:${sha256(Buffer.from(replyCiphertext, "base64"))}:${transcriptHash}`))).signature;
           slot.app.store.db.prepare("INSERT INTO remote_negotiations(session_id,capability_id,buyer_address,buyer_public_key,request_ciphertext,reply_ciphertext,reply_signature,request_blob_id,reply_blob_id,transcript_hash,brief_hash,run_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").run(sessionId, capabilityId, buyerAddress, buyerPublicKey, ciphertext, replyCiphertext, signature, requestBlobId, replyBlobId, transcriptHash, briefHash ?? null, runId);
           try { await this.persist(slot); } catch (error) { this.#healthy = false; throw error; }
-          await this.db.addEvent({ run_id: runId, seller_id: slot.sellerId, stage: "negotiation", status: "complete", details: { capabilityId, sessionId, requestBlobId, replyBlobId, transcriptHash, model: decision.model } });
+          await this.db.addEvent({ run_id: runId, seller_id: slot.sellerId, stage: "negotiation", status: "complete", details: { capabilityId, sessionId, requestBlobId, replyBlobId, transcriptHash, decision: "policy-validated-fixed-price" } });
           return this.reply(response, 200, { sessionId, capabilityId, ciphertext: replyCiphertext, signature, requestBlobId, replyBlobId, transcriptHash });
         });
       }
@@ -250,12 +243,10 @@ export class SellerService {
           const quote: Quote = { requestId, operationId, capabilityId, amount: row.manifest.priceBand.minimum, artifactKey: briefHash ? `${capabilityId}:${briefHash}` : capabilityId, runId };
           const prior = slot.app.store.db.prepare("SELECT operation_id AS operationId,capability_id AS capabilityId,amount,artifact_key AS artifactKey,run_id AS runId FROM remote_quotes WHERE request_id=?").get(requestId) as Omit<Quote, "requestId"> | undefined;
           if (prior && JSON.stringify(prior) !== JSON.stringify({ operationId, capabilityId, amount: quote.amount, artifactKey: quote.artifactKey, runId })) fail("SELLER_QUOTE_CONFLICT", "request ID identifies another quote");
-          const decision = await this.#claude.decide<{ action: string }>({ system: "You are a bounded seller agent. You may present only the fixed approved quote.", task: String(input.task ?? "Sui market brief").slice(0, 512), candidates: [{ action: "present_quote", capabilityId, amount: quote.amount }], schema: { name: "respond_to_buyer", description: "Present the approved exact price.", properties: { action: { type: "string", enum: ["present_quote"] } }, required: ["action"] } });
-          if (decision.action.action !== "present_quote") fail("SELLER_DECISION_INVALID", "seller did not choose the approved quote");
           slot.app.store.db.prepare("INSERT OR IGNORE INTO remote_quotes(request_id,operation_id,capability_id,amount,artifact_key,run_id) VALUES(?,?,?,?,?,?)").run(requestId, operationId, capabilityId, quote.amount, quote.artifactKey, runId);
           const artifact = this.artifact(slot, quote.artifactKey), registration = this.resource(slot, row).register(requestId, operationId, artifact);
           try { await this.persist(slot); } catch (error) { this.#healthy = false; throw error; }
-          await this.db.addEvent({ run_id: runId, seller_id: slot.sellerId, stage: "quote", status: "complete", details: { capabilityId, amount: quote.amount, model: decision.model } });
+          await this.db.addEvent({ run_id: runId, seller_id: slot.sellerId, stage: "quote", status: "complete", details: { capabilityId, amount: quote.amount, decision: "manifest-fixed-price" } });
           return this.reply(response, 200, { capabilityId, sellerId: slot.sellerId, amount: quote.amount, asset: row.manifest.asset, requestId, operationId, resourceUrl: registration.url, artifactSha256: registration.artifactSha256 });
         });
       }
@@ -276,12 +267,10 @@ export class SellerService {
           if (draft.serviceDigestLo !== BigInt(`0x${expected.slice(0, 32)}`).toString() || draft.serviceDigestHi !== BigInt(`0x${expected.slice(32)}`).toString()) fail("AGREEMENT_BINDING_MISMATCH", "draft does not bind the prepared analysis and buyer delivery key");
           const prior = slot.app.store.db.prepare("SELECT capability_id AS capabilityId,artifact_key AS artifactKey,delivery_public_key AS deliveryPublicKey,run_id AS runId FROM remote_deliveries WHERE session_id=?").get(sessionId) as Record<string, unknown> | undefined;
           if (prior && JSON.stringify(prior) !== JSON.stringify({ capabilityId, artifactKey, deliveryPublicKey, runId })) fail("AGREEMENT_SESSION_CONFLICT", "session identifies another delivery");
-          const decision = await this.#claude.decide<{ action: string }>({ system: "You are a bounded seller agent. Sign only the backend-verified agreement.", task: `Respond to accepted competitor analysis request for ${capabilityId}.`, candidates: [{ action: "sign_approved_agreement", capabilityId }], schema: { name: "respond_to_private_offer", description: "Approve the backend-verified agreement.", properties: { action: { type: "string", enum: ["sign_approved_agreement"] } }, required: ["action"] } });
-          if (decision.action.action !== "sign_approved_agreement") fail("SELLER_DECISION_INVALID", "seller did not choose the approved agreement");
           const signed = await executeMandated(slot.app, loadMandate(slot.home), "offer.counter", { "operation-id": `remote-counter-${sessionId}`, session: sessionId, agreement: encoded });
           slot.app.store.db.prepare("INSERT OR IGNORE INTO remote_deliveries(session_id,capability_id,artifact_key,delivery_public_key,run_id) VALUES(?,?,?,?,?)").run(sessionId, capabilityId, artifactKey, deliveryPublicKey, runId);
           try { await this.persist(slot); } catch (error) { this.#healthy = false; throw error; }
-          await this.db.addEvent({ run_id: runId, seller_id: slot.sellerId, stage: "agreement", status: "complete", details: { capabilityId, sessionId, model: decision.model, dealCommitment: signed.dealCommitment } });
+          await this.db.addEvent({ run_id: runId, seller_id: slot.sellerId, stage: "agreement", status: "complete", details: { capabilityId, sessionId, decision: "backend-verified-agreement", dealCommitment: signed.dealCommitment } });
           return this.reply(response, 200, { sessionId, capabilityId, agreement: signed.agreement, dealCommitment: signed.dealCommitment, artifactSha256 });
         });
       }
@@ -321,7 +310,7 @@ if (process.argv[1] && import.meta.url.endsWith(process.argv[1])) {
   const required = (key: string) => process.env[key] ?? fail("SELLER_CONFIG_MISSING", `${key} is required`);
   const port = Number(process.env.PORT ?? "3000");
   const origin = required("SELLER_ORIGIN");
-  SellerService.create({ db: new SellerDatabase(required("SUPABASE_URL"), required("SUPABASE_SERVICE_ROLE_KEY")), snapshotKey: required("SELLER_STATE_KEY"), origin, facilitatorUrl: required("FACILITATOR_URL"), facilitatorKey: required("FACILITATOR_SHARED_KEY"), allowedBuyers: new Set((process.env.SELLER_ALLOWED_BUYERS ?? "").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean)), claudeKey: required("CLAUDE_API_KEY"), ...(process.env.DIRECTORY_WALRUS_AGGREGATOR ? { directoryAggregator: process.env.DIRECTORY_WALRUS_AGGREGATOR } : {}) })
+  SellerService.create({ db: new SellerDatabase(required("SUPABASE_URL"), required("SUPABASE_SERVICE_ROLE_KEY")), snapshotKey: required("SELLER_STATE_KEY"), origin, facilitatorUrl: required("FACILITATOR_URL"), facilitatorKey: required("FACILITATOR_SHARED_KEY"), allowedBuyers: new Set((process.env.SELLER_ALLOWED_BUYERS ?? "").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean)), ...(process.env.DIRECTORY_WALRUS_AGGREGATOR ? { directoryAggregator: process.env.DIRECTORY_WALRUS_AGGREGATOR } : {}) })
     .then((service) => { const server = service.createServer(); server.listen(port, "0.0.0.0"); const close = () => server.close(() => { service.close(); process.exit(0); }); process.on("SIGINT", close); process.on("SIGTERM", close); })
     .catch((error) => { process.stderr.write(`${error instanceof Error ? error.message : "seller service failed"}\n`); process.exitCode = 1; });
 }

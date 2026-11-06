@@ -29,6 +29,7 @@
   },
   "files": [
     "dist",
+    "config",
     "README.md"
   ],
   "license": "Apache-2.0",

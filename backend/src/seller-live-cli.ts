@@ -7,14 +7,19 @@ import { Phase3App, errorOutput } from "./phase3.js";
 import { LiveSellerTransport } from "./live-seller-transport.js";
 import type { SignedCapabilityRegistration } from "./capability.js";
 import type { ServiceHandler } from "./seller-runtime.js";
+import { acquireRoleHomeLease } from "./role-lock.js";
 
-interface Config { origin: string; listenHost?: string; listenPort?: number; facilitatorUrl?: string; facilitatorKey?: string; allowedBuyers?: string[]; capabilities: Array<{ registration?: SignedCapabilityRegistration; registrationFile?: string; handler: string }> }
+interface Config { origin: string; listenHost?: string; listenPort?: number; facilitatorUrl?: string; facilitatorKey?: string; facilitatorUrlEnv?: string; facilitatorKeyEnv?: string; allowedBuyers?: string[]; capabilities: Array<{ registration?: SignedCapabilityRegistration; registrationFile?: string; handler: string }> }
 async function main(): Promise<void> {
   const home = process.argv[2], configPath = process.argv[3];
   if (!home || !configPath) return fail("ARGUMENT_REQUIRED", "usage: supercuts-seller-live <seller-home> <owner-only-config.json>");
   if ((statSync(configPath).mode & 0o077) !== 0) fail("SELLER_CONFIG_PERMISSIONS", "seller config must be owner-only");
   const config = JSON.parse(readFileSync(configPath, "utf8")) as Config;
+  if (config.facilitatorUrlEnv) config.facilitatorUrl = process.env[config.facilitatorUrlEnv] ?? fail("SELLER_FACILITATOR_REQUIRED", `environment variable ${config.facilitatorUrlEnv} is required`);
+  if (config.facilitatorKeyEnv) config.facilitatorKey = process.env[config.facilitatorKeyEnv] ?? fail("SELLER_FACILITATOR_REQUIRED", `environment variable ${config.facilitatorKeyEnv} is required`);
   if (!Array.isArray(config.capabilities) || !config.capabilities.length) fail("SELLER_CONFIG_INVALID", "seller config must name registered capabilities and handlers");
+  const lease = acquireRoleHomeLease(resolve(home));
+  if (!lease.acquired) fail("ROLE_HOME_BUSY", `seller home is already in use${lease.ownerPid ? ` by process ${lease.ownerPid}` : ""}`);
   const app = new Phase3App(home), transport = new LiveSellerTransport(app, config);
   try {
     for (const item of config.capabilities) {
@@ -37,8 +42,8 @@ async function main(): Promise<void> {
     if (!Number.isInteger(port) || port < 1 || port > 65535) fail("SELLER_CONFIG_INVALID", "seller listenPort must be a valid TCP port");
     await new Promise<void>((done) => server.listen(port, host, done));
     process.stdout.write(`${JSON.stringify({ ok: true, service: "supercuts-seller-live", origin: config.origin, capabilities: transport.runtime.catalog().map((item) => item.manifest.capabilityId) })}\n`);
-    const stop = () => server.close(() => { app.close(); process.exit(0); });
+    const stop = () => server.close(() => { lease.release(); app.close(); process.exit(0); });
     process.on("SIGINT", stop); process.on("SIGTERM", stop);
-  } catch (error) { app.close(); throw error; }
+  } catch (error) { lease.release(); app.close(); throw error; }
 }
 main().catch((error) => { process.stdout.write(`${JSON.stringify(errorOutput(error))}\n`); process.exitCode = 1; });

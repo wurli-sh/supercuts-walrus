@@ -15,6 +15,7 @@ export * from "./indexer.js";
 export * from "./memory.js";
 export * from "./settlement.js";
 export * from "./seller-runtime.js";
+export * from "./seller-research.js";
 export * from "./seller-stdio.js";
 export * from "./live-index.js";
 export * from "./live-runtime.js";

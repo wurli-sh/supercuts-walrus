@@ -3,6 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { verifySignedCapability, type SignedCapabilityRegistration } from "./capability.js";
 import { fail } from "./errors.js";
+import { errorOutput } from "./phase3.js";
 
 async function main(): Promise<void> {
   const [command, file, directory] = process.argv.slice(2);
@@ -19,4 +20,4 @@ async function main(): Promise<void> {
   if (!response.ok || result.ok !== true) fail("SELLER_DIRECTORY_UNAVAILABLE", String(result.message ?? `directory returned HTTP ${response.status}`));
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
-main().catch((error) => { process.stderr.write(`${error instanceof Error ? error.message : "directory publication failed"}\n`); process.exitCode = 1; });
+main().catch((error) => { process.stdout.write(`${JSON.stringify(errorOutput(error))}\n`); process.exitCode = 1; });

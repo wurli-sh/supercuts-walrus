@@ -47,7 +47,3 @@ services:
         sync: false
       - key: FACILITATOR_SHARED_KEY
         sync: false
-      - key: CLAUDE_API_KEY
-        sync: false
-      - key: CLAUDE_MODEL
-        value: claude-haiku-5-5
