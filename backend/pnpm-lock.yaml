@@ -49,7 +49,7 @@ importers:
   packages/sdk:
     dependencies:
       '@supercuts-walrus/backend':
-        specifier: workspace:0.1.2
+        specifier: workspace:0.1.4
         version: link:../..
     devDependencies:
       '@types/node':

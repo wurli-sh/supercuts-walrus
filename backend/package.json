@@ -1,6 +1,6 @@
 {
   "name": "@supercuts-walrus/backend",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "private": false,
   "type": "module",
   "exports": {
@@ -25,7 +25,8 @@
     "supercuts-seller-v2-provision": "dist/seller-v2-provision.js",
     "supercuts-hosted-exit": "dist/hosted-exit-cli.js",
     "supercuts-hosted-seller-import": "dist/hosted-seller-import.js",
-    "supercuts-seller-directory": "dist/seller-directory-cli.js"
+    "supercuts-seller-directory": "dist/seller-directory-cli.js",
+    "supercuts-embedding-adapter": "dist/embedding-adapter.js"
   },
   "files": [
     "dist",
