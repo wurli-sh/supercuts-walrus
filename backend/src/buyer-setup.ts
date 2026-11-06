@@ -139,10 +139,20 @@ export async function approveBuyerSeller(home: string, capabilityId: string): Pr
   const mandate = loadMandate(home);
   if (mandate.role !== "buyer" || mandate.version !== "supercuts.mandate.v2") fail("SETUP_INVALID", "seller approval requires a v2 buyer home");
   const sourcePath = join(home, "deal-sellers.json"); ownerFile(sourcePath);
-  const source = JSON.parse(readFileSync(sourcePath, "utf8")) as { directoryUrl?: string };
-  if (!source.directoryUrl) fail("SELLER_DIRECTORY_UNAVAILABLE", "buyer has no configured shared directory");
-  const matches: SignedCapabilityRegistration[] = [];
-  for (let offset = 0; offset <= 100_000;) {
+  const source = JSON.parse(readFileSync(sourcePath, "utf8")) as { directoryUrl?: string; origins?: string[] };
+  if (!source.directoryUrl && !source.origins?.length) fail("SELLER_DIRECTORY_UNAVAILABLE", "buyer has no configured shared directory or seller origins");
+  const matches: SignedCapabilityRegistration[] = [], direct = new Set<SignedCapabilityRegistration>();
+  // Owner-configured seller origins are searched first; their signed capabilities must point back at that origin.
+  for (const origin of source.origins ?? []) {
+    const response = await fetch(new URL("/v2/catalog", origin), { redirect: "error", signal: AbortSignal.timeout(15_000) }).catch(() => undefined);
+    if (!response?.ok) continue;
+    const catalog = await response.json() as { capabilities?: SignedCapabilityRegistration[] };
+    for (const item of Array.isArray(catalog.capabilities) ? catalog.capabilities.slice(0, 100) : []) {
+      if (item.manifest?.capabilityId !== capabilityId || new URL(item.manifest.endpoint).origin !== new URL(origin).origin) continue;
+      matches.push(item); direct.add(item);
+    }
+  }
+  for (let offset = 0; source.directoryUrl && offset <= 100_000;) {
     const response = await fetch(new URL(`/v2/directory/catalog?offset=${offset}`, source.directoryUrl), { redirect: "error", signal: AbortSignal.timeout(30_000) });
     if (!response.ok) fail("SELLER_DIRECTORY_UNAVAILABLE", `directory returned HTTP ${response.status}`);
     const catalog = await response.json() as { capabilities?: SignedCapabilityRegistration[]; nextOffset?: number };
@@ -152,9 +162,10 @@ export async function approveBuyerSeller(home: string, capabilityId: string): Pr
     if (catalog.nextOffset !== offset + 100 || catalog.capabilities?.length !== 100) fail("SELLER_DIRECTORY_INVALID", "directory pagination is invalid");
     offset = catalog.nextOffset;
   }
-  if (matches.length !== 1) fail("SELLER_DIRECTORY_INVALID", "capability must resolve to exactly one live registration");
+  if (matches.length !== 1) fail("SELLER_DIRECTORY_INVALID", "capability must resolve to exactly one live registration in the directory or configured seller origins");
   const registration = matches[0]!; await verifySignedCapability(registration);
-  const endpoint = await validateDirectoryOrigin(registration.manifest.endpoint);
+  // Directory listings must use public HTTPS origins; a direct origin was chosen by the owner at setup.
+  const endpoint = direct.has(registration) ? new URL(registration.manifest.endpoint) : await validateDirectoryOrigin(registration.manifest.endpoint);
   const sellerResponse = await fetch(new URL("/v2/catalog", endpoint.origin), { redirect: "error", signal: AbortSignal.timeout(15_000) });
   if (!sellerResponse.ok) fail("SELLER_CATALOG_INVALID", "seller endpoint is unavailable");
   const served = await sellerResponse.json() as { capabilities?: unknown[] };
