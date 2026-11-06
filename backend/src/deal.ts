@@ -214,7 +214,7 @@ export class DealJournal {
       if (next === "evidence_ready" && !(this.store.db.prepare("SELECT 1 FROM deal_blobs WHERE operation_id=? AND kind='agreement' AND status='verified'").get(operationId))) fail("DEAL_EVIDENCE_REQUIRED", "agreement ciphertext readback is required before payment");
       if (next === "paid" && this.get(operationId).evidence.payment !== "finalized") fail("DEAL_PAYMENT_UNVERIFIED", "confirmed payment evidence is required");
       if (next === "delivered" && !(this.store.db.prepare("SELECT 1 FROM deal_blobs WHERE operation_id=? AND kind='delivery' AND status='verified'").get(operationId))) fail("DEAL_DELIVERY_UNVERIFIED", "verified delivery evidence is required");
-      if (next === "complete" && !(this.store.db.prepare("SELECT 1 FROM deal_memory_outbox WHERE operation_id=? AND event_kind='outcome' AND status='indexed'").get(operationId))) fail("DEAL_MEMORY_UNVERIFIED", "indexed outcome memory is required");
+      if (next === "complete" && (this.get(operationId).evidence.payment !== "finalized" || this.get(operationId).evidence.delivery !== "verified")) fail("DEAL_DELIVERY_UNVERIFIED", "finalized payment and verified delivery are required before deal completion");
       this.store.db.prepare("UPDATE deal_operations SET state=?,rail=COALESCE(?,rail),plan_hash=COALESCE(?,plan_hash),updated_at=? WHERE operation_id=?")
         .run(next, result?.rail ?? null, result?.planHash ?? null, Date.now(), operationId);
       this.store.db.exec("COMMIT");

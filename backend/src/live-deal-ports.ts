@@ -54,7 +54,9 @@ export class LiveDealPorts implements DealPorts {
     return Ed25519Keypair.fromSecretKey(decoded.secretKey);
   }
   private async request(origin: string, path: string, body?: unknown): Promise<Record<string, unknown>> {
-    const response = await this.http(new URL(path, origin), { ...(body ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}), redirect: "error", signal: AbortSignal.timeout(90_000) });
+    const url = new URL(path, origin); let response: Response;
+    try { response = await this.http(url, { ...(body ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}), redirect: "error", signal: AbortSignal.timeout(90_000) }); }
+    catch (error) { return fail("DEAL_SELLER_UNAVAILABLE", `seller ${url.origin} is unreachable; check its health endpoint and network route`, error); }
     let value: unknown; try { value = await response.json(); } catch (error) { return fail("DEAL_SELLER_RESPONSE_INVALID", "seller response is not JSON", error); }
     if (!response.ok || !value || typeof value !== "object" || Array.isArray(value)) fail("DEAL_SELLER_RESPONSE_INVALID", `seller returned HTTP ${response.status}`);
     return value as Record<string, unknown>;

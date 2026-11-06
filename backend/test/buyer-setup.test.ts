@@ -51,3 +51,15 @@ test("directory buyer can start with no approved sellers", () => {
   assert.deepEqual(loadMandate(home).allowedCounterparties, []);
   assert.deepEqual(JSON.parse(readFileSync(join(home, "deal-sellers.json"), "utf8")), { directoryUrl: "https://directory.example", origins: [] });
 });
+
+test("public-only buyer setup does not require Walrus Memory credentials", () => {
+  const root = mkdtempSync(join(tmpdir(), "supercuts-public-buyer-")), home = join(root, "buyer");
+  const tatum = join(root, "tatum.key"), configPath = join(root, "setup.json");
+  writeFileSync(tatum, "test-key", { mode: 0o600 });
+  writeFileSync(configPath, JSON.stringify({ deploymentConfig: resolve(fileURLToPath(import.meta.url), "../../../config/phase1.testnet.json"), tatumKeyFile: tatum, writeGrpc: "https://fullnode.testnet.sui.io:443", tatumGrpc: "https://example.invalid:443", walrusPublisher: "https://publisher.example", walrusAggregator: "https://aggregator.example", sellerOrigins: ["https://seller.example"], perDealCeiling: "100", totalBudget: "500", expiresAt: Date.now() + 86_400_000, allowPublicX402: true }), { mode: 0o600 });
+  const setup = setupBuyer(home, configPath);
+  assert.match(String(setup.address), /^0x[0-9a-f]{64}$/);
+  const app = new Phase3App(home);
+  try { assert.equal(app.store.getSecret("live:memory-config"), undefined); }
+  finally { app.close(); }
+});

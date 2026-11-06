@@ -59,6 +59,8 @@ test("built-in live buyer and seller exchange encrypted signed agreement through
   await transport.register(registration, async () => ({ artifact: Buffer.from("report"), contentType: "text/plain", metadata: { kind: "report" } }));
   const server = transport.createServer(); await new Promise<void>((done) => server.listen(sellerAddress.port, "127.0.0.1", done));
   try {
+    const health = await fetch(`${origin}/health`); assert.equal(health.status, 200); assert.deepEqual(await health.json(), { ok: true, service: "supercuts-seller", capabilities: 1 });
+    const preNegotiation = await fetch(manifest.endpoint); assert.equal(preNegotiation.status, 404); assert.equal((await preNegotiation.json() as { error: string }).error, "NEGOTIATION_REQUIRED");
     const ports = new LiveDealPorts(buyer, loadMandate(buyerHome));
     const input = { operationId: "generic-deal", capabilityId: "generic-report", input: { query: "Sui" }, budget: { asset: "0x2::sui::SUI", maximum: "20" }, requestedRail: "x402" as const };
     const found = await ports.discover(input); assert.equal(found.manifest.manifestHash, manifest.manifestHash);

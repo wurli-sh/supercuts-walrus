@@ -17,7 +17,7 @@ import { validateDirectoryOrigin } from "./seller-directory.js";
 
 interface BuyerSetup {
   deploymentConfig: string; tatumKeyFile: string; writeGrpc: string; tatumGrpc: string;
-  walrusPublisher: string; walrusAggregator: string; memoryConfigFile: string;
+  walrusPublisher: string; walrusAggregator: string; memoryConfigFile?: string;
   sellerOrigins?: string[]; directoryUrl?: string; allowedCounterparties?: string[]; allowedCapabilityIds?: string[];
   allowedCapabilityClasses?: string[]; perDealCeiling: string; totalBudget: string;
   expiresAt: number; allowPublicX402?: boolean; suiKeyFile?: string; rapidsnark?: string;
@@ -46,8 +46,8 @@ function validateConfig(config: BuyerSetup): BuyerSetup {
   if (config.sellerOrigins?.length) origins(config.sellerOrigins);
   if (!config.sellerOrigins?.length && !config.directoryUrl) fail("SETUP_INVALID", "configure a directoryUrl or sellerOrigins");
   if (config.directoryUrl) origins([config.directoryUrl]);
-  for (const key of ["deploymentConfig", "tatumKeyFile", "writeGrpc", "tatumGrpc", "walrusPublisher", "walrusAggregator", "memoryConfigFile"] as const) if (typeof config[key] !== "string" || !config[key]) fail("SETUP_INVALID", `${key} is required`);
-  for (const path of [config.tatumKeyFile, config.memoryConfigFile, ...(config.suiKeyFile ? [config.suiKeyFile] : [])]) ownerFile(resolve(path));
+  for (const key of ["deploymentConfig", "tatumKeyFile", "writeGrpc", "tatumGrpc", "walrusPublisher", "walrusAggregator"] as const) if (typeof config[key] !== "string" || !config[key]) fail("SETUP_INVALID", `${key} is required`);
+  for (const path of [config.tatumKeyFile, ...(config.memoryConfigFile ? [config.memoryConfigFile] : []), ...(config.suiKeyFile ? [config.suiKeyFile] : [])]) ownerFile(resolve(path));
   const deployment = JSON.parse(readFileSync(resolve(config.deploymentConfig), "utf8")) as { verifierVersion?: number; network?: string };
   if (deployment.network !== "testnet" || deployment.verifierVersion !== 2) fail("SETUP_INVALID", "buyer setup requires the pinned v2 Testnet deployment");
   if (config.allowPublicX402 !== undefined && typeof config.allowPublicX402 !== "boolean") fail("SETUP_INVALID", "allowPublicX402 must be boolean");
@@ -77,7 +77,7 @@ export async function promptBuyerSetup(home: string): Promise<Record<string, unk
       deploymentConfig: await ask("Pinned Testnet deployment config path"), tatumKeyFile: await ask("Tatum key file path"),
       writeGrpc: await ask("Sui write gRPC URL"), tatumGrpc: await ask("Tatum read gRPC URL"),
       walrusPublisher: await ask("Walrus publisher URL"), walrusAggregator: await ask("Walrus aggregator URL"),
-      memoryConfigFile: await ask("Owner-only Walrus Memory config path"),
+      memoryConfigFile: await ask("Owner-only Walrus Memory config path (blank to skip Memory)"),
       directoryUrl: await ask("Shared directory origin (blank for direct sellers)"),
       sellerOrigins: (await ask("Additional seller HTTPS origins, comma separated (or blank)")).split(",").map((item) => item.trim()).filter(Boolean),
       allowedCounterparties: (await ask("Initially approved seller Sui addresses, comma separated (or blank)")).split(",").map((item) => item.trim()).filter(Boolean),
@@ -94,7 +94,7 @@ function setupBuyerConfig(home: string, config: BuyerSetup): Record<string, unkn
   const keyPath = config.suiKeyFile ? resolve(config.suiKeyFile) : join(home, "buyer.sui.key");
   if (!config.suiKeyFile) writeFileSync(keyPath, Ed25519Keypair.generate().getSecretKey(), { mode: 0o600, flag: "wx" });
   ownerFile(keyPath);
-  initialize(home, { role: "buyer", "deployment-config": resolve(config.deploymentConfig), "sui-key-file": keyPath, "tatum-key-file": resolve(config.tatumKeyFile), "write-grpc": config.writeGrpc, "tatum-grpc": config.tatumGrpc, "walrus-publisher": config.walrusPublisher, "walrus-aggregator": config.walrusAggregator, "memory-config-file": resolve(config.memoryConfigFile), "allow-counterparty": (config.allowedCounterparties ?? []).join(","), "max-amount": config.perDealCeiling, ...(config.rapidsnark ? { rapidsnark: resolve(config.rapidsnark) } : {}) });
+  initialize(home, { role: "buyer", "deployment-config": resolve(config.deploymentConfig), "sui-key-file": keyPath, "tatum-key-file": resolve(config.tatumKeyFile), "write-grpc": config.writeGrpc, "tatum-grpc": config.tatumGrpc, "walrus-publisher": config.walrusPublisher, "walrus-aggregator": config.walrusAggregator, ...(config.memoryConfigFile ? { "memory-config-file": resolve(config.memoryConfigFile) } : {}), "allow-counterparty": (config.allowedCounterparties ?? []).join(","), "max-amount": config.perDealCeiling, ...(config.rapidsnark ? { rapidsnark: resolve(config.rapidsnark) } : {}) });
   writePolicy(home, config);
   const session = createBuyerSession(home);
   const decoded = decodeSuiPrivateKey(readFileSync(keyPath, "utf8").trim());

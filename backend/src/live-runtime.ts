@@ -80,15 +80,15 @@ export class LiveRuntime {
     const engine = await ProtocolEngine.create({ deploymentDomain: profile.live.deploymentDomain, poolId: profile.poolId, coinTypeHash: profile.live.coinTypeHash, verifierVersion: profile.verifierVersion, initialRoot: profile.live.initialRoot });
     return new LiveRuntime(profile, store, new TatumLedger(profile.live.tatumGrpcEndpoint, tatumKey), Ed25519Keypair.fromSecretKey(decoded.secretKey), engine);
   }
-  async doctor(): Promise<Record<string, unknown>> {
-    const artifacts = this.prover.doctor();
+  async doctor(proofsRequired = true): Promise<Record<string, unknown>> {
+    const artifacts = proofsRequired ? this.prover.doctor() : { rapidSnark: false, artifacts: {} as Record<string, string> };
     const [service, suiObject] = await Promise.all([this.tatum.getServiceInfo(), this.client.getObject({ objectId: this.profile.poolId, include: { json: true } })]);
     if (!suiObject.object) fail("POOL_OBJECT_MISSING", "pinned Testnet pool object is unavailable; check the Sui write RPC and deployment config");
     if (!service) fail("TATUM_UNAVAILABLE", "Tatum read RPC did not return service information; check its endpoint and owner-only API key");
     const babySeed = this.store.getSecret("identity:babyjub-seed") ?? fail("IDENTITY_MISSING", "BabyJub identity is missing");
     const identity = this.engine.identity(babySeed);
     const fixes: string[] = [];
-    if (!artifacts.rapidSnark) fixes.push("Set an executable RapidSnark path in the role profile for v2 proofs.");
+    if (proofsRequired && !artifacts.rapidSnark) fixes.push("Set an executable RapidSnark path in the role profile for v2 proofs.");
     if (!this.profile.live.walrusPublisherUrl) fixes.push("Configure the Walrus publisher URL for capability and transcript writes.");
     if (!this.profile.live.walrusAggregatorUrl) fixes.push("Configure the Walrus aggregator URL for capability and transcript reads.");
     for (const [name, endpoint] of [["publisher", this.profile.live.walrusPublisherUrl], ["aggregator", this.profile.live.walrusAggregatorUrl]] as const) {
@@ -96,8 +96,7 @@ export class LiveRuntime {
       try { const response = await fetch(endpoint, { method: "HEAD", signal: AbortSignal.timeout(8_000) }); if (response.status >= 500) fixes.push(`Walrus ${name} returned HTTP ${response.status}; check the configured service.`); }
       catch { fixes.push(`Walrus ${name} is unreachable; check the configured URL and network access.`); }
     }
-    if (this.profile.role === "buyer" && !this.store.getSecret("live:memory-config")) fixes.push("Configure an owner-only Walrus Memory file using the local 1536-dimensional embedding adapter.");
-    return { role: this.profile.role, network: "testnet", packageId: this.profile.packageId, poolId: this.profile.poolId, asset: this.profile.coinType, verifierVersion: this.profile.verifierVersion, keyPermissions: "owner-only", rpc: this.profile.live.writeGrpcEndpoint, healthy: true, readyForDemo: fixes.length === 0, fixes, runtime: "testnet-live", signer: this.signer.toSuiAddress(), babyJubPublicKey: identity.publicKey.map(String), x25519PublicKey: this.store.getSecret("identity:x25519-public")?.toString("base64"), rapidSnark: artifacts.rapidSnark, artifacts: artifacts.artifacts, poolObjectVerified: true, tatumServiceVerified: true };
+    return { role: this.profile.role, network: "testnet", packageId: this.profile.packageId, poolId: this.profile.poolId, asset: this.profile.coinType, verifierVersion: this.profile.verifierVersion, keyPermissions: "owner-only", rpc: this.profile.live.writeGrpcEndpoint, healthy: true, readyForDemo: fixes.length === 0, fixes, runtime: "testnet-live", signer: this.signer.toSuiAddress(), babyJubPublicKey: identity.publicKey.map(String), x25519PublicKey: this.store.getSecret("identity:x25519-public")?.toString("base64"), memoryConfigured: Boolean(this.store.getSecret("live:memory-config")), proofsRequired, rapidSnark: artifacts.rapidSnark, artifacts: artifacts.artifacts, poolObjectVerified: true, tatumServiceVerified: true };
   }
   async balance(): Promise<Record<string, unknown>> {
     const state = await this.index.sync(); let available = 0n, notes = 0;

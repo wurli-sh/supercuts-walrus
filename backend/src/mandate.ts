@@ -127,7 +127,7 @@ export async function executeMandated(app: Phase3App, mandate: AgentMandate, com
   if (mandate.role !== app.profile.role || Date.now() > mandate.expiresAt) fail(Date.now() > mandate.expiresAt ? "MANDATE_EXPIRED" : "MANDATE_ROLE_MISMATCH", "owner mandate does not authorize this agent");
   if (!mandate.allowedCommands.includes(command)) fail("MANDATE_COMMAND_FORBIDDEN", `mandate does not allow ${command}`);
   const args: Record<string, string | boolean> = {};
-  for (const [key, value] of Object.entries(raw)) args[key] = typeof value === "boolean" ? value : typeof value === "string" ? value : Buffer.from(JSON.stringify(value)).toString("base64url");
+  for (const [key, value] of Object.entries(raw)) args[key] = typeof value === "boolean" ? value : typeof value === "string" ? value : Buffer.from(canonical(value)).toString("base64url");
   if (!spec.mutating) return (await app.execute(command, args)).data;
   const operationId = String(raw["operation-id"]), journalOperationId = command === "settlement.plan" ? `settlement.plan:${operationId}` : operationId;
   let amount = typeof raw.amount === "string" ? BigInt(raw.amount) : 0n;

@@ -9,7 +9,7 @@ import { acquireRoleHomeLease } from "../src/role-lock.js";
 import { errorOutput } from "../src/phase3.js";
 import { SupercutsError } from "../src/errors.js";
 import { initialize, Phase3App } from "../src/phase3.js";
-import { loadMandate } from "../src/mandate.js";
+import { executeMandated, loadMandate } from "../src/mandate.js";
 import { calculateFundingPlan } from "../src/funding.js";
 
 test("analysis agreements bind the shielded rail and exact session", () => {
@@ -90,4 +90,18 @@ test("research resume repeats only a pending delivery", async () => {
     assert.equal(result.state, "complete");
     assert.deepEqual(calls, { rank: 1, brief: 1, agreement: 1, settle: 1, delivery: 2 });
   } finally { app.close(); }
+});
+
+test("mandated nested arguments keep one authorization identity after canonical reload", async () => {
+  const home = mkdtempSync(join(tmpdir(), "supercuts-canonical-mandate-"));
+  initialize(home, { role: "buyer", mock: true });
+  const app = new Phase3App(home), mandate = loadMandate(home);
+  const first = { "operation-id": "canonical-plan", manifest: { z: 1, a: 2 } };
+  const reordered = { "operation-id": "canonical-plan", manifest: { a: 2, z: 1 } };
+  try {
+    await assert.rejects(() => executeMandated(app, mandate, "settlement.plan", first), (error: any) => error?.code !== "OPERATION_ID_CONFLICT");
+    await assert.rejects(() => executeMandated(app, mandate, "settlement.plan", reordered), (error: any) => error?.code !== "OPERATION_ID_CONFLICT");
+  } finally {
+    app.close();
+  }
 });

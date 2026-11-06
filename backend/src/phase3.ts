@@ -521,7 +521,7 @@ export class Phase3App {
     }
     if (command === "memory.remember" || command === "memory.recall" || command === "memory.status") return output(command, await this.liveMemory(command, args));
     const runtime = await LiveRuntime.create(this.profile as LiveRuntimeProfile, this.store);
-    if (command === "doctor") return output(command, await runtime.doctor());
+    if (command === "doctor") return output(command, await runtime.doctor(args["proofs-required"] !== false));
     if (command === "status") return output(command, { role: this.profile.role, network: this.profile.network, mock: false, runtime: "testnet-live" });
     if (command === "capability.publish") return output(command, await this.publishLiveCapability(args));
     if (command === "capability.discover") return output(command, await this.discoverLiveCapabilities(args));
@@ -760,7 +760,7 @@ export class Phase3App {
 export function output(command: string, data: Record<string, unknown>): CommandResult { return { schemaVersion: "supercuts.v1", ok: true, command, data }; }
 export function errorOutput(error: unknown): Record<string, unknown> {
   const known = error instanceof SupercutsError ? error : new SupercutsError("INTERNAL_ERROR", error instanceof Error ? error.message : "unknown error");
-  const retryable = ["BROADCAST_UNRESOLVED", "DELIVERY_IN_PROGRESS", "DELIVERY_PENDING", "ONBOARDING_SERVICE_UNAVAILABLE", "SELLER_DIRECTORY_UNAVAILABLE", "WALRUS_WRITE_FAILED", "WALRUS_READ_FAILED", "X402_FACILITATOR_UNAVAILABLE"].includes(known.code);
+  const retryable = ["BROADCAST_UNRESOLVED", "DELIVERY_IN_PROGRESS", "DELIVERY_PENDING", "DEAL_SELLER_UNAVAILABLE", "ONBOARDING_SERVICE_UNAVAILABLE", "SELLER_DIRECTORY_UNAVAILABLE", "WALRUS_WRITE_FAILED", "WALRUS_READ_FAILED", "X402_FACILITATOR_UNAVAILABLE"].includes(known.code);
   const sameOperation = retryable || ["OPERATION_ID_CONFLICT", "DEAL_OPERATION_CONFLICT"].includes(known.code);
   return { schemaVersion: "supercuts.v1", ok: false, error: { code: known.code, message: known.message, recovery: recovery(known.code), retryable, retryWithSameOperationId: sameOperation } };
 }
@@ -773,6 +773,7 @@ function recovery(code: string): string {
   if (code === "DEAL_MANDATE_INACTIVE") return "renew the owner mandate locally, then resume the same deal operation ID";
   if (code === "BROADCAST_UNRESOLVED") return "reconcile or resume with the same operation ID; never create a replacement payment";
   if (code === "DELIVERY_PENDING") return "resume the same root operation ID; completed selection, payment, and agreement stages will not run again";
+  if (code === "DEAL_SELLER_UNAVAILABLE") return "check the seller /health endpoint, then resume the same root operation ID";
   if (code === "X402_FACILITATOR_UNAVAILABLE") return "the signed transaction remains journaled; resume the same operation ID after facilitator health recovers";
   if (code === "OPERATION_ID_CONFLICT" || code === "DEAL_OPERATION_CONFLICT") return "reuse the original exact input for this operation ID or start a deliberately new deal";
   if (code === "X402_TRANSACTION_EXPIRY_INVALID") return "run onboarding doctor against the configured Sui RPC and retry the same operation ID after compatibility is restored";

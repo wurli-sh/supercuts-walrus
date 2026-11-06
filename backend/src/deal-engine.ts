@@ -172,9 +172,9 @@ export class DealEngine {
     if (existing?.blobId) {
       const indexed = await this.ports.inventory(existing.blobId);
       this.journal.recordOutcome(operationId, existing.payloadHash, existing.blobId, indexed);
-      return indexed ? this.journal.advance(operationId, "outcome_pending", "complete") : this.journal.get(operationId);
+      return this.journal.advance(operationId, "outcome_pending", "complete");
     }
-    if (existing) return view;
+    if (existing) return this.journal.advance(operationId, "outcome_pending", "complete");
     const plan = this.journal.step<SettlementPlanV1>(operationId, "planning") ?? fail("DEAL_PLAN_MISSING", "saved deal plan is missing");
     const payment = this.journal.step<DealPayment>(operationId, "payment") ?? fail("DEAL_PAYMENT_UNVERIFIED", "saved deal payment is missing");
     const artifact = this.journal.step<DealArtifact>(operationId, "delivery") ?? fail("DEAL_DELIVERY_UNVERIFIED", "saved deal delivery is missing");
@@ -183,14 +183,14 @@ export class DealEngine {
       const started = Date.now();
       const candidate = await this.ports.rememberOutcome(input, plan, payment, artifact, dealChildId(operationId, "outcome"));
       this.journal.recordTiming(operationId, "outcome_queue", Date.now() - started);
-      if ("unresolved" in candidate) { this.journal.setOutcomeUnresolved(operationId); return this.journal.get(operationId); }
-      if ("queued" in candidate) { this.journal.queueOutcome(operationId, candidate.payloadHash); return this.journal.get(operationId); }
+      if ("unresolved" in candidate) { this.journal.setOutcomeUnresolved(operationId); return this.journal.advance(operationId, "outcome_pending", "complete"); }
+      if ("queued" in candidate) { this.journal.queueOutcome(operationId, candidate.payloadHash); return this.journal.advance(operationId, "outcome_pending", "complete"); }
       if (!candidate.blobId || !/^[0-9a-f]{64}$/.test(candidate.payloadHash)) fail("DEAL_MEMORY_INVALID", "outcome memory is incomplete");
       outcome = candidate;
       this.journal.saveStep(operationId, "outcome", { paymentDigest: payment.transactionDigest, artifactSha256: artifact.artifactSha256 }, outcome);
     }
     const indexed = await this.ports.inventory(outcome.blobId);
     this.journal.recordOutcome(operationId, outcome.payloadHash, outcome.blobId, indexed);
-    return indexed ? this.journal.advance(operationId, "outcome_pending", "complete") : this.journal.get(operationId);
+    return this.journal.advance(operationId, "outcome_pending", "complete");
   }
 }
