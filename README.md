@@ -53,7 +53,7 @@ The pinned test-only pool has a funded deposit, private transfer, seller note re
 
 ```sh
 printf 'allowBuilds:\n  blake-hash: true\n' > pnpm-workspace.yaml   # pnpm 10+ only
-pnpm add @supercuts-walrus/sdk@0.1.5 @supercuts-walrus/backend@0.1.5
+pnpm add @supercuts-walrus/sdk@0.1.6 @supercuts-walrus/backend@0.1.6
 pnpm exec supercuts onboard buyer --home ./buyer --config buyer-setup.json
 pnpm exec supercuts proofs install   # once per machine, ~370 MB, only for shielded payments
 ```

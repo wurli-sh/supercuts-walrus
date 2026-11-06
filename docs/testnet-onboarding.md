@@ -6,7 +6,7 @@ directory lists signed public capabilities; it holds no role secrets.
 
 ## Seller
 
-1. Install with `pnpm add @supercuts-walrus/backend@0.1.5` after allowing the `blake-hash` build
+1. Install with `pnpm add @supercuts-walrus/backend@0.1.6` after allowing the `blake-hash` build
    (`printf 'allowBuilds:\n  blake-hash: true\n' > pnpm-workspace.yaml`), or use npm. Create a separate
    live seller home with `supercuts onboard seller --home <seller-home>`. A setup JSON containing only
    `{ "tatumKeyFile": "<owner-only file>" }` is enough; the endpoints default to public Testnet. In a noninteractive environment, add `--config
