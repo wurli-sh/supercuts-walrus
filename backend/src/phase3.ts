@@ -11,7 +11,7 @@ import { validateCapabilityManifest, type CapabilityManifest, type CapabilityRai
 import { ManualMemory, openMemoryText, withMemoryDefaults, type ManualMemoryConfig } from "./memwal.js";
 import { WorkflowMemory } from "./workflow-memory.js";
 import { buildScorecard, type SellerScorecard } from "./memory-scorecard.js";
-import { canonicalJson, createSettlementPlan, explainMemoryInfluence, isRelevantMemory, settlementMandateHash, settlementPlanHash, validateSettlementMemory, validateSettlementPlan, type MemoryInfluence, type PlanningMandate, type RecalledSettlementMemory, type SettlementMemoryV1, type SettlementPlanV1 } from "./settlement.js";
+import { canonicalJson, createSettlementPlan, explainMemoryInfluence, planHonoursRail, isRelevantMemory, settlementMandateHash, settlementPlanHash, validateSettlementMemory, validateSettlementPlan, type MemoryInfluence, type PlanningMandate, type RecalledSettlementMemory, type SettlementMemoryV1, type SettlementPlanV1 } from "./settlement.js";
 
 export type Role = "buyer" | "seller" | "auditor";
 export interface Profile {
@@ -330,7 +330,7 @@ export class Phase3App {
       const requestedAmount = typeof args["requested-amount"] === "string" ? BigInt(args["requested-amount"]) : BigInt(existing.manifestMinimum);
       const boundedAmount = requestedAmount < BigInt(existing.manifestMinimum) ? BigInt(existing.manifestMinimum) : requestedAmount > BigInt(existing.maximumAmount) ? BigInt(existing.maximumAmount) : requestedAmount;
       const requestedRail = args["requested-rail"] === "x402" || args["requested-rail"] === "shielded" ? args["requested-rail"] : undefined;
-      if (existing.mandateHash !== settlementMandateHash(mandate) || !manifests.some((manifest) => manifest.manifestHash === existing.manifestHash) || requestedRail && requestedRail !== existing.rail || args["privacy-hint"] === "shielded" && existing.rail !== "shielded" || boundedAmount.toString() !== existing.openingAmount) {
+      if (existing.mandateHash !== settlementMandateHash(mandate) || !manifests.some((manifest) => manifest.manifestHash === existing.manifestHash) || !planHonoursRail(existing, requestedRail) || args["privacy-hint"] === "shielded" && existing.rail !== "shielded" || boundedAmount.toString() !== existing.openingAmount) {
         fail("OPERATION_ID_CONFLICT", "planning operation already identifies another immutable plan");
       }
       return existing as unknown as Record<string, unknown>;
@@ -381,28 +381,31 @@ export class Phase3App {
     const recalled = await this.recallSettlementMemories(allowed.map(memoryQuery)), now = Date.now(), maxDistance = this.profile.policy.maxMemoryDistance ?? 0.35;
     const relevant = recalled.filter((item) => isRelevantMemory(item, maxDistance));
     // Only rank sellers that the deal could actually plan and pay: budget, rail, privacy, and price bounds.
-    const payable = allowed.filter((manifest) => {
+    const payableWith = (memories: typeof recalled) => (manifest: CapabilityManifest) => {
       try {
-        const plan = createSettlementPlan({ operationId: `rank:${operationId}`, mandate, manifests: [manifest], requestedAmount: manifest.priceBand.minimum, recalled, maxMemoryDistance: maxDistance, now, ...(request.requestedRail ? { requestedRail: request.requestedRail } : {}), ...(request.privacyHint ? { privacyHint: request.privacyHint } : {}) });
+        const plan = createSettlementPlan({ operationId: `rank:${operationId}`, mandate, manifests: [manifest], requestedAmount: manifest.priceBand.minimum, recalled: memories, maxMemoryDistance: maxDistance, now, ...(request.requestedRail ? { requestedRail: request.requestedRail } : {}), ...(request.privacyHint ? { privacyHint: request.privacyHint } : {}) });
         if (request.budgetMaximum !== undefined && BigInt(plan.maximumAmount) > BigInt(request.budgetMaximum)) return false;
-        return request.requestedRail ? plan.rail === request.requestedRail : mandate.version !== "supercuts.mandate.v2" || !manifest.supportedRails.includes("shielded") || plan.rail === "shielded";
+        return request.requestedRail ? planHonoursRail(plan, request.requestedRail) : mandate.version !== "supercuts.mandate.v2" || !manifest.supportedRails.includes("shielded") || plan.rail === "shielded";
       } catch { return false; }
-    });
+    };
+    const payable = allowed.filter(payableWith(recalled));
+    // The counterfactual must see sellers that memory excluded, so it is computed over the memory-free payable set.
+    const baseline = allowed.filter(payableWith([]));
     const pool = payable.length ? payable : allowed;
     const scored = pool.map((manifest) => ({ manifest, card: buildScorecard(relevant, { counterparty: manifest.sellerId, capabilityClass: manifest.capability }, now) }));
     const review = (card: SellerScorecard) => Number(card.lastOutcome === "unresolved" || card.observations > 0 && card.reliability < 0.5);
     scored.sort((a, b) => review(a.card) - review(b.card) || b.card.reliability - a.card.reliability || (BigInt(a.manifest.priceBand.minimum) < BigInt(b.manifest.priceBand.minimum) ? -1 : BigInt(a.manifest.priceBand.minimum) > BigInt(b.manifest.priceBand.minimum) ? 1 : 0) || a.manifest.capabilityId.localeCompare(b.manifest.capabilityId));
     const result = { ordered: scored.map((item) => item.manifest), scorecards: scored.map((item) => ({ ...item.card, capabilityId: item.manifest.capabilityId, priceMinimum: item.manifest.priceBand.minimum })) };
-    record(this.store, "deal-ranking", operationId, { candidates: pool, scorecards: result.scorecards, chosen: result.ordered[0]?.capabilityId, createdAt: now });
+    record(this.store, "deal-ranking", operationId, { candidates: pool, baselineCandidates: baseline.length ? baseline : allowed, scorecards: result.scorecards, chosen: result.ordered[0]?.capabilityId, createdAt: now });
     return result;
   }
 
   /** Stores the counterfactual (same mandate, no memory, every candidate) next to the binding deal plan. */
   recordDealMemoryInfluence(dealOperationId: string, plan: SettlementPlanV1, mandate: PlanningMandate, request: { requestedRail?: CapabilityRail; privacyHint?: "any" | "shielded" } = {}): MemoryInfluence | undefined {
-    const ranking = get<{ candidates: CapabilityManifest[]; scorecards: Array<{ citedBlobIds: string[] }> }>(this.store, "deal-ranking", dealOperationId);
+    const ranking = get<{ candidates: CapabilityManifest[]; baselineCandidates?: CapabilityManifest[]; scorecards: Array<{ citedBlobIds: string[] }> }>(this.store, "deal-ranking", dealOperationId);
     if (!ranking) return undefined;
     const existing = get<MemoryInfluence>(this.store, "memory-influence", `deal:${dealOperationId}`); if (existing) return existing;
-    const influence = explainMemoryInfluence({ operationId: plan.operationId, mandate, manifests: ranking.candidates, requestedAmount: plan.openingAmount, ...request }, plan);
+    const influence = explainMemoryInfluence({ operationId: plan.operationId, mandate, manifests: ranking.baselineCandidates ?? ranking.candidates, requestedAmount: plan.openingAmount, ...request }, plan);
     const cited = [...new Set([...influence.citedBlobIds, ...ranking.scorecards.flatMap((item) => item.citedBlobIds)])].sort();
     const value = { ...influence, citedBlobIds: cited };
     record(this.store, "memory-influence", `deal:${dealOperationId}`, value);

@@ -22,7 +22,7 @@ export type SettlementReasonCode =
   | "MEMORY_LOW_RELEVANCE_IGNORED" | "MEMORY_UNTRUSTED_ADVISORY" | "OWNER_POLICY_CONFLICT"
   | "RISK_LOW" | "RISK_MEDIUM" | "RISK_REVIEW_REQUIRED" | "RAIL_X402_SELECTED"
   | "RAIL_SHIELDED_SELECTED" | "REQUESTED_AMOUNT_CLAMPED" | "OWNER_REVIEW_APPROVED"
-  | "MEMORY_RELIABILITY_LEARNED" | "MEMORY_SELLER_DEMOTED" | "MEMORY_SPEND_LIMIT_REACHED";
+  | "MEMORY_RELIABILITY_LEARNED" | "MEMORY_SELLER_DEMOTED" | "MEMORY_SPEND_LIMIT_REACHED" | "MEMORY_PRIVACY_OVERRODE_RAIL";
 export interface SettlementPlanV1 {
   version: typeof SETTLEMENT_PLAN_VERSION; planHash: string; operationId: string; status: "approved" | "review_required";
   mandateHash: string; manifestHash: string; capabilityId: string; capabilityClass: string; sellerId: string; endpoint: string;
@@ -117,7 +117,10 @@ export function createSettlementPlan(input: PlanningInput): SettlementPlanV1 {
     };
     const policies = latest("privacy_rule"), conflict = policies[0]?.provenance === "owner_policy" && new Set(policies.map((item) => item.signal.requiresShielded)).size > 1;
     const requiresShielded = input.mandate.requiredPrivacy === "shielded" || input.privacyHint === "shielded" || policies.some((item) => item.signal.requiresShielded === true);
-    const rails = manifest.supportedRails.filter((rail) => (!input.mandate.allowedRails || input.mandate.allowedRails.includes(rail)) && (!requiresShielded || rail === "shielded") && (input.mandate.version !== "supercuts.mandate.v2" || rail !== "x402" || input.mandate.allowPublicX402 === true) && (!input.requestedRail || rail === input.requestedRail)); if (!rails.length) continue;
+    // The owner's remembered privacy rule outranks the agent's x402 request when the seller and mandate allow shielded.
+    const overridesRail = input.requestedRail === "x402" && policies.some((item) => item.provenance === "owner_policy" && item.signal.requiresShielded === true) && !conflict && manifest.supportedRails.includes("shielded") && (!input.mandate.allowedRails || input.mandate.allowedRails.includes("shielded"));
+    const requestedRail = overridesRail ? "shielded" : input.requestedRail;
+    const rails = manifest.supportedRails.filter((rail) => (!input.mandate.allowedRails || input.mandate.allowedRails.includes(rail)) && (!requiresShielded || rail === "shielded") && (input.mandate.version !== "supercuts.mandate.v2" || rail !== "x402" || input.mandate.allowPublicX402 === true) && (!requestedRail || rail === requestedRail)); if (!rails.length) continue;
     const budgetMemories = trusted.filter((item) => item.memory!.kind === "budget_limit").map((item) => item.memory!);
     const budgets = budgetMemories.filter((item) => item.signal.periodMs === undefined).map((item) => BigInt(item.signal.maximumAmount!));
     // Periodic owner budgets subtract the verified spend that Walrus Memory remembers for the same scope.
@@ -132,7 +135,7 @@ export function createSettlementPlan(input: PlanningInput): SettlementPlanV1 {
     const reliability = explicit?.provenance === "owner_policy" ? explicit.signal.reliability! : card.observations ? card.reliability : explicit?.signal.reliability ?? 0.5;
     const quality = latest("quality")[0]?.signal.quality ?? 0.5, outcome = card.lastOutcome ?? latest("outcome")[0]?.signal.outcome;
     const risk: SettlementRisk = conflict || spendLimited || outcome === "unresolved" || reliability < 0.5 ? "review_required" : reliability >= 0.8 ? "low" : "medium";
-    for (const rail of rails) candidates.push({ manifest, rail, reliability, quality, maximum, risk, citations, conflict, card, reasons: ["MANDATE_DEFAULTS_APPLIED", ...(policies.length ? ["MEMORY_PRIVACY_APPLIED" as const] : []), ...(budgetMemories.length ? ["MEMORY_BUDGET_APPLIED" as const] : []), ...(spendLimited ? ["MEMORY_SPEND_LIMIT_REACHED" as const] : []), ...(outcome ? ["MEMORY_OUTCOME_APPLIED" as const] : []), ...(card.observations ? ["MEMORY_RELIABILITY_LEARNED" as const] : []), ...(citations.some((c) => ["agent_observation", "legacy_untrusted"].includes(c.provenance)) ? ["MEMORY_UNTRUSTED_ADVISORY" as const] : []), ...(ignored.length ? ["MEMORY_LOW_RELEVANCE_IGNORED" as const] : [])] });
+    for (const rail of rails) candidates.push({ manifest, rail, reliability, quality, maximum, risk, citations, conflict, card, reasons: ["MANDATE_DEFAULTS_APPLIED", ...(policies.length ? ["MEMORY_PRIVACY_APPLIED" as const] : []), ...(overridesRail ? ["MEMORY_PRIVACY_OVERRODE_RAIL" as const] : []), ...(budgetMemories.length ? ["MEMORY_BUDGET_APPLIED" as const] : []), ...(spendLimited ? ["MEMORY_SPEND_LIMIT_REACHED" as const] : []), ...(outcome ? ["MEMORY_OUTCOME_APPLIED" as const] : []), ...(card.observations ? ["MEMORY_RELIABILITY_LEARNED" as const] : []), ...(citations.some((c) => ["agent_observation", "legacy_untrusted"].includes(c.provenance)) ? ["MEMORY_UNTRUSTED_ADVISORY" as const] : []), ...(ignored.length ? ["MEMORY_LOW_RELEVANCE_IGNORED" as const] : [])] });
   }
   candidates.sort((a, b) => Number(a.risk === "review_required") - Number(b.risk === "review_required") || b.reliability - a.reliability || b.quality - a.quality || (a.maximum < b.maximum ? -1 : a.maximum > b.maximum ? 1 : 0) || a.manifest.capabilityId.localeCompare(b.manifest.capabilityId) || (a.rail === b.rail ? 0 : input.mandate.version === "supercuts.mandate.v2" ? a.rail === "shielded" ? -1 : 1 : a.rail === "x402" ? -1 : 1));
   const selected = candidates[0] ?? fail("SETTLEMENT_PLAN_DENIED", "no capability remains within the owner mandate, privacy rules, and price bounds");
@@ -162,6 +165,11 @@ export interface MemoryInfluence { changedSeller: boolean; changedRail: boolean;
 const decision = (plan: SettlementPlanV1): MemoryDecision => ({ sellerId: plan.sellerId, capabilityId: plan.capabilityId, rail: plan.rail, riskLevel: plan.riskLevel, maximumAmount: plan.maximumAmount });
 
 /** Counterfactual: what the same mandate would have paid without any recalled memory. Not part of the plan hash. */
+/** True when the plan honours the agent's requested rail, or an owner privacy memory rerouted x402 to shielded. */
+export function planHonoursRail(plan: Pick<SettlementPlanV1, "rail" | "reasonCodes">, requestedRail?: CapabilityRail): boolean {
+  return !requestedRail || plan.rail === requestedRail || requestedRail === "x402" && plan.rail === "shielded" && plan.reasonCodes.includes("MEMORY_PRIVACY_OVERRODE_RAIL");
+}
+
 export function explainMemoryInfluence(input: PlanningInput, plan: SettlementPlanV1): MemoryInfluence {
   let withoutMemory: MemoryDecision | undefined;
   try { withoutMemory = decision(createSettlementPlan({ ...input, recalled: [], now: plan.createdAt })); } catch { withoutMemory = undefined; }

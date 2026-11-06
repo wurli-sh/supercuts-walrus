@@ -3,7 +3,7 @@ import { validateCapabilityPayload, verifySignedCapability, type SignedCapabilit
 import { DealJournal, dealChildId, type DealView, type ExecuteDealInput } from "./deal.js";
 import { fail, SupercutsError } from "./errors.js";
 import type { AgentMandate } from "./mandate.js";
-import { canonicalJson, validateSettlementPlan, type SettlementPlanV1 } from "./settlement.js";
+import { canonicalJson, planHonoursRail, validateSettlementPlan, type SettlementPlanV1 } from "./settlement.js";
 
 export interface DealNegotiation {
   transcriptBlobs: Array<{ blobId: string; ciphertextHash: string }>;
@@ -103,7 +103,7 @@ export class DealEngine {
       this.journal.recordTiming(operationId, "planning", Date.now() - started);
     } else validateSettlementPlan(plan);
     if (plan.operationId !== paymentOperationId || plan.manifestHash !== registration.manifest.manifestHash || plan.asset !== input.budget.asset || BigInt(plan.maximumAmount) > BigInt(input.budget.maximum)) fail("DEAL_PLAN_MISMATCH", "saved plan exceeds the deal's capability or budget");
-    if (input.requestedRail && plan.rail !== input.requestedRail || input.privacyHint === "shielded" && plan.rail !== "shielded") fail("DEAL_PRIVACY_UNAVAILABLE", "planned rail differs from the requested privacy");
+    if (!planHonoursRail(plan, input.requestedRail) || input.privacyHint === "shielded" && plan.rail !== "shielded") fail("DEAL_PRIVACY_UNAVAILABLE", "planned rail differs from the requested privacy");
     if (!input.requestedRail && registration.manifest.supportedRails.includes("shielded") && plan.rail !== "shielded") fail("DEAL_PRIVACY_UNAVAILABLE", "shielded is the default rail when the seller supports it");
     if (plan.rail === "x402" && (this.mandate.allowPublicX402 !== true || !this.mandate.allowedRails?.includes("x402") || this.mandate.requiredPrivacy === "shielded")) fail("DEAL_PUBLIC_RAIL_FORBIDDEN", "owner mandate did not authorize public x402");
     if (view.state === "discovered") view = this.journal.advance(operationId, "discovered", "planned", { rail: plan.rail, planHash: plan.planHash });

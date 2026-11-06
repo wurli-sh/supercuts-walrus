@@ -208,3 +208,38 @@ test("trusted typed memories apply by scope even when embeddings rank them far; 
   const advisory = createSettlementPlan({ operationId: "far-advisory", mandate, manifests: [manifest("a", "seller-a", "80")], now, maxMemoryDistance: 0.35, recalled: [{ blobId: "agent-far", distance: far, memory: memory({ kind: "budget_limit", provenance: "agent_observation", signal: { maximumAmount: "11" }, evidenceHash: undefined }) }] });
   assert.ok(advisory.reasonCodes.includes("MEMORY_LOW_RELEVANCE_IGNORED")); assert.ok(!advisory.reasonCodes.includes("MEMORY_UNTRUSTED_ADVISORY"));
 });
+
+test("an owner privacy memory reroutes an agent's x402 request to the shielded rail and shows the change", () => {
+  const dual = manifest("dual", "seller-a", "50");
+  const privacy = (provenance: "owner_policy" | "agent_observation") => ({ blobId: `privacy-${provenance}`, distance: 0.1, memory: memory({ kind: "privacy_rule", provenance, scope: { capabilityId: "dual", counterparty: "seller-a" }, signal: { requiresShielded: true }, evidenceHash: undefined }) });
+  const input = { operationId: "reroute", mandate, manifests: [dual], requestedRail: "x402" as const, now, recalled: [privacy("owner_policy")] };
+  const plan = createSettlementPlan(input);
+  assert.equal(plan.rail, "shielded");
+  assert.ok(plan.reasonCodes.includes("MEMORY_PRIVACY_OVERRODE_RAIL"));
+  const influence = explainMemoryInfluence(input, plan);
+  assert.equal(influence.changedRail, true); assert.equal(influence.withoutMemory?.rail, "x402"); assert.equal(influence.withMemory.rail, "shielded");
+  assert.ok(influence.citedBlobIds.includes("privacy-owner_policy"));
+  const advisory = createSettlementPlan({ ...input, recalled: [privacy("agent_observation")] });
+  assert.equal(advisory.rail, "x402", "an agent observation cannot override the requested rail");
+  assert.throws(() => createSettlementPlan({ ...input, mandate: { ...mandate, allowedRails: ["x402"] } }), /SETTLEMENT_PLAN_DENIED|no capability/, "the mandate stays the hard limit");
+  assert.throws(() => createSettlementPlan({ ...input, manifests: [manifest("public", "seller-a", "50", ["x402"])], recalled: [{ ...privacy("owner_policy"), memory: { ...privacy("owner_policy").memory, scope: { counterparty: "seller-a" } } }] }), /SETTLEMENT_PLAN_DENIED|no capability/, "an x402-only seller is still blocked, not paid publicly");
+});
+
+test("the no-memory counterfactual still sees a seller that an owner privacy memory excluded", async () => {
+  const home = mkdtempSync(join(tmpdir(), "supercuts-baseline-")); initialize(home, { role: "buyer", mock: true });
+  const mandatePath = join(home, "mandate.json"), owner = JSON.parse(readFileSync(mandatePath, "utf8")); owner.allowedCounterparties = ["seller-a", "seller-b"];
+  writeFileSync(mandatePath, `${JSON.stringify(owner, null, 2)}\n`, { mode: 0o600 }); chmodSync(mandatePath, 0o600);
+  const app = new Phase3App(home), live = Date.now();
+  const base = { capability: "artifact.generation", description: "artifact", inputSchema: {}, outputSchema: {}, asset: "0x2::sui::SUI", expiresAt: live + 3_600_000 };
+  const publicOnly = createCapabilityManifest({ ...base, capabilityId: "public-cheap", sellerId: "seller-b", supportedRails: ["x402"], priceBand: { minimum: "5", maximum: "30" }, endpoint: "https://seller-b.example/resource" });
+  const dual = createCapabilityManifest({ ...base, capabilityId: "dual", sellerId: "seller-a", supportedRails: ["x402", "shielded"], priceBand: { minimum: "10", maximum: "40" }, endpoint: "https://seller-a.example/resource" });
+  const execute = async (command: string, args: Record<string, string | boolean>) => { const token = app.approve(app.preview(command, args).challengeId); return (await app.execute(command, { ...args, "approval-token": token.token })).data; };
+  try {
+    await execute("memory.policy", { "operation-id": "privacy-b", memory: JSON.stringify({ kind: "privacy_rule", scope: { counterparty: "seller-b" }, createdAt: live - 1_000, signal: { requiresShielded: true } }) });
+    const ranking = await app.rankDealCandidates("deal-baseline", [publicOnly, dual], owner);
+    assert.deepEqual(ranking.ordered.map((item) => item.capabilityId), ["dual"], "the owner privacy memory removes the public-only seller");
+    const plan = createSettlementPlan({ operationId: "deal-baseline:payment", mandate: owner, manifests: [dual], now: live });
+    const influence = app.recordDealMemoryInfluence("deal-baseline", plan, owner);
+    assert.equal(influence?.withoutMemory?.capabilityId, "public-cheap"); assert.equal(influence?.changedSeller, true);
+  } finally { app.close(); }
+});
