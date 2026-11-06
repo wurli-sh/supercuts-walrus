@@ -35,6 +35,7 @@ export async function prepareFunding(home: string, values: { publicPayment: stri
   try {
     if (app.profile.role !== "buyer" || app.profile.mock) fail("LIVE_PROFILE_REQUIRED", "funding requires a live buyer role home");
     const doctor = await app.execute("doctor", {}), address = String(doctor.data.signer ?? "");
+    if (shieldedPayment > 0n && doctor.data.shieldedProofs !== "ready") fail("SHIELDED_PROOFS_UNAVAILABLE", String((doctor.data.shieldedFixes as string[] | undefined)?.[0] ?? "shielded proving artifacts are not installed"));
     const endpoint = app.profile.live?.writeGrpcEndpoint ?? fail("LIVE_PROFILE_INVALID", "buyer write RPC is missing");
     const [{ balance }, shielded] = await Promise.all([writeClient(endpoint).getBalance({ owner: address, coinType: "0x2::sui::SUI" }), app.execute("wallet.balance", {})]);
     return calculateFundingPlan({ address, publicBalance: BigInt(balance.balance), shieldedBalance: BigInt(String(shielded.data.available ?? "0")), publicPayment, shieldedPayment, gasReserve, changeReserve });
@@ -46,7 +47,11 @@ export async function executeFunding(home: string, values: { publicPayment: stri
   let plan = await prepareFunding(home, values);
   if (plan.faucetRequired) {
     if (!values.requestFaucet) fail("BUYER_FUNDING_REQUIRED", `buyer needs ${plan.publicShortfallMist} additional MIST; rerun with --request-faucet --confirm or fund ${plan.address} manually`);
-    execFileSync("sui", ["client", "faucet", "--url", "https://faucet.testnet.sui.io", "--address", plan.address], { stdio: "inherit" });
+    try { execFileSync("sui", ["client", "faucet", "--url", "https://faucet.testnet.sui.io", "--address", plan.address], { stdio: "inherit" }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") fail("SUI_CLI_MISSING", `the Sui CLI is not installed; request Testnet SUI for ${plan.address} at https://faucet.sui.io, then rerun funding execute without --request-faucet`);
+      throw error;
+    }
     for (let attempt = 0; attempt < 15; attempt++) {
       await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
       plan = await prepareFunding(home, values);

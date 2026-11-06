@@ -89,6 +89,7 @@ process.stdin.on("end", async () => {
   } catch (error) {
     const shaped = errorOutput(error) as { error: Record<string, unknown> };
     const code = String(shaped.error.code ?? "INTERNAL_ERROR");
-    return write(envelope(request.requestId, { ok: false, error: { ...shaped.error, retryable: ["DELIVERY_IN_PROGRESS", "MEMORY_JOB_PENDING", "TATUM_TIMEOUT"].includes(code) } }), 1);
+    const retryable = ["DELIVERY_IN_PROGRESS", "MEMORY_JOB_PENDING", "TATUM_TIMEOUT", "X402_FACILITATOR_UNAVAILABLE"].includes(code);
+    return write(envelope(request.requestId, { ok: false, error: { ...shaped.error, retryable, ...(retryable ? { recovery: "transient: retry or resume later with the same operation ID; never start a second payment", retryWithSameOperationId: true } : {}) } }), 1);
   }
 });

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import type { Transaction } from "@mysten/sui/transactions";
-import { fail } from "./errors.js";
+import { fail, SupercutsError } from "./errors.js";
 import { assertSuiFinality, assertTatumFinality } from "./finality.js";
 import { LivePoolIndex } from "./live-index.js";
 import { ProtocolEngine, type AcceptedAgreement, type NoteOpeningData } from "./protocol-engine.js";
@@ -81,14 +81,18 @@ export class LiveRuntime {
     return new LiveRuntime(profile, store, new TatumLedger(profile.live.tatumGrpcEndpoint, tatumKey), Ed25519Keypair.fromSecretKey(decoded.secretKey), engine);
   }
   async doctor(proofsRequired = true): Promise<Record<string, unknown>> {
-    const artifacts = proofsRequired ? this.prover.doctor() : { rapidSnark: false, artifacts: {} as Record<string, string> };
+    // Shielded proofs need separately installed artifacts; a public x402 buyer or seller stays usable without them.
+    let artifacts: { rapidSnark: boolean; artifacts: Record<string, string> } = { rapidSnark: false, artifacts: {} }, shieldedProofs: "ready" | "unavailable" = "ready", shieldedProofsReason: string | undefined;
+    try { artifacts = this.prover.doctor(); }
+    catch (error) { if (!(error instanceof SupercutsError) || !["PROVING_ARTIFACT_MISSING", "ARTIFACT_HASH_MISMATCH", "PROVER_TOOL_MISSING"].includes(error.code)) throw error; shieldedProofs = "unavailable"; shieldedProofsReason = error.code; }
     const [service, suiObject] = await Promise.all([this.tatum.getServiceInfo(), this.client.getObject({ objectId: this.profile.poolId, include: { json: true } })]);
     if (!suiObject.object) fail("POOL_OBJECT_MISSING", "pinned Testnet pool object is unavailable; check the Sui write RPC and deployment config");
     if (!service) fail("TATUM_UNAVAILABLE", "Tatum read RPC did not return service information; check its endpoint and owner-only API key");
     const babySeed = this.store.getSecret("identity:babyjub-seed") ?? fail("IDENTITY_MISSING", "BabyJub identity is missing");
     const identity = this.engine.identity(babySeed);
-    const fixes: string[] = [];
-    if (proofsRequired && !artifacts.rapidSnark) fixes.push("Set an executable RapidSnark path in the role profile for v2 proofs.");
+    const fixes: string[] = [], shieldedFixes: string[] = [];
+    if (shieldedProofs === "unavailable") shieldedFixes.push(`Shielded payments are unavailable (${shieldedProofsReason}): install the hash-pinned v2 proving artifacts, SnarkJS, and the converter. Public x402 payments do not need them.`);
+    else if (!artifacts.rapidSnark) shieldedFixes.push("Set an executable RapidSnark path in the role profile for v2 proofs.");
     if (!this.profile.live.walrusPublisherUrl) fixes.push("Configure the Walrus publisher URL for capability and transcript writes.");
     if (!this.profile.live.walrusAggregatorUrl) fixes.push("Configure the Walrus aggregator URL for capability and transcript reads.");
     for (const [name, endpoint] of [["publisher", this.profile.live.walrusPublisherUrl], ["aggregator", this.profile.live.walrusAggregatorUrl]] as const) {
@@ -96,7 +100,7 @@ export class LiveRuntime {
       try { const response = await fetch(endpoint, { method: "HEAD", signal: AbortSignal.timeout(8_000) }); if (response.status >= 500) fixes.push(`Walrus ${name} returned HTTP ${response.status}; check the configured service.`); }
       catch { fixes.push(`Walrus ${name} is unreachable; check the configured URL and network access.`); }
     }
-    return { role: this.profile.role, network: "testnet", packageId: this.profile.packageId, poolId: this.profile.poolId, asset: this.profile.coinType, verifierVersion: this.profile.verifierVersion, keyPermissions: "owner-only", rpc: this.profile.live.writeGrpcEndpoint, healthy: true, readyForDemo: fixes.length === 0, fixes, runtime: "testnet-live", signer: this.signer.toSuiAddress(), babyJubPublicKey: identity.publicKey.map(String), x25519PublicKey: this.store.getSecret("identity:x25519-public")?.toString("base64"), memoryConfigured: Boolean(this.store.getSecret("live:memory-config")), proofsRequired, rapidSnark: artifacts.rapidSnark, artifacts: artifacts.artifacts, poolObjectVerified: true, tatumServiceVerified: true };
+    return { role: this.profile.role, network: "testnet", packageId: this.profile.packageId, poolId: this.profile.poolId, asset: this.profile.coinType, verifierVersion: this.profile.verifierVersion, keyPermissions: "owner-only", rpc: this.profile.live.writeGrpcEndpoint, healthy: true, readyForDemo: fixes.length === 0 && (!proofsRequired || shieldedFixes.length === 0), fixes: [...fixes, ...(proofsRequired ? shieldedFixes : [])], publicFixes: fixes, shieldedProofs, shieldedFixes, readyForPublicRail: fixes.length === 0, runtime: "testnet-live", signer: this.signer.toSuiAddress(), babyJubPublicKey: identity.publicKey.map(String), x25519PublicKey: this.store.getSecret("identity:x25519-public")?.toString("base64"), memoryConfigured: Boolean(this.store.getSecret("live:memory-config")), proofsRequired, rapidSnark: artifacts.rapidSnark, artifacts: artifacts.artifacts, poolObjectVerified: true, tatumServiceVerified: true };
   }
   async balance(): Promise<Record<string, unknown>> {
     const state = await this.index.sync(); let available = 0n, notes = 0;
@@ -405,7 +409,14 @@ export class LiveRuntime {
     const payerSignature = (await this.signer.signPersonalMessage(paymentBindingBytes(unsignedBinding))).signature;
     const paymentPayload = { x402Version: 2, resource, accepted: requirements, payload: { signature: signed.signature, transaction: Buffer.from(signed.transaction).toString("base64") } };
     const paid = await fetch(paymentUrl, { redirect: "error", headers: { "payment-signature": Buffer.from(JSON.stringify(paymentPayload)).toString("base64"), "x-supercuts-binding": Buffer.from(JSON.stringify({ ...unsignedBinding, payerSignature })).toString("base64") }, signal: AbortSignal.timeout(60_000) });
-    const response = Buffer.from(await paid.arrayBuffer()); if (!paid.ok) fail("X402_DELIVERY_FAILED", x402ResourceFailure(paid.status, response));
+    const response = Buffer.from(await paid.arrayBuffer());
+    if (!paid.ok) {
+      const detail = x402ResourceFailure(paid.status, response);
+      // Settlement status is unknown: the facilitator may have broadcast before failing. Resume reuses the journaled signed
+      // transaction for this operation ID, and Sui executes one digest at most once, so retrying cannot pay twice.
+      if (paid.status >= 502 && paid.status <= 504 || /X402_FACILITATOR_UNAVAILABLE/.test(detail)) fail("X402_FACILITATOR_UNAVAILABLE", `${detail}; settlement status is unknown and the payment may already be on chain. Resume with the same operation ID: the same signed transaction is reused and cannot be paid twice`);
+      fail("X402_DELIVERY_FAILED", detail);
+    }
     const settlementHeader = paid.headers.get("payment-response") ?? fail("X402_SETTLEMENT_INVALID", "payment-response header is missing");
     let settlement: Record<string, unknown>; try { settlement = JSON.parse(Buffer.from(settlementHeader, "base64").toString()) as Record<string, unknown>; } catch (error) { return fail("X402_SETTLEMENT_INVALID", "payment-response is not base64 JSON", error); }
     if (settlement.success !== true || settlement.transaction !== signed.digest || settlement.network !== "sui:testnet") fail("X402_SETTLEMENT_INVALID", "resource reported a different or unsuccessful settlement");

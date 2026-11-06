@@ -20,7 +20,8 @@ export async function onboardingDoctor(home: string, sellerConfig?: string): Pro
     if (app.profile.mock) fail("LIVE_PROFILE_REQUIRED", "onboarding doctor requires a live Testnet role home");
     if (app.profile.role === "buyer") {
       const runtime = await app.execute("doctor", {});
-      if (runtime.data.readyForDemo === false) fail("ONBOARDING_RUNTIME_NOT_READY", "live runtime doctor reports missing prerequisites");
+      if ((runtime.data.publicFixes as string[] | undefined)?.length) fail("ONBOARDING_RUNTIME_NOT_READY", `live runtime doctor reports missing prerequisites: ${(runtime.data.publicFixes as string[]).join(" ")}`);
+      const shieldedProofsReady = runtime.data.shieldedProofs === "ready";
       const mandate = loadMandate(home);
       if (mandate.version !== "supercuts.mandate.v2") fail("DEAL_MANDATE_VERSION", "buyer needs a v2 standing mandate");
       if (JSON.stringify([...mandate.allowedCounterparties].sort()) !== JSON.stringify([...app.profile.policy.allowedCounterparties].sort())) fail("POLICY_COUNTERPARTY_MISMATCH", "buyer mandate and payment profile allow different sellers");
@@ -42,13 +43,14 @@ export async function onboardingDoctor(home: string, sellerConfig?: string): Pro
       ]);
       const nativeSuiMist = String(balance.balance), shieldedMist = String(shielded.data.available ?? "0");
       const checks = [
-        { id: "runtime", status: "ready", detail: "Pinned deployment, prover, RPC, and Walrus prerequisites verified." },
+        { id: "runtime", status: "ready", detail: "Pinned deployment, RPC, and Walrus prerequisites verified." },
+        { id: "shielded-proofs", status: shieldedProofsReady ? "ready" : "unavailable", detail: shieldedProofsReady ? "Pinned v2 proving artifacts verified." : String((runtime.data.shieldedFixes as string[] | undefined)?.[0] ?? "Shielded proving artifacts are not installed.") },
         { id: "public-balance", status: BigInt(nativeSuiMist) > 0n ? "ready" : "action_required", detail: BigInt(nativeSuiMist) > 0n ? `${nativeSuiMist} MIST available.` : "Fund only this generated buyer address before a public payment." },
         { id: "shielded-balance", status: BigInt(shieldedMist) > 0n ? "ready" : "action_required", detail: BigInt(shieldedMist) > 0n ? `${shieldedMist} MIST available in the experimental pool.` : "Create a buyer-owned pool deposit before a shielded deal." },
         { id: "seller-approval", status: mandate.allowedCounterparties.length > 0 ? "ready" : "action_required", detail: mandate.allowedCounterparties.length > 0 ? `${mandate.allowedCounterparties.length} seller identity or identities approved.` : "Review and approve a signed seller capability locally." },
         ...(directoryListings !== undefined ? [{ id: "directory", status: directoryListings > 0 ? "ready" : "action_required", detail: `${directoryListings} live directory listing or listings.` }] : []),
       ];
-      return { role: "buyer", healthy: true, readyForPublicPayment: BigInt(nativeSuiMist) > 0n && mandate.allowedCounterparties.length > 0, readyForShieldedPayment: BigInt(shieldedMist) > 0n && mandate.allowedCounterparties.length > 0, runtime: runtime.data, checks, approvedSellers: mandate.allowedCounterparties.length, nativeSuiMist, shieldedMist, funded: BigInt(nativeSuiMist) > 0n, ...(directoryListings !== undefined ? { directoryListings } : {}) };
+      return { role: "buyer", healthy: true, readyForPublicPayment: BigInt(nativeSuiMist) > 0n && mandate.allowedCounterparties.length > 0, readyForShieldedPayment: shieldedProofsReady && BigInt(shieldedMist) > 0n && mandate.allowedCounterparties.length > 0, runtime: runtime.data, checks, approvedSellers: mandate.allowedCounterparties.length, nativeSuiMist, shieldedMist, funded: BigInt(nativeSuiMist) > 0n, ...(directoryListings !== undefined ? { directoryListings } : {}) };
     }
     if (app.profile.role === "seller") {
       if (!sellerConfig) fail("ARGUMENT_REQUIRED", "seller doctor requires --config <owner-only-seller-config.json>");
@@ -68,7 +70,7 @@ export async function onboardingDoctor(home: string, sellerConfig?: string): Pro
         if (!(served.capabilities as unknown[]).some((entry: unknown) => JSON.stringify(entry) === JSON.stringify(registration))) fail("SELLER_CATALOG_INVALID", "seller endpoint does not serve its configured registration");
       }
       const runtime = await app.execute("doctor", { "proofs-required": proofsRequired });
-      if (runtime.data.readyForDemo === false) fail("ONBOARDING_RUNTIME_NOT_READY", "live runtime doctor reports missing prerequisites");
+      if (runtime.data.readyForDemo === false) fail("ONBOARDING_RUNTIME_NOT_READY", `live runtime doctor reports missing prerequisites: ${((runtime.data.fixes as string[] | undefined) ?? []).join(" ")}`);
       return { role: "seller", healthy: true, runtime: runtime.data, capabilities: config.capabilities.length, origin: config.origin };
     }
     return fail("ROLE_FORBIDDEN", "onboarding doctor supports buyer and seller homes");
