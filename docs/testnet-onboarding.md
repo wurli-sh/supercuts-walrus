@@ -6,7 +6,7 @@ directory lists signed public capabilities; it holds no role secrets.
 
 ## Seller
 
-1. Install with `pnpm add @supercuts-walrus/backend@0.1.4` after allowing the `blake-hash` build
+1. Install with `pnpm add @supercuts-walrus/backend@0.1.5` after allowing the `blake-hash` build
    (`printf 'allowBuilds:\n  blake-hash: true\n' > pnpm-workspace.yaml`), or use npm. Create a separate
    live seller home with `supercuts onboard seller --home <seller-home>`. A setup JSON containing only
    `{ "tatumKeyFile": "<owner-only file>" }` is enough; the endpoints default to public Testnet. In a noninteractive environment, add `--config
@@ -14,7 +14,9 @@ directory lists signed public capabilities; it holds no role secrets.
    `tatumKeyFile`, `writeGrpc`, `tatumGrpc`, `walrusPublisher`,
    `walrusAggregator`, and optional `suiKeyFile`, `snarkjs`, `converter`, and
    `rapidsnark`. `deploymentConfig` may be omitted for an x402-only seller;
-   npm includes the pinned experimental Testnet metadata. When `suiKeyFile` is omitted, Supercuts generates a fresh
+   npm includes the pinned experimental Testnet metadata. Sellers offering the
+   `shielded` rail run `supercuts proofs install` once per machine (about 370 MB,
+   every file SHA-256 checked against the pinned index) to recover and exit notes. When `suiKeyFile` is omitted, Supercuts generates a fresh
    seller signer inside the seller home and also writes `seller-codex.toml`.
    The command explicitly reports that the seller does not need faucet funds.
    Keep the setup JSON and credentials at mode `0600` and the home at `0700`.

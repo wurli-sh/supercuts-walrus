@@ -22,12 +22,12 @@ blocked build makes `pnpm exec` refuse to run.
 ```sh
 mkdir my-buyer && cd my-buyer && pnpm init
 printf 'allowBuilds:\n  blake-hash: true\n' > pnpm-workspace.yaml
-pnpm add @supercuts-walrus/sdk@0.1.4 @supercuts-walrus/backend@0.1.4
+pnpm add @supercuts-walrus/sdk@0.1.5 @supercuts-walrus/backend@0.1.5
 ```
 
 Add the backend explicitly. It provides the `supercuts`, `supercuts-embedding-adapter`, and
 `supercuts-memory-worker` commands, and pnpm only links commands from direct dependencies. With npm, run
-`npm install @supercuts-walrus/sdk@0.1.4 @supercuts-walrus/backend@0.1.4` instead; npm needs no build approval.
+`npm install @supercuts-walrus/sdk@0.1.5 @supercuts-walrus/backend@0.1.5` instead; npm needs no build approval.
 
 **2. Store credentials in owner-only files.** Never paste them into an agent.
 
@@ -72,9 +72,22 @@ pnpm exec supercuts policy approve-seller --home ./buyer --capability-id market-
 pnpm exec supercuts onboarding doctor --home ./buyer
 ```
 
-The npm package has everything public x402 payments need. Shielded payments additionally require the
-hash-pinned proving artifacts. Until those are installed, the doctor reports `shielded-proofs` as
-`unavailable`.
+The npm package has everything public x402 payments need. For shielded (private) payments, install
+the hash-pinned v2 proving keys once per machine (about 370 MB):
+
+```sh
+pnpm exec supercuts proofs install
+pnpm exec supercuts proofs status
+```
+
+The command downloads every file from the pinned `proofs-v2` release, checks each SHA-256 against the
+index shipped in the package, and only then installs them in `~/.supercuts/proofs/v2` (override with
+`SUPERCUTS_PROOFS_DIR`). Until then the doctor reports `shielded-proofs` as `unavailable`. Proofs use
+the bundled SnarkJS; set `SUPERCUTS_RAPIDSNARK` to a RapidSnark binary for faster proving.
+
+When the owner stores a privacy rule for a seller (`supercuts policy add --home ./buyer --capability-id <id>`), that Walrus Memory
+outranks an agent's `requestedRail: "x402"`: the deal settles through the shielded pool instead, and
+the evidence shows `memoryInfluence.changedRail` with reason `MEMORY_PRIVACY_OVERRODE_RAIL`.
 
 **5. Run a deal.**
 

@@ -53,8 +53,9 @@ The pinned test-only pool has a funded deposit, private transfer, seller note re
 
 ```sh
 printf 'allowBuilds:\n  blake-hash: true\n' > pnpm-workspace.yaml   # pnpm 10+ only
-pnpm add @supercuts-walrus/sdk@0.1.4 @supercuts-walrus/backend@0.1.4
+pnpm add @supercuts-walrus/sdk@0.1.5 @supercuts-walrus/backend@0.1.5
 pnpm exec supercuts onboard buyer --home ./buyer --config buyer-setup.json
+pnpm exec supercuts proofs install   # once per machine, ~370 MB, only for shielded payments
 ```
 
 Buyer setup needs only owner-only credential files, a budget, and an expiry. Endpoints default to public Testnet, Walrus, and the shared seller directory. Follow the [SDK quick start](backend/packages/sdk/README.md#quick-start-a-new-buyer-on-testnet) for the buyer's first deal and the [onboarding guide](docs/testnet-onboarding.md) for sellers.

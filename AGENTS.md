@@ -133,6 +133,9 @@ logs, browser state, prompts, or the Walrus relayer.
 4. Pay the public seller resource through x402 and show one delivered artifact.
 5. Store ten meaningful encrypted memories, or explicitly label reuse of ten completed live writes; recall the privacy rule.
 6. Show that the privacy rule selects shielded settlement instead of x402.
+   With a seller offering both rails, the agent requests `requestedRail: "x402"`
+   and the owner privacy memory reroutes the deal to shielded: the evidence shows
+   `memoryInfluence.changedRail: true` and `MEMORY_PRIVACY_OVERRODE_RAIL`.
    Show the deal evidence `memoryInfluence` and `supercuts memory insights`:
    verified outcomes rank sellers, and a seller with verified faults is
    demoted even when cheaper. Only label a seller change when
