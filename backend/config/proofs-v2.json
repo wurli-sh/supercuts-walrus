@@ -1,0 +1,122 @@
+{
+  "version": "supercuts.proofs.v2",
+  "githubRepo": "wurli-sh/supercuts-walrus",
+  "tag": "proofs-v2",
+  "baseUrl": "https://github.com/wurli-sh/supercuts-walrus/releases/download/proofs-v2",
+  "files": [
+    {
+      "path": "proving-manifest.json",
+      "asset": "proving-manifest.json",
+      "size": 1743,
+      "sha256": "fca6f28a579057a2b8bc4eb9068b99bf377a4d930d60f5462658a3bb184ab7ff"
+    },
+    {
+      "path": "deposit_v2_js/generate_witness.js",
+      "asset": "deposit_v2_js--generate_witness.js",
+      "size": 697,
+      "sha256": "4995a2e6b01432f76182abec6a831fdaf7f840384035072002ccaa43101b14d4"
+    },
+    {
+      "path": "deposit_v2_js/witness_calculator.js",
+      "asset": "deposit_v2_js--witness_calculator.js",
+      "size": 10356,
+      "sha256": "cc2d37b2cff2a589dd86f8636f1a1dc9fe4a854550b021aa0cea2e235d14e942"
+    },
+    {
+      "path": "deposit_v2_js/deposit_v2.wasm",
+      "asset": "deposit_v2_js--deposit_v2.wasm",
+      "size": 4948782,
+      "sha256": "45f887ebab9b395932934c644a3018b1c6447d1dbda508bd04026fa1d3b7fdc4"
+    },
+    {
+      "path": "proofs/deposit_v2/deposit_v2.zkey",
+      "asset": "proofs--deposit_v2--deposit_v2.zkey",
+      "size": 84649008,
+      "sha256": "d398776a54628c390e8bf822007e47ed8fac00e92e8ea95bb17d20db517998dc"
+    },
+    {
+      "path": "proofs/deposit_v2/verifying-key.bin",
+      "asset": "proofs--deposit_v2--verifying-key.bin",
+      "size": 328,
+      "sha256": "838404ff0ae3a9fc82da0856b68a11428cf3ffef335b4c6539fa1860d8e1ba26"
+    },
+    {
+      "path": "proofs/deposit_v2/verification-key.json",
+      "asset": "proofs--deposit_v2--verification-key.json",
+      "size": 3108,
+      "sha256": "cb4338c9a155908ed241406726f1f7b7e284fb2c37bbc8062cb996d893748379"
+    },
+    {
+      "path": "transfer_v2_js/generate_witness.js",
+      "asset": "transfer_v2_js--generate_witness.js",
+      "size": 697,
+      "sha256": "4995a2e6b01432f76182abec6a831fdaf7f840384035072002ccaa43101b14d4"
+    },
+    {
+      "path": "transfer_v2_js/witness_calculator.js",
+      "asset": "transfer_v2_js--witness_calculator.js",
+      "size": 10356,
+      "sha256": "cc2d37b2cff2a589dd86f8636f1a1dc9fe4a854550b021aa0cea2e235d14e942"
+    },
+    {
+      "path": "transfer_v2_js/transfer_v2.wasm",
+      "asset": "transfer_v2_js--transfer_v2.wasm",
+      "size": 8272696,
+      "sha256": "aaf3a7d9c29dab52211682e30934c7cdf911eb6f51a2ae670f7109e04950088e"
+    },
+    {
+      "path": "proofs/transfer_v2/transfer_v2.zkey",
+      "asset": "proofs--transfer_v2--transfer_v2.zkey",
+      "size": 158316569,
+      "sha256": "6e7bcac98b8d2a78fd1811e2caadd83d0d6a301951f8cf27ac55a67006b001c2"
+    },
+    {
+      "path": "proofs/transfer_v2/verifying-key.bin",
+      "asset": "proofs--transfer_v2--verifying-key.bin",
+      "size": 328,
+      "sha256": "8a6896f3f330769aa69e0dc1251a19fb69c4d6264b5729d0104df8d262e573ba"
+    },
+    {
+      "path": "proofs/transfer_v2/verification-key.json",
+      "asset": "proofs--transfer_v2--verification-key.json",
+      "size": 3111,
+      "sha256": "431c8320b41a1b853c09b9bf1be8408621ce93972334d0d8c98e35f116072d67"
+    },
+    {
+      "path": "withdraw_v2_js/generate_witness.js",
+      "asset": "withdraw_v2_js--generate_witness.js",
+      "size": 697,
+      "sha256": "4995a2e6b01432f76182abec6a831fdaf7f840384035072002ccaa43101b14d4"
+    },
+    {
+      "path": "withdraw_v2_js/witness_calculator.js",
+      "asset": "withdraw_v2_js--witness_calculator.js",
+      "size": 10356,
+      "sha256": "cc2d37b2cff2a589dd86f8636f1a1dc9fe4a854550b021aa0cea2e235d14e942"
+    },
+    {
+      "path": "withdraw_v2_js/withdraw_v2.wasm",
+      "asset": "withdraw_v2_js--withdraw_v2.wasm",
+      "size": 5748363,
+      "sha256": "1a57b0cf692012838d7d4d00f397b71907fc386d00fcb756e7b166374129033c"
+    },
+    {
+      "path": "proofs/withdraw_v2/withdraw_v2.zkey",
+      "asset": "proofs--withdraw_v2--withdraw_v2.zkey",
+      "size": 104313713,
+      "sha256": "fd303dd0dd53b9b752dac0de546dabdd03198a7a4defde5e8d6018bccd419c56"
+    },
+    {
+      "path": "proofs/withdraw_v2/verifying-key.bin",
+      "asset": "proofs--withdraw_v2--verifying-key.bin",
+      "size": 328,
+      "sha256": "445c1982bea5e465fb0f5665023bb279637d820a9425f16a4c2f2ee7460e7e4a"
+    },
+    {
+      "path": "proofs/withdraw_v2/verification-key.json",
+      "asset": "proofs--withdraw_v2--verification-key.json",
+      "size": 3107,
+      "sha256": "f5cdca32c58e2b0c66891f4a5d774468d276f0579efe3faef50765409a625a75"
+    }
+  ]
+}

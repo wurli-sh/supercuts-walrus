@@ -81,7 +81,7 @@ function setupSellerConfig(home: string, config: SellerSetup): Record<string, un
     fundingRequired: false,
     warning: "Do not faucet-fund the seller. Only a generated buyer address is funded for live purchases.",
     ...createSellerSession(home),
-    nextStep: `Run supercuts seller scaffold --home ${JSON.stringify(home)} --output <offer-dir> with the capability, origin, price, rails, and expiry options. Review the handler, then run the printed registration and service commands.`,
+    nextStep: `Run supercuts seller scaffold --home ${JSON.stringify(home)} --output <offer-dir> with the capability, origin, price, rails, and expiry options. Review the handler, then run the printed registration and service commands. Offers with the shielded rail also need the proving keys once per machine to recover and exit notes: supercuts proofs install.`,
   };
 }
 

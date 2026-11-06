@@ -12,6 +12,7 @@ import { Groth16Prover, type ProverConfig } from "./prover.js";
 import { buildDeposit, buildPrivateTransfer, buildWithdraw, writeClient } from "./sui.js";
 import { V2ExitQueue, type QueuedExit } from "./v2-exits.js";
 import { TatumLedger } from "./tatum.js";
+import { resolveProverPaths } from "./proofs-install.js";
 import type { RoleStore } from "./store.js";
 import { paymentBindingBytes, requirementsHash, type ExactRequirements } from "./x402.js";
 
@@ -68,7 +69,7 @@ export class LiveRuntime {
   private constructor(readonly profile: LiveRuntimeProfile, readonly store: RoleStore, readonly tatum: TatumLedger, readonly signer: Ed25519Keypair, engine: ProtocolEngine) {
     this.engine = engine; this.client = writeClient(profile.live.writeGrpcEndpoint);
     this.index = new LivePoolIndex(store, this.client, engine, profile.packageId, profile.poolId, BigInt(profile.live.deploymentCheckpoint), profile.verifierVersion === 2 ? "pool_v2" : "pool");
-    this.prover = new Groth16Prover({ artifactRoot: profile.live.artifactRoot, snarkjsPath: profile.live.snarkjsPath, converterPath: profile.live.converterPath, ...(profile.live.rapidsnarkPath ? { rapidsnarkPath: profile.live.rapidsnarkPath } : {}), ...(profile.verifierVersion === 2 ? { version: 2 as const } : {}), expected: profile.live.artifacts });
+    this.prover = new Groth16Prover({ ...resolveProverPaths(profile.live, profile.verifierVersion === 2 ? "transfer_v2" : "transfer"), ...(profile.verifierVersion === 2 ? { version: 2 as const } : {}), expected: profile.live.artifacts });
     store.db.exec(`CREATE TABLE IF NOT EXISTS live_signed_transactions (
       operation_id TEXT PRIMARY KEY, intent_hash TEXT NOT NULL, transaction_bytes BLOB NOT NULL,
       signature TEXT NOT NULL, digest TEXT NOT NULL UNIQUE, status TEXT NOT NULL, updated_at INTEGER NOT NULL
@@ -106,8 +107,8 @@ export class LiveRuntime {
     const babySeed = this.store.getSecret("identity:babyjub-seed") ?? fail("IDENTITY_MISSING", "BabyJub identity is missing");
     const identity = this.engine.identity(babySeed);
     const fixes: string[] = [], shieldedFixes: string[] = [];
-    if (shieldedProofs === "unavailable") shieldedFixes.push(`Shielded payments are unavailable (${shieldedProofsReason}): install the hash-pinned v2 proving artifacts, SnarkJS, and the converter. Public x402 payments do not need them.`);
-    else if (!artifacts.rapidSnark) shieldedFixes.push("Set an executable RapidSnark path in the role profile for v2 proofs.");
+    if (shieldedProofs === "unavailable") shieldedFixes.push(`Shielded payments are unavailable (${shieldedProofsReason}): run \`supercuts proofs install\` to download and verify the hash-pinned v2 proving keys (~370 MB). Public x402 payments do not need them.`);
+    const warnings = shieldedProofs === "ready" && !artifacts.rapidSnark ? ["RapidSnark is not configured; shielded proofs use SnarkJS, which is slower. Set SUPERCUTS_RAPIDSNARK to a RapidSnark prover binary to speed them up."] : [];
     if (!this.profile.live.walrusPublisherUrl) fixes.push("Configure the Walrus publisher URL for capability and transcript writes.");
     if (!this.profile.live.walrusAggregatorUrl) fixes.push("Configure the Walrus aggregator URL for capability and transcript reads.");
     for (const [name, endpoint] of [["publisher", this.profile.live.walrusPublisherUrl], ["aggregator", this.profile.live.walrusAggregatorUrl]] as const) {
@@ -115,7 +116,7 @@ export class LiveRuntime {
       try { const response = await fetch(endpoint, { method: "HEAD", signal: AbortSignal.timeout(8_000) }); if (response.status >= 500) fixes.push(`Walrus ${name} returned HTTP ${response.status}; check the configured service.`); }
       catch { fixes.push(`Walrus ${name} is unreachable; check the configured URL and network access.`); }
     }
-    return { role: this.profile.role, network: "testnet", packageId: this.profile.packageId, poolId: this.profile.poolId, asset: this.profile.coinType, verifierVersion: this.profile.verifierVersion, keyPermissions: "owner-only", rpc: this.profile.live.writeGrpcEndpoint, healthy: true, readyForDemo: fixes.length === 0 && (!proofsRequired || shieldedFixes.length === 0), fixes: [...fixes, ...(proofsRequired ? shieldedFixes : [])], publicFixes: fixes, shieldedProofs, shieldedFixes, readyForPublicRail: fixes.length === 0, runtime: "testnet-live", signer: this.signer.toSuiAddress(), babyJubPublicKey: identity.publicKey.map(String), x25519PublicKey: this.store.getSecret("identity:x25519-public")?.toString("base64"), memoryConfigured: Boolean(this.store.getSecret("live:memory-config")), proofsRequired, rapidSnark: artifacts.rapidSnark, artifacts: artifacts.artifacts, poolObjectVerified: true, tatumServiceVerified: true };
+    return { role: this.profile.role, network: "testnet", packageId: this.profile.packageId, poolId: this.profile.poolId, asset: this.profile.coinType, verifierVersion: this.profile.verifierVersion, keyPermissions: "owner-only", rpc: this.profile.live.writeGrpcEndpoint, healthy: true, readyForDemo: fixes.length === 0 && (!proofsRequired || shieldedFixes.length === 0), fixes: [...fixes, ...(proofsRequired ? shieldedFixes : [])], publicFixes: fixes, shieldedProofs, shieldedFixes, warnings, readyForPublicRail: fixes.length === 0, runtime: "testnet-live", signer: this.signer.toSuiAddress(), babyJubPublicKey: identity.publicKey.map(String), x25519PublicKey: this.store.getSecret("identity:x25519-public")?.toString("base64"), memoryConfigured: Boolean(this.store.getSecret("live:memory-config")), proofsRequired, rapidSnark: artifacts.rapidSnark, artifacts: artifacts.artifacts, poolObjectVerified: true, tatumServiceVerified: true };
   }
   async balance(): Promise<Record<string, unknown>> {
     const state = await this.index.sync(); let available = 0n, notes = 0;

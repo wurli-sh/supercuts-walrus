@@ -109,6 +109,7 @@ function setupBuyerConfig(home: string, config: BuyerSetup): Record<string, unkn
     `Fund only this buyer with Testnet SUI: supercuts funding execute --home ${home} --public-payment <MIST> --shielded-payment 0 --operation-id fund-1 --request-faucet --confirm (or use https://faucet.sui.io for ${address})`,
     ...(config.allowedCounterparties?.length ? [] : [`Review the directory, then approve a seller: supercuts policy approve-seller --home ${home} --capability-id <id>`]),
     ...(config.memoryConfigFile ? [`Keep the Walrus Memory embedding adapter running (supercuts-embedding-adapter). An MCP agent flushes outcome memories itself; SDK-only hosts also run: supercuts-memory-worker ${home}`] : []),
+    "For shielded (private) payments, install the hash-pinned proving keys once per machine (~370 MB): supercuts proofs install",
     `Check readiness: supercuts onboarding doctor --home ${home}`,
     `Connect an agent with ${session.mcpConfig}, or call BuyerClient.executeDeal from @supercuts-walrus/sdk.`,
   ] };
