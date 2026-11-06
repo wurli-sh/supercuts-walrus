@@ -6,8 +6,10 @@ directory lists signed public capabilities; it holds no role secrets.
 
 ## Seller
 
-1. Create a separate live seller home with `supercuts onboard seller --home
-   <seller-home>`. In a noninteractive environment, add `--config
+1. Install with `pnpm add @supercuts-walrus/backend@0.1.4` after allowing the `blake-hash` build
+   (`printf 'allowBuilds:\n  blake-hash: true\n' > pnpm-workspace.yaml`), or use npm. Create a separate
+   live seller home with `supercuts onboard seller --home <seller-home>`. A setup JSON containing only
+   `{ "tatumKeyFile": "<owner-only file>" }` is enough; the endpoints default to public Testnet. In a noninteractive environment, add `--config
    <owner-only-setup.json>`. The config keys are `deploymentConfig`,
    `tatumKeyFile`, `writeGrpc`, `tatumGrpc`, `walrusPublisher`,
    `walrusAggregator`, and optional `suiKeyFile`, `snarkjs`, `converter`, and
@@ -39,7 +41,19 @@ directory lists signed public capabilities; it holds no role secrets.
    <seller-home> <service.json>` behind HTTPS. The public origin must serve
    the exact registration at `/v2/catalog`; `/health` provides a non-secret
    readiness check. Generated x402 configs reference `X402_FACILITATOR_URL`
-   and `FACILITATOR_SHARED_KEY` instead of embedding secrets. The service holds an exclusive role-home lease. Stop it
+   and `FACILITATOR_SHARED_KEY` instead of embedding secrets. A self-hosted seller can run its own
+   facilitator from the package. It needs no funds and only validates and relays the buyer-signed transfer:
+
+   ```sh
+   umask 077; openssl rand -hex 32 > credentials/facilitator.key
+   export FACILITATOR_SHARED_KEY="$(cat credentials/facilitator.key)"
+   PORT=8894 pnpm exec supercuts-facilitator &
+   X402_FACILITATOR_URL=http://127.0.0.1:8894 pnpm exec supercuts-seller-live <seller-home> <service.json>
+   ```
+
+   The scaffolded `inputSchema` uses a `task` field. Change it to match the inputs buyers send for your
+   capability class; for example, the directory's `sui.market-brief` sellers take `query`. Buyers only route
+   to sellers whose signed schema accepts their input. The service holds an exclusive role-home lease. Stop it
    before running a seller MCP worker or another long-running owner process on
    that home.
 5. Run `supercuts onboarding doctor --home <seller-home> --config
