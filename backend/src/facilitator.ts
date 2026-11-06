@@ -3,6 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { Transaction } from "@mysten/sui/transactions";
 import { isValidTransactionSignature } from "@mysten/sui/verify";
+import { isMainModule } from "./main-module.js";
 
 const NETWORK = "sui:testnet" as const;
 const SUI = "0x2::sui::SUI";
@@ -130,7 +131,7 @@ export class SuiTestnetFacilitator {
   private send(response: ServerResponse, status: number, body: Json): void { const encoded = Buffer.from(JSON.stringify(body)); response.writeHead(status, { "content-type": "application/json", "content-length": String(encoded.length) }); response.end(encoded); }
 }
 
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+if (isMainModule(import.meta.url)) {
   const key = process.env.FACILITATOR_SHARED_KEY ?? "";
   const grpc = process.env.SUI_TESTNET_GRPC ?? "https://fullnode.testnet.sui.io:443";
   const port = Number(process.env.PORT ?? "3000");

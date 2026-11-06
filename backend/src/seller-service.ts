@@ -17,6 +17,7 @@ import { captureSellerHome, decryptSellerSnapshot, encryptSellerSnapshot, restor
 import { X402ResourceService } from "./x402-resource-service.js";
 import { LiveSellerTransport } from "./live-seller-transport.js";
 import { registerDirectoryCapability } from "./seller-directory.js";
+import { isMainModule } from "./main-module.js";
 
 interface CatalogRow { seller_id: string; capability_id: string; manifest: CapabilityManifest; blob_id: string; signature: string; transport_public_key: string; preview: Record<string, unknown>; }
 interface Quote { requestId: string; operationId: string; capabilityId: string; amount: string; artifactKey: string; runId: string; }
@@ -306,7 +307,7 @@ export class SellerService {
   close(): void { for (const slot of this.#slots.values()) slot.app.close(); rmSync(this.#root, { recursive: true, force: true }); }
 }
 
-if (process.argv[1] && import.meta.url.endsWith(process.argv[1])) {
+if (isMainModule(import.meta.url)) {
   const required = (key: string) => process.env[key] ?? fail("SELLER_CONFIG_MISSING", `${key} is required`);
   const port = Number(process.env.PORT ?? "3000");
   const origin = required("SELLER_ORIGIN");
