@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fail } from "./errors.js";
+import { convertGroth16 } from "./groth16-convert.js";
 
 const run = promisify(execFile);
 export type CircuitName = "deposit" | "transfer" | "withdraw";
@@ -15,6 +16,9 @@ export interface ProverConfig {
 export interface ProofResult { proof: Buffer; publicInputs: Buffer; engine: "rapidsnark" | "snarkjs"; proveMs: number; }
 const sha256 = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
 function executable(path: string): boolean { try { accessSync(path, constants.X_OK); return true; } catch { return false; } }
+/** SnarkJS may be a native bin or the npm package's `cli.cjs`, which runs under the current Node binary. */
+const isScript = (path: string) => /\.(?:c|m)?js$/.test(path);
+const toolReady = (path: string) => isScript(path) ? existsSync(path) : executable(path);
 
 export class Groth16Prover {
   constructor(private readonly config: ProverConfig) {}
@@ -28,8 +32,12 @@ export class Groth16Prover {
       if (sha256(zkey) !== expected.zkeySha256 || sha256(vk) !== expected.verifyingKeySha256) fail("ARTIFACT_HASH_MISMATCH", `${name} artifact hash differs from deployment configuration`);
       artifacts[name] = expected.zkeySha256;
     }
-    if (!executable(this.config.snarkjsPath) || !executable(this.config.converterPath)) fail("PROVER_TOOL_MISSING", "SnarkJS or the Arkworks converter is not executable");
+    if (!toolReady(this.config.snarkjsPath) || this.config.converterPath !== "builtin" && !executable(this.config.converterPath)) fail("PROVER_TOOL_MISSING", "SnarkJS or the Arkworks converter is not executable");
     return { rapidSnark: Boolean(this.config.rapidsnarkPath && executable(this.config.rapidsnarkPath)), artifacts };
+  }
+  private snarkjs(args: string[], timeout: number) {
+    const [command, prefix] = isScript(this.config.snarkjsPath) ? [process.execPath, [this.config.snarkjsPath]] : [this.config.snarkjsPath, []];
+    return run(command, [...prefix, ...args], { timeout, maxBuffer: 4 * 1024 * 1024 });
   }
   async prove(name: CircuitName, input: Record<string, unknown>): Promise<ProofResult> {
     this.doctor(); const directory = mkdtempSync(join(tmpdir(), `supercuts-${name}-`));
@@ -42,10 +50,11 @@ export class Groth16Prover {
       await run(process.execPath, [generator, wasm, inputPath, witness], { timeout: 10 * 60_000, maxBuffer: 4 * 1024 * 1024 });
       const useRapid = Boolean(this.config.rapidsnarkPath && executable(this.config.rapidsnarkPath)), started = Date.now();
       if (useRapid) await run(this.config.rapidsnarkPath!, [zkey, witness, proofJson, publicJson], { timeout: 10 * 60_000, maxBuffer: 4 * 1024 * 1024 });
-      else await run(this.config.snarkjsPath, ["groth16", "prove", zkey, witness, proofJson, publicJson], { timeout: 20 * 60_000, maxBuffer: 4 * 1024 * 1024 });
+      else await this.snarkjs(["groth16", "prove", zkey, witness, proofJson, publicJson], 20 * 60_000);
       const proveMs = Date.now() - started;
-      await run(this.config.snarkjsPath, ["groth16", "verify", verificationKey, publicJson, proofJson], { timeout: 2 * 60_000, maxBuffer: 4 * 1024 * 1024 });
-      await run(this.config.converterPath, [name, verificationKey, proofJson, publicJson, converted], { timeout: 2 * 60_000, maxBuffer: 4 * 1024 * 1024 });
+      await this.snarkjs(["groth16", "verify", verificationKey, publicJson, proofJson], 2 * 60_000);
+      if (this.config.converterPath === "builtin") convertGroth16(verificationKey, proofJson, publicJson, converted);
+      else await run(this.config.converterPath, [name, verificationKey, proofJson, publicJson, converted], { timeout: 2 * 60_000, maxBuffer: 4 * 1024 * 1024 });
       const preparedVk = join(converted, "verifying-key.bin"); if (sha256(preparedVk) !== this.config.expected[name].verifyingKeySha256) fail("ARTIFACT_HASH_MISMATCH", "converter produced an unexpected verifying key");
       const proof = readFileSync(join(converted, "proof.bin")), publicInputs = readFileSync(join(converted, "public-inputs.bin")); if (!proof.length || publicInputs.length !== 64) fail("PROOF_INVALID", "converted proof or public inputs have an invalid size");
       return { proof, publicInputs, engine: useRapid ? "rapidsnark" : "snarkjs", proveMs };
