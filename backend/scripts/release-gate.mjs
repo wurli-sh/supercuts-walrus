@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,7 +29,7 @@ try {
   const sdkTar = join(root, tarballs.find((name) => name.includes("sdk")) ?? "");
   assert.ok(backendTar.endsWith(".tgz") && sdkTar.endsWith(".tgz") && backendTar !== sdkTar);
   for (const [tarball, required, allowed] of [
-    [backendTar, "package/dist/seam.js", /^package\/(dist\/|config\/(?:phase1\.testnet|proving-manifest)\.json$|README\.md$|LICENSE$|package\.json$)/],
+    [backendTar, "package/dist/seam.js", /^package\/(dist\/|config\/(?:phase1\.testnet|proving-manifest|proofs-v2)\.json$|README\.md$|LICENSE$|package\.json$)/],
     [sdkTar, "package/dist/index.js", /^package\/(dist\/|README\.md$|LICENSE$|package\.json$)/],
   ]) {
     const files = run("tar", ["-tzf", tarball], root).trim().split("\n");
@@ -39,6 +39,7 @@ try {
     if (tarball === backendTar) {
       assert.ok(files.includes("package/config/phase1.testnet.json"), `${tarball} lacks bundled Testnet deployment metadata`);
       assert.ok(files.includes("package/config/proving-manifest.json"), `${tarball} lacks bundled proving metadata`);
+      assert.ok(files.includes("package/config/proofs-v2.json"), `${tarball} lacks the pinned proving-key index`);
     }
   }
   const packedSdk = JSON.parse(run("tar", ["-xOzf", sdkTar, "package/package.json"], root));
@@ -55,6 +56,9 @@ try {
   assert.equal(installed.version, packedSdk.version);
   const bin = join(project, "node_modules/.bin");
   assert.match(run(join(bin, "supercuts"), ["help"], project), /setup buyer/);
+  const proofs = JSON.parse(run(join(bin, "supercuts"), ["proofs", "status", "--dir", join(root, "no-proofs")], project));
+  assert.equal(proofs.ok, true); assert.equal(proofs.data.installed, false); assert.equal(proofs.data.missing.length, 19);
+  assert.ok(existsSync(join(project, "node_modules/snarkjs/build/cli.cjs")), "snarkjs ships with the backend for shielded proving");
   assert.match(run(join(bin, "supercuts-demo"), ["--help"], project), /funding\[0\]\.address/);
   const noProfile = await rpc(join(bin, "supercuts-mcp"), { jsonrpc: "2.0", id: 1, method: "tools/list" }, project, { SUPERCUTS_HOME: join(root, "unconfigured") });
   assert.deepEqual(noProfile.result.tools.map((tool) => tool.name), ["setup.status", "setup.refresh"]);
