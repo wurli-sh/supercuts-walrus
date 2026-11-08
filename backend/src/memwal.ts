@@ -47,6 +47,7 @@ export function openMemoryText(text: string): { memory: unknown; signedBy?: stri
   } catch { return { memory: value.memory }; }
 }
 import { RoleStore } from "./store.js";
+import { fail } from "./errors.js";
 
 export interface ManualMemoryConfig {
   key: string;
@@ -82,8 +83,16 @@ export function withMemoryDefaults(raw: Partial<ManualMemoryConfig>, role: strin
 }
 
 /** Client-managed memory facade; plaintext never crosses the relayer boundary. */
+/** Node reports a refused or unresolvable endpoint as a bare `TypeError: fetch failed`; say which endpoint and how to fix it. */
+function unreachable(error: unknown, config: Pick<ManualMemoryConfig, "embeddingApiBase" | "serverUrl">): never {
+  if (error instanceof TypeError && error.message === "fetch failed") {
+    return fail("MEMORY_ENDPOINT_UNREACHABLE", `Walrus Memory could not reach the embedding endpoint ${config.embeddingApiBase} or the relayer ${config.serverUrl}; start supercuts-embedding-adapter (with EMBEDDING_UPSTREAM_BASE_URL and EMBEDDING_UPSTREAM_MODEL set) and retry with the same operation ID`, error);
+  }
+  throw error;
+}
 export class ManualMemory {
   private readonly client: MemWalManual;
+  private readonly endpoints: Pick<ManualMemoryConfig, "embeddingApiBase" | "serverUrl">;
   private readonly signingKey: string | undefined;
   /** Address whose signature marks a recalled memory as this owner's own trusted record. */
   readonly signerAddress: string | undefined;
@@ -92,17 +101,18 @@ export class ManualMemory {
     let embedding: URL; try { embedding = new URL(config.embeddingApiBase); } catch (error) { throw new TypeError(`embeddingApiBase is invalid: ${error instanceof Error ? error.message : "invalid URL"}`); }
     if (!["localhost", "127.0.0.1", "::1"].includes(embedding.hostname)) throw new TypeError("memory embeddings must use a loopback trusted endpoint");
     this.client = MemWalManual.create({ ...config, suiNetwork: "mainnet", preflightTimeoutMs: 15_000 });
+    this.endpoints = { embeddingApiBase: config.embeddingApiBase, serverUrl: config.serverUrl };
   }
   async remember(fact: MemoryFact | SettlementMemoryV1): Promise<string> {
     if ((fact as { version?: string }).version === SETTLEMENT_MEMORY_VERSION) validateSettlementMemory(fact); else validateMemoryFact(fact as MemoryFact);
     const trusted = (fact as SettlementMemoryV1).version === SETTLEMENT_MEMORY_VERSION && ["owner_policy", "verified_outcome"].includes((fact as SettlementMemoryV1).provenance);
     const text = trusted && this.signingKey ? sealMemoryText(fact as SettlementMemoryV1, this.signingKey) : JSON.stringify(fact);
-    const result = await this.client.rememberManual(text);
+    const result = await this.client.rememberManual(text).catch((error: unknown) => unreachable(error, this.endpoints));
     this.store.putSecret(`memory:${result.blob_id}`, Buffer.from(text));
     return result.blob_id;
   }
   async recall(query: string, limit = 5): Promise<Array<{ blobId: string; text: string; distance: number }>> {
-    const result = await this.client.recallManual(query, { limit });
+    const result = await this.client.recallManual(query, { limit }).catch((error: unknown) => unreachable(error, this.endpoints));
     return result.results.map((item) => ({ blobId: item.blob_id, text: item.text, distance: item.distance }));
   }
   async listMetadata(config: ManualMemoryConfig): Promise<{ indexed: number; deleted: number; cursor: string | null }> {
