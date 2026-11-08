@@ -63,3 +63,20 @@ test("public-only buyer setup does not require Walrus Memory credentials", () =>
   try { assert.equal(app.store.getSecret("live:memory-config"), undefined); }
   finally { app.close(); }
 });
+
+test("Codex MCP config survives package upgrades and ships a codex mcp add command", async () => {
+  const { stableMcpScript, codexAddCommand } = await import("../src/buyer-setup.js");
+  const { mkdirSync, symlinkSync, writeFileSync: write } = await import("node:fs");
+  const root = mkdtempSync(join(tmpdir(), "supercuts-mcp-path-"));
+  const store = join(root, "node_modules", ".pnpm", "@supercuts-walrus+backend@9.9.9_x", "node_modules", "@supercuts-walrus", "backend");
+  mkdirSync(join(store, "dist"), { recursive: true });
+  write(join(store, "dist", "mcp-bootstrap.js"), "");
+  mkdirSync(join(root, "node_modules", "@supercuts-walrus"), { recursive: true });
+  symlinkSync(store, join(root, "node_modules", "@supercuts-walrus", "backend"));
+  const stable = stableMcpScript(join(store, "dist", "mcp-bootstrap.js"), root);
+  assert.equal(stable, join(root, "node_modules", "@supercuts-walrus", "backend", "dist", "mcp-bootstrap.js"));
+  assert.doesNotMatch(stable, /\.pnpm/);
+  assert.equal(stableMcpScript("/elsewhere/dist/mcp-bootstrap.js", root), "/elsewhere/dist/mcp-bootstrap.js");
+  const command = codexAddCommand("/usr/bin/node", stable, { SUPERCUTS_HOME: "/h/it's buyer", SUPERCUTS_RUN_ID: "r1" });
+  assert.equal(command, `codex mcp add supercuts-buyer --env 'SUPERCUTS_HOME=/h/it'\\''s buyer' --env 'SUPERCUTS_RUN_ID=r1' -- '/usr/bin/node' '${stable}'`);
+});

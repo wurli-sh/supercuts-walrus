@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
@@ -111,16 +111,35 @@ function setupBuyerConfig(home: string, config: BuyerSetup): Record<string, unkn
     ...(config.memoryConfigFile ? [`Keep the Walrus Memory embedding adapter running (supercuts-embedding-adapter). An MCP agent flushes outcome memories itself; SDK-only hosts also run: supercuts-memory-worker ${home}`] : []),
     "For shielded (private) payments, install the hash-pinned proving keys once per machine (~370 MB): supercuts proofs install",
     `Check readiness: supercuts onboarding doctor --home ${home}`,
-    `Connect an agent with ${session.mcpConfig}, or call BuyerClient.executeDeal from @supercuts-walrus/sdk.`,
+    `Connect Codex: ${session.codexCommand} (or merge ${session.mcpConfig}); other agents can call BuyerClient.executeDeal from @supercuts-walrus/sdk.`,
   ] };
+}
+/**
+ * pnpm resolves this module to its versioned store path (`.pnpm/<pkg>@<version>_<peers>/...`),
+ * which disappears on the next upgrade. Prefer the project's `node_modules/@supercuts-walrus/backend`
+ * link when it points at the same file, so the Codex config keeps working after `pnpm up`.
+ */
+export function stableMcpScript(realScript = join(dirname(fileURLToPath(import.meta.url)), "mcp-bootstrap.js"), cwd = process.cwd()): string {
+  const linked = join(cwd, "node_modules", "@supercuts-walrus", "backend", "dist", "mcp-bootstrap.js");
+  try { if (realpathSync(linked) === realpathSync(realScript)) return linked; } catch { /* not installed in cwd */ }
+  return realScript;
+}
+const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
+/** One command that registers the buyer MCP server in Codex, instead of hand-merging TOML. */
+export function codexAddCommand(node: string, script: string, env: Record<string, string>): string {
+  const flags = Object.entries(env).map(([key, value]) => `--env ${shellQuote(`${key}=${value}`)}`).join(" ");
+  return `codex mcp add supercuts-buyer ${flags} -- ${shellQuote(node)} ${shellQuote(script)}`;
 }
 export function createBuyerSession(home: string): Record<string, unknown> {
   if (!existsSync(join(home, "profile.json"))) fail("SETUP_REQUIRED", "initialize the buyer before creating a Codex session");
-  const runId = randomUUID(), eventPath = join(home, `events-${runId}.jsonl`), mcpScript = join(dirname(fileURLToPath(import.meta.url)), "mcp-bootstrap.js");
-  const mcp = `[mcp_servers.supercuts-buyer]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify([mcpScript])}\n[mcp_servers.supercuts-buyer.env]\nSUPERCUTS_HOME = ${JSON.stringify(home)}\nSUPERCUTS_RUN_ID = ${JSON.stringify(runId)}\nSUPERCUTS_EVENT_PATH = ${JSON.stringify(eventPath)}\n`;
+  const runId = randomUUID(), eventPath = join(home, `events-${runId}.jsonl`), mcpScript = stableMcpScript();
+  const env: Record<string, string> = { SUPERCUTS_HOME: home, SUPERCUTS_RUN_ID: runId, SUPERCUTS_EVENT_PATH: eventPath };
+  // A non-default proofs location chosen at setup must follow the MCP server, which Codex starts elsewhere.
+  if (process.env.SUPERCUTS_PROOFS_DIR) env.SUPERCUTS_PROOFS_DIR = resolve(process.env.SUPERCUTS_PROOFS_DIR);
+  const mcp = `[mcp_servers.supercuts-buyer]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify([mcpScript])}\n[mcp_servers.supercuts-buyer.env]\n${Object.entries(env).map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`).join("")}`;
   const mcpConfig = join(home, "buyer-codex.toml");
   writeFileSync(mcpConfig, mcp, { mode: 0o600 }); chmodSync(mcpConfig, 0o600);
-  return { runId, eventPath, mcpConfig };
+  return { runId, eventPath, mcpConfig, codexCommand: codexAddCommand(process.execPath, mcpScript, env) };
 }
 export function renewBuyer(home: string, configPath: string): Record<string, unknown> {
   const config = readConfig(resolve(configPath));
