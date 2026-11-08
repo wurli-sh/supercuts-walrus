@@ -35,3 +35,27 @@ test("hosted exit inspection binds a standard queue to the recovered seller note
   await assert.rejects(() => inspectHostedExit(db, stateKey, { ...input, runId: "other-run" }), { code: "DELIVERY_NOT_FOUND" });
   await assert.rejects(() => inspectHostedExit(db, stateKey, { ...input, sessionId: "other-session" }), { code: "DELIVERY_NOT_FOUND" });
 });
+
+test("hosted deal exit finds the seller note from the buyer's shielded payment digest", async () => {
+  const { inspectHostedDealExit, queueHostedDealExit } = await import("../src/hosted-exit.js");
+  const root = mkdtempSync(join(tmpdir(), "supercuts-hosted-deal-exit-")), home = join(root, "seller"), keyPath = join(root, "seller.key"), tatum = join(root, "tatum.key");
+  const signer = Ed25519Keypair.generate(), sellerId = signer.toSuiAddress(), requestId = "session-two", digest = "GxWTPv6c1UPG9ESGkV1nGVSBZL5D3D9iLGMEhTG16HSo", commitment = randomBytes(32).toString("hex");
+  writeFileSync(keyPath, signer.getSecretKey(), { mode: 0o600 }); writeFileSync(tatum, "test-key", { mode: 0o600 });
+  initialize(home, { role: "seller", "deployment-config": resolve(fileURLToPath(import.meta.url), "../../../config/phase1.testnet.json"), "sui-key-file": keyPath, "tatum-key-file": tatum, "write-grpc": "https://fullnode.testnet.sui.io:443", "tatum-grpc": "https://example.invalid:443", "walrus-publisher": "https://example.invalid", "walrus-aggregator": "https://example.invalid" });
+  const app = new Phase3App(home);
+  app.store.db.exec("CREATE TABLE IF NOT EXISTS seller_payment_claims(digest TEXT PRIMARY KEY,request_id TEXT NOT NULL,agreement_hash TEXT NOT NULL,created_at INTEGER NOT NULL)");
+  app.store.db.prepare("INSERT INTO seller_payment_claims(digest,request_id,agreement_hash,created_at) VALUES(?,?,?,?)").run(digest, requestId, "agreement", Date.now());
+  app.store.putNote(commitment, "payment", requestId, 0n);
+  const windowStart = Date.now() + 120_000, windowEnd = windowStart + 3_600_000;
+  const queued = new V2ExitQueue(app.store).queue({ operationId: `deal-exit-${requestId}`, commitment, amount: 1_000_000n, exactExit: false, windowStart, windowEnd }, true);
+  app.store.putSecretOnce(`v2-exit-request:${queued.operationId}`, Buffer.from("prepared-proof"));
+  const stateKey = randomBytes(32).toString("base64url"), snapshot = encryptSellerSnapshot(await captureSellerHome(home, sellerId), stateKey);
+  app.close();
+  const db = { getSnapshot: async () => ({ payload: snapshot, revision: 1 }), putSnapshot: async () => { throw Error("existing queue must not be rewritten"); } } as unknown as SellerDatabase;
+  const inspected = await inspectHostedDealExit(db, stateKey, { sellerId, paymentDigest: digest });
+  assert.equal(inspected.operationId, "deal-exit-session-two");
+  assert.equal(inspected.commitment, commitment);
+  assert.equal(inspected.amount, "1000000");
+  assert.deepEqual(await queueHostedDealExit(db, stateKey, { sellerId, paymentDigest: digest, windowStart, windowEnd }), inspected);
+  await assert.rejects(() => inspectHostedDealExit(db, stateKey, { sellerId, paymentDigest: "9E3Cro2qxNzqMvj2EjvonigJn5gW8HTmN97K2H6y1w52" }), { code: "PAYMENT_NOT_CLAIMED" });
+});
