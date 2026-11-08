@@ -67,6 +67,15 @@ function matchesPlannedEndpoint(planned: string, actual: string, requestId: stri
   } catch { return false; }
 }
 const memoryQuery = (manifest: CapabilityManifest): string => `${manifest.capabilityId} ${manifest.capability} ${manifest.sellerId}`;
+/** MCP passes object arguments as JSON or base64url JSON strings. */
+const parseArgument = (value: string): unknown => { try { return JSON.parse(Buffer.from(value, "base64url").toString()); } catch { return JSON.parse(value); } };
+/** The agent's own words, plus the capability-scoped query the settlement planner uses, so both find the same owner rules. */
+export const scopedRecallQueries = (query: string, manifest?: Pick<CapabilityManifest, "capabilityId" | "capability" | "sellerId">): string[] => manifest ? [query, memoryQuery(manifest as CapabilityManifest)] : [query];
+export function mergeRecalls<T extends { blobId: string; distance: number }>(batches: T[][]): T[] {
+  const closest = new Map<string, T>();
+  for (const item of batches.flat()) { const prior = closest.get(item.blobId); if (!prior || item.distance < prior.distance) closest.set(item.blobId, item); }
+  return [...closest.values()].sort((left, right) => left.distance - right.distance);
+}
 function record(store: RoleStore, scope: string, id: string, value: unknown): void {
   store.db.prepare("INSERT INTO app_records(scope,id,value,updated_at) VALUES(?,?,?,?) ON CONFLICT(scope,id) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at")
     .run(scope, id, json(value), Date.now());
@@ -318,7 +327,6 @@ export class Phase3App {
 
   private async planSettlement(args: Record<string, string | boolean>): Promise<Record<string, unknown>> {
     let primary: CapabilityManifest, alternatives: CapabilityManifest[] = [];
-    const parseArgument = (value: string): unknown => { try { return JSON.parse(Buffer.from(value, "base64url").toString()); } catch { return JSON.parse(value); } };
     try { primary = parseArgument(required(args, "manifest")) as CapabilityManifest; } catch (error) { return fail("CAPABILITY_INVALID", "primary manifest is not JSON", error); }
     validateCapabilityManifest(primary);
     if (typeof args.alternatives === "string") { try { alternatives = parseArgument(args.alternatives) as CapabilityManifest[]; } catch (error) { return fail("CAPABILITY_LIST_INVALID", "alternative manifests are not JSON", error); } }
@@ -742,7 +750,9 @@ export class Phase3App {
         return { operationId, namespace: config.namespace, blobId, status: "complete" };
       }
       if (command === "memory.recall") {
-        const recalled = await manual.recall(required(args, "query"));
+        let scope: CapabilityManifest | undefined;
+        if (args.manifest !== undefined) { try { scope = parseArgument(String(args.manifest)) as CapabilityManifest; } catch (error) { return fail("CAPABILITY_INVALID", "recall manifest is not JSON", error); } validateCapabilityManifest(scope); }
+        const recalled = mergeRecalls(await Promise.all(scopedRecallQueries(required(args, "query"), scope).map((query) => manual.recall(query))));
         const citations = recalled.filter((item) => item.distance <= (this.profile.policy.maxMemoryDistance ?? 0.35)).map((item) => { try { const opened = openMemoryText(item.text), memory = opened.memory; validateSettlementMemory(memory); const trusted = this.authenticatedMemory(item.blobId, memory, Boolean(opened.signedBy && opened.signedBy === manual.signerAddress)); return { blobId: item.blobId, kind: trusted.kind, provenance: trusted.provenance, distance: item.distance }; } catch { return { blobId: item.blobId, kind: "legacy", provenance: "legacy_untrusted", distance: item.distance }; } });
         return { namespace: config.namespace, citations, effect: citations.length ? "candidate-preference-adjusted" : "no-policy-change" };
       }
