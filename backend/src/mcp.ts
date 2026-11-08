@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
+import { createMemoryFlusher } from "./memory-flusher.js";
 import { Phase3App, errorOutput, homePath } from "./phase3.js";
 import { executeMandated, loadMandate, toolSchema } from "./mandate.js";
 import { RemoteBuyer } from "./remote-buyer.js";
@@ -22,14 +23,8 @@ const mandate = loadMandate(home);
 const remote = roleLease.acquired && app.profile.role === "buyer" && !app.profile.mock && process.env.SUPERCUTS_SELLER_URL ? new RemoteBuyer(app, mandate, process.env.SUPERCUTS_SELLER_URL) : undefined;
 const eventLog = roleLease.acquired && process.env.SUPERCUTS_EVENT_PATH && process.env.SUPERCUTS_RUN_ID ? new DemoEventLog(process.env.SUPERCUTS_EVENT_PATH, process.env.SUPERCUTS_RUN_ID) : undefined;
 if (eventLog) eventLog.append({ actor: "operator", stage: "run", status: "started", publicDetails: { flow: remote ? "codex-remote" : "codex-deal-v2" }, evidenceHashes: [], explorerLinks: [] });
-let memoryTickRunning = false;
-const memoryTick = async () => {
-  if (memoryTickRunning) return;
-  memoryTickRunning = true;
-  try { await app.processMemoryOutbox(); }
-  catch (error) { process.stderr.write(`${error && typeof error === "object" && "code" in error ? String(error.code) : "MEMORY_WORKER_ERROR"}\n`); }
-  finally { memoryTickRunning = false; }
-};
+const memoryFlusher = createMemoryFlusher(() => app.processMemoryOutbox(), (error) => process.stderr.write(`${error && typeof error === "object" && "code" in error ? String(error.code) : "MEMORY_WORKER_ERROR"}\n`));
+const memoryTick = async () => { memoryFlusher.kick(); };
 const memoryConfigured = roleLease.acquired && app.profile.role === "buyer" && !app.profile.mock && Boolean(app.store.getSecret("live:memory-config"));
 if (memoryConfigured) app.recoverStaleMemorySubmissions();
 const memoryTimer = memoryConfigured ? setInterval(() => { void memoryTick(); }, 30_000) : undefined;
@@ -118,6 +113,8 @@ rl.on("line", (line) => { queue = queue.then(async () => {
           data = await (await createConfiguredDealEngine(app)).execute(input) as unknown as Record<string, unknown>;
         } else if (name === "deal.resume") data = await (await createConfiguredDealEngine(app)).resume(String(raw.operationId)) as unknown as Record<string, unknown>;
         else data = new DealJournal(app.store).get(String(raw.operationId)) as unknown as Record<string, unknown>;
+        // Index the verified outcome now, not on the next 30 s tick: agent hosts often exit soon after a deal.
+        if (memoryConfigured && (name === "deal.execute" || name === "deal.resume")) memoryFlusher.kick();
       } else if (name.startsWith("remote.")) {
         const buyer = remote ?? fail("REMOTE_MANDATE_INACTIVE", "remote buyer tool is not configured");
         if (!mandate.allowedCommands.includes(name) || Date.now() > mandate.expiresAt) fail("REMOTE_MANDATE_INACTIVE", "remote buyer tool is not authorized by an active mandate");
@@ -143,6 +140,14 @@ rl.on("line", (line) => { queue = queue.then(async () => {
     return send({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: "Method not found" } });
   } catch (error) { return send({ jsonrpc: "2.0", id: request.id, result: { isError: true, content: [{ type: "text", text: JSON.stringify(errorOutput(error)) }], structuredContent: errorOutput(error) } }); }
   }).catch((error) => send({ jsonrpc: "2.0", error: { code: -32603, message: error instanceof Error ? error.message : "Internal error" }, id: null })); });
-const close = () => { if (memoryTimer) clearInterval(memoryTimer); roleLease.release(); app.close(); process.exit(0); };
-process.on("SIGINT", close); process.on("SIGTERM", close);
+let closing = false;
+const close = async () => {
+  if (closing) return; closing = true;
+  if (memoryTimer) clearInterval(memoryTimer);
+  // Let an in-flight Walrus Memory write finish; a write killed mid-flight is never retried.
+  await memoryFlusher.drain(20_000);
+  roleLease.release(); app.close(); process.exit(0);
+};
+process.on("SIGINT", () => void close()); process.on("SIGTERM", () => void close());
+rl.on("close", () => void close());
 process.on("exit", () => roleLease.release());
