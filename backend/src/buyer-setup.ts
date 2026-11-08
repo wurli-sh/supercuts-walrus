@@ -111,7 +111,7 @@ function setupBuyerConfig(home: string, config: BuyerSetup): Record<string, unkn
     ...(config.memoryConfigFile ? [`Keep the Walrus Memory embedding adapter running (supercuts-embedding-adapter). An MCP agent flushes outcome memories itself; SDK-only hosts also run: supercuts-memory-worker ${home}`] : []),
     "For shielded (private) payments, install the hash-pinned proving keys once per machine (~370 MB): supercuts proofs install",
     `Check readiness: supercuts onboarding doctor --home ${home}`,
-    `Connect Codex: ${session.codexCommand} (or merge ${session.mcpConfig}); other agents can call BuyerClient.executeDeal from @supercuts-walrus/sdk.`,
+    `Connect Codex: merge ${session.mcpConfig} into ~/.codex/config.toml, or run ${session.codexCommand} and then add tool_timeout_sec = 900 under [mcp_servers.supercuts-buyer] (a deal takes minutes; Codex stops MCP calls after 60 s by default). Other agents can call BuyerClient.executeDeal from @supercuts-walrus/sdk.`,
   ] };
 }
 /**
@@ -136,7 +136,8 @@ export function createBuyerSession(home: string): Record<string, unknown> {
   const env: Record<string, string> = { SUPERCUTS_HOME: home, SUPERCUTS_RUN_ID: runId, SUPERCUTS_EVENT_PATH: eventPath };
   // A non-default proofs location chosen at setup must follow the MCP server, which Codex starts elsewhere.
   if (process.env.SUPERCUTS_PROOFS_DIR) env.SUPERCUTS_PROOFS_DIR = resolve(process.env.SUPERCUTS_PROOFS_DIR);
-  const mcp = `[mcp_servers.supercuts-buyer]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify([mcpScript])}\n[mcp_servers.supercuts-buyer.env]\n${Object.entries(env).map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`).join("")}`;
+  // Codex stops an MCP call after 60 s by default; a deal (proof, finality, delivery) takes minutes.
+  const mcp = `[mcp_servers.supercuts-buyer]\ntool_timeout_sec = 900\nstartup_timeout_sec = 60\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify([mcpScript])}\n[mcp_servers.supercuts-buyer.env]\n${Object.entries(env).map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`).join("")}`;
   const mcpConfig = join(home, "buyer-codex.toml");
   writeFileSync(mcpConfig, mcp, { mode: 0o600 }); chmodSync(mcpConfig, 0o600);
   return { runId, eventPath, mcpConfig, codexCommand: codexAddCommand(process.execPath, mcpScript, env) };

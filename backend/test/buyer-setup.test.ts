@@ -18,6 +18,9 @@ test("one-time buyer setup creates isolated v2 policy and renewal keeps lifetime
   const config = { deploymentConfig: resolve(fileURLToPath(import.meta.url), "../../../config/phase1.testnet.json"), tatumKeyFile: tatum, writeGrpc: "https://fullnode.testnet.sui.io:443", tatumGrpc: "https://example.invalid:443", walrusPublisher: "https://publisher.example", walrusAggregator: "https://aggregator.example", memoryConfigFile: memory, sellerOrigins: ["https://seller.example"], allowedCounterparties: [seller], perDealCeiling: "100", totalBudget: "500", expiresAt: Date.now() + 86_400_000, allowPublicX402: true };
   writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
   const setup = setupBuyer(home, configPath);
+  const codexToml = readFileSync(join(home, "buyer-codex.toml"), "utf8");
+  assert.match(codexToml, /^tool_timeout_sec = 900$/m, "deal.execute outlives Codex's 60 s default");
+  assert.match(codexToml, /^startup_timeout_sec = 60$/m);
   assert.match(String(setup.address), /^0x[0-9a-f]{64}$/);
   assert.equal(loadMandate(home).version, "supercuts.mandate.v2");
   assert.equal(loadMandate(home).allowPublicX402, true);
