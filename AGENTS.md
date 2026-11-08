@@ -46,7 +46,8 @@ only for its generated buyer address.
 
 The recorded demo must use live Testnet and Mainnet-backed services, not
 `--mock`. Mock receipts are explicitly non-funded and cannot be presented as
-settlement evidence. `supercuts-demo live` refuses mock profiles.
+settlement evidence. Deals run only through `deal.execute` in Codex; there is no
+scripted `supercuts-demo live` runner.
 
 The deployed pool is Testnet-only and experimental. Do not describe it as a
 production custody system.
@@ -127,22 +128,31 @@ logs, browser state, prompts, or the Walrus relayer.
 
 ## Demo sequence
 
-1. Prefund the buyer with a standard v2 pool deposit before negotiation.
-2. Discover public and confidential seller capabilities.
-3. Select a capability and negotiate the public exact amount.
-4. Pay the public seller resource through x402 and show one delivered artifact.
-5. Store ten meaningful encrypted memories, or explicitly label reuse of ten completed live writes; recall the privacy rule.
-6. Show that the privacy rule selects shielded settlement instead of x402.
-   With a seller offering both rails, the agent requests `requestedRail: "x402"`
-   and the owner privacy memory reroutes the deal to shielded: the evidence shows
-   `memoryInfluence.changedRail: true` and `MEMORY_PRIVACY_OVERRODE_RAIL`.
-   Show the deal evidence `memoryInfluence` and `supercuts memory insights`:
-   verified outcomes rank sellers, and a seller with verified faults is
-   demoted even when cheaper. Only label a seller change when
-   `changedSeller` is true in the live evidence.
-7. Settle the accepted confidential agreement through the pool.
-8. Recover the confidential seller's note and queue a standard delayed exit.
-9. If needed, demonstrate the auditor's scoped Seal disclosure.
+The confidential deal comes first: private negotiation and settlement, boosted
+by Walrus Memory, is the core of the product. Codex drives every deal through
+`deal.execute`.
+
+1. Prefund the buyer with a standard v2 pool deposit before negotiation, and
+   save the owner privacy rule with `supercuts policy add`.
+2. Run `scripts/warm-hosted.sh` right before recording.
+3. Confidential deal: Codex discovers signed sellers and requests
+   `requestedRail: "x402"` from a seller offering both rails. The recalled
+   owner privacy memory reroutes the deal to shielded: the evidence shows
+   `memoryInfluence.changedRail: true` and `MEMORY_PRIVACY_OVERRODE_RAIL`, and
+   the plan cites the owner rule's blob ID.
+4. Negotiate encrypted terms through Walrus, settle through the pool, verify
+   delivery, and index the verified outcome in Walrus Memory.
+5. Public deal: pay the seller resource through x402 and show the delivered
+   artifact. Verified outcomes rank the sellers; only label a seller change
+   when `changedSeller` is true in the live evidence.
+6. Recover the confidential seller's note and queue a standard delayed exit.
+   For the hosted seller, run `supercuts-hosted-exit --seller-id <id>
+   --payment-digest <shielded digest> --events <event-path> --window-start
+   <ms> --window-end <ms>`, then restart the hosted seller.
+7. Run `supercuts-demo check --buyer-home <buyer-home> --events <event-path>`
+   with `--seller-home <home>` for a self-hosted seller, or `--seller-id <id>`
+   and the Supabase owner environment for the hosted seller.
+8. If needed, demonstrate the auditor's scoped Seal disclosure.
 
 Never print or record a Sui private key, seed phrase, note opening, approval
 token, signature, ciphertext, or full model prompt in demo events or output.

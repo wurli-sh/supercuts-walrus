@@ -200,23 +200,29 @@ Testnet prerequisites and buyer funding.
 
 ## Recorded Testnet demo
 
-For the full video, use the live v2 pool and Mainnet-backed Walrus services.
-Prefund the buyer before negotiation; show a public x402 deal and its artifact;
-complete ten encrypted Memory writes or clearly label ten reused completed
-live writes with `supercuts-demo reuse-memories --buyer-home <buyer-home>
---events <event-path>`; recall the owner privacy rule; settle a confidential deal; and
-queue the confidential seller's standard delayed exit after recovering its
-note. The seller must use its own role home. The Codex event stream contains
-redacted `deal-lifecycle` evidence, never task plaintext, key material,
-signatures, ciphertext, approval tokens, or note openings.
+For the full video, use the live v2 pool and Mainnet-backed Walrus services,
+and run every deal through `deal.execute` in Codex. Lead with the confidential
+deal: prefund the buyer before negotiation; save the owner privacy rule; ask
+for the confidential work with public x402 so the recalled rule visibly
+reroutes it to shielded; settle and verify it; then show a public x402 deal and
+its artifact; and finally queue the confidential seller's standard delayed exit
+after recovering its note. The seller must use its own role home. The Codex
+event stream contains redacted `deal-lifecycle` evidence, never task
+plaintext, key material, signatures, ciphertext, approval tokens, or note
+openings.
 
-After the seller exit is recorded, run `supercuts-demo check --buyer-home
-<buyer-home> --seller-home <confidential-seller-home> --events <event-path>`.
-The generic checker requires the
-prefunding event, ten distinct live memory IDs, a recalled owner privacy
-rule, complete x402 and shielded paid deliveries with indexed outcomes, and
-a queued confidential-seller exit. It reconciles the payment digests and exit
-against the separate owner journals. A seller MCP process can append to the
-same run using `SUPERCUTS_RUN_ID` and `SUPERCUTS_EVENT_PATH`; start it after
-the buyer MCP process closes so event sequence numbers remain ordered. Mock
+For the hosted seller, queue the exit from the owner environment with
+`supercuts-hosted-exit --seller-id <id> --payment-digest <shielded digest>
+--events <event-path> --window-start <ms> --window-end <ms>`; the digest
+identifies the seller's claimed payment and recovered note. Restart the hosted
+seller afterward so it reloads the updated snapshot.
+
+Then run `supercuts-demo check --buyer-home <buyer-home> --events
+<event-path>` with `--seller-home <confidential-seller-home>`, or with
+`--seller-id <id>` and `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and
+`SELLER_STATE_KEY` for the hosted seller. The checker requires, in order, a
+completed shielded deal whose requested x402 rail was overridden by a cited
+owner privacy rule, then a completed x402 deal, then a queued exit for the
+private payment. It reconciles both deals, the indexed outcome memories, the
+prefunding deposit, and the exit against the separate owner journals. Mock
 receipts cannot satisfy this check.
