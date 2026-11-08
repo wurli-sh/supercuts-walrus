@@ -18,7 +18,9 @@ async function main(): Promise<void> {
   if (!Array.isArray(config.sellers) || !config.sellers.length) fail("SELLER_CONFIG_INVALID", "at least one seller is required");
   const required = (key: string) => process.env[key] ?? fail("SELLER_CONFIG_MISSING", `${key} is required`);
   const db = new SellerDatabase(required("SUPABASE_URL"), required("SUPABASE_SERVICE_ROLE_KEY"));
-  const stateKey = required("SELLER_STATE_KEY"), origin = new URL(required("SELLER_ORIGIN")).origin;
+  const stateKey = required("SELLER_STATE_KEY");
+  // SELLER_ORIGIN pins the hosted origin; without it, the first signed registration sets it and every other one must match.
+  let origin = process.env.SELLER_ORIGIN ? new URL(process.env.SELLER_ORIGIN).origin : undefined;
   for (const seller of config.sellers) {
     const stored = await db.getSnapshot(seller.sellerId);
     let snapshot: SellerSnapshot;
@@ -44,6 +46,7 @@ async function main(): Promise<void> {
       if ((statSync(path).mode & 0o077) !== 0) fail("SELLER_CONFIG_PERMISSIONS", "registration file must be owner-only");
       const registration = JSON.parse(readFileSync(path, "utf8")) as SignedCapabilityRegistration;
       await verifySignedCapability(registration);
+      origin ??= new URL(registration.manifest.endpoint).origin;
       if (registration.manifest.sellerId !== seller.sellerId || new URL(registration.manifest.endpoint).origin !== origin || !new URL(registration.manifest.endpoint).pathname.startsWith("/v2/resource/")) fail("SELLER_CONFIG_INVALID", "v2 registration seller or endpoint differs from the hosted service");
       validateCapabilityPayload(registration.manifest, "output", item.outputMetadata);
       const artifact = readFileSync(resolve(item.artifactFile));
