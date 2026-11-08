@@ -47,7 +47,7 @@ export async function executeFunding(home: string, values: { publicPayment: stri
   let plan = await prepareFunding(home, values);
   if (plan.faucetRequired) {
     if (!values.requestFaucet) fail("BUYER_FUNDING_REQUIRED", `buyer needs ${plan.publicShortfallMist} additional MIST; rerun with --request-faucet --confirm or fund ${plan.address} manually`);
-    try { execFileSync("sui", ["client", "faucet", "--url", "https://faucet.testnet.sui.io", "--address", plan.address], { stdio: "inherit" }); }
+    try { execFileSync("sui", ["client", "faucet", "--url", "https://faucet.testnet.sui.io", "--address", plan.address], { stdio: ["ignore", process.stderr, process.stderr] }); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") fail("SUI_CLI_MISSING", `the Sui CLI is not installed; request Testnet SUI for ${plan.address} at https://faucet.sui.io, then rerun funding execute without --request-faucet`);
       throw error;
