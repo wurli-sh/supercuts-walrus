@@ -66,6 +66,8 @@ function matchesPlannedEndpoint(planned: string, actual: string, requestId: stri
       resource.pathname === `${base.pathname.replace(/\/$/, "")}/${encodeURIComponent(requestId)}`;
   } catch { return false; }
 }
+/** How long an ambiguous outcome write must be absent from Walrus Memory before it is written again. */
+const OUTCOME_REQUEUE_AFTER_MS = 30 * 60_000;
 const memoryQuery = (manifest: CapabilityManifest): string => `${manifest.capabilityId} ${manifest.capability} ${manifest.sellerId}`;
 /** MCP passes object arguments as JSON or base64url JSON strings. */
 const parseArgument = (value: string): unknown => { try { return JSON.parse(Buffer.from(value, "base64url").toString()); } catch { return JSON.parse(value); } };
@@ -558,7 +560,15 @@ export class Phase3App {
       blobId = recalled.find((item) => { try { return canonicalJson(openMemoryText(item.text).memory) === canonicalJson(memory); } catch { return false; } })?.blobId;
       if (blobId) await manual.listMetadata(config);
     } finally { manual.destroy(); }
-    if (!blobId) return { resolved: false, state: "unresolved" };
+    if (!blobId) {
+      // An exact-plaintext search found nothing. Once the stale claim is well past Walrus Memory's
+      // indexing delay, the killed write never landed: queue it once more instead of losing the outcome.
+      const claim = this.store.db.prepare("SELECT claimed_at FROM memory_jobs WHERE operation_id=? AND status='unresolved'").get(jobId) as { claimed_at: number | null } | undefined;
+      if (!claim || claim.claimed_at !== null && Date.now() - claim.claimed_at < OUTCOME_REQUEUE_AFTER_MS) return { resolved: false, state: "unresolved" };
+      this.store.db.prepare("UPDATE memory_jobs SET status='pending',claimed_at=NULL WHERE operation_id=? AND status='unresolved'").run(jobId);
+      journal.requeueOutcome(operationId);
+      return { resolved: false, state: "requeued" };
+    }
     this.store.db.prepare("UPDATE memory_jobs SET blob_id=?,status='complete' WHERE operation_id=? AND status='unresolved'").run(blobId, jobId);
     this.registerMemoryAuthority(blobId, memory);
     const outcome = journal.outcomeStatus(operationId) ?? fail("DEAL_MEMORY_INVALID", "deal outcome journal is missing");

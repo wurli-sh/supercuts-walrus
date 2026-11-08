@@ -176,6 +176,10 @@ export class DealJournal {
     this.store.db.prepare("INSERT OR IGNORE INTO deal_memory_outbox(operation_id,event_kind,payload_hash,blob_id,status,updated_at) VALUES(?,'outcome',?,NULL,'pending',?)").run(operationId, payloadHash, Date.now());
   }
 
+  /** Back to pending after reconciliation proved the ambiguous write never reached Walrus Memory. */
+  requeueOutcome(operationId: string): void {
+    this.store.db.prepare("UPDATE deal_memory_outbox SET status='pending',updated_at=? WHERE operation_id=? AND event_kind='outcome' AND status='unresolved'").run(Date.now(), operationId);
+  }
   setOutcomeUnresolved(operationId: string): void {
     this.store.db.prepare("UPDATE deal_memory_outbox SET status='unresolved',updated_at=? WHERE operation_id=? AND event_kind='outcome' AND status='pending'").run(Date.now(), operationId);
   }
