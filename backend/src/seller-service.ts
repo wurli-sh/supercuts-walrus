@@ -36,12 +36,17 @@ export class SellerService {
   readonly #root = mkdtempSync(join(tmpdir(), "supercuts-sellers-"));
   #queue: Promise<unknown> = Promise.resolve();
   #healthy = true;
+  #expired: string[] = [];
 
   private constructor(private readonly db: SellerDatabase, private readonly snapshotKey: string, private readonly origin: string, private readonly facilitatorUrl: string, private readonly facilitatorKey: string, private readonly allowedBuyers: ReadonlySet<string>, private readonly directoryAggregator?: string) {}
 
   static async create(config: { db: SellerDatabase; snapshotKey: string; origin: string; facilitatorUrl: string; facilitatorKey: string; allowedBuyers: ReadonlySet<string>; claudeKey?: string; directoryAggregator?: string }): Promise<SellerService> {
     const service = new SellerService(config.db, config.snapshotKey, config.origin, config.facilitatorUrl, config.facilitatorKey, config.allowedBuyers, config.directoryAggregator);
-    const rows = (await config.db.listCatalog() as unknown as CatalogRow[]).filter((row) => !(isV2(row) && row.manifest.expiresAt <= Date.now()));
+    const all = await config.db.listCatalog() as unknown as CatalogRow[], now = Date.now();
+    const rows = all.filter((row) => !(isV2(row) && row.manifest.expiresAt <= now));
+    service.#expired = all.filter((row) => !rows.includes(row)).map((row) => row.capability_id).sort();
+    // An expired registration disappears from /v2/catalog; say so, or the service looks healthy while selling nothing.
+    if (service.#expired.length) process.stderr.write(`supercuts-sellers: skipping expired v2 capabilities ${service.#expired.join(", ")}; re-register them (supercuts-seller-register renews in place) and run supercuts-seller-v2-provision\n`);
     for (const row of rows) {
       validateCapabilityManifest(row.manifest);
       if (row.manifest.capabilityId !== row.capability_id || row.manifest.sellerId !== row.seller_id || !row.blob_id || !row.signature || !row.transport_public_key) fail("SELLER_CATALOG_INVALID", "catalog entry does not match its manifest");
@@ -144,7 +149,7 @@ export class SellerService {
   async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
       const url = new URL(request.url ?? "/", this.origin);
-      if (request.method === "GET" && url.pathname === "/health") return this.reply(response, this.#healthy ? 200 : 503, { ok: this.#healthy, service: "supercuts-sellers", buyerAccess: this.allowedBuyers.size ? "restricted" : "open" });
+      if (request.method === "GET" && url.pathname === "/health") return this.reply(response, this.#healthy ? 200 : 503, { ok: this.#healthy, service: "supercuts-sellers", buyerAccess: this.allowedBuyers.size ? "restricted" : "open", capabilities: { active: this.#v2.size, expired: this.#expired } });
       if (request.method === "GET" && url.pathname === "/v1/access") {
         const buyerAddress = String(url.searchParams.get("buyerAddress") ?? "").toLowerCase();
         if (!/^0x[0-9a-f]{64}$/.test(buyerAddress)) fail("SELLER_REQUEST_INVALID", "buyerAddress is invalid");

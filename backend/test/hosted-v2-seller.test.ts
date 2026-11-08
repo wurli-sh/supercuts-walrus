@@ -65,3 +65,16 @@ test("hosted directory serves bounded catalog pages independently of seller stat
     assert.equal((await fetch(`${origin}/v2/directory/catalog?offset=-1`)).status, 400);
   } finally { await new Promise<void>((done) => server.close(() => done())); service.close(); }
 });
+
+test("hosted health names expired v2 capabilities instead of silently serving an empty catalog", async () => {
+  const expired = { seller_id: "0xseller", capability_id: "stale-brief", manifest: { capabilityId: "stale-brief", expiresAt: Date.now() - 1 }, preview: { genericV2: true } };
+  const db = { listCatalog: async () => [expired], listDirectory: async () => [] } as unknown as SellerDatabase;
+  const service = await SellerService.create({ db, snapshotKey: Buffer.alloc(32, 9).toString("base64url"), origin: "http://127.0.0.1:8788", facilitatorUrl: "http://127.0.0.1:8788", facilitatorKey: "test", allowedBuyers: new Set(), claudeKey: "test" });
+  const server = service.createServer();
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const address = server.address(); assert(address && typeof address === "object");
+  try {
+    const health = await (await fetch(`http://127.0.0.1:${address.port}/health`)).json() as { ok: boolean; capabilities: { active: number; expired: string[] } };
+    assert.deepEqual(health.capabilities, { active: 0, expired: ["stale-brief"] });
+  } finally { await new Promise<void>((done) => server.close(() => done())); service.close(); }
+});
