@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createWarmer } from "./warm.js";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { isValidPersonalMessageSignature } from "@mysten/sui/verify";
@@ -26,11 +27,13 @@ export class LiveSellerTransport {
   readonly #verifier: LiveSellerPaymentVerifier;
   readonly #resources = new Map<string, X402ResourceService>();
   readonly #registrations = new Map<string, SignedCapabilityRegistration>();
+  readonly #warmFacilitator: (() => void) | undefined;
   constructor(private readonly app: Phase3App, private readonly config: { origin: string; facilitatorUrl?: string; facilitatorKey?: string; allowedBuyers?: string[]; persist?: () => Promise<void>; claimPayment?: (digest: string, requestId: string) => Promise<void> }, runtimeFactory?: () => Promise<LiveRuntime>) {
     if (app.profile.role !== "seller" || app.profile.mock) fail("SELLER_LIVE_REQUIRED", "generic seller transport requires a live seller role home");
     const origin = new URL(config.origin);
     if (origin.protocol !== "https:" && !(origin.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(origin.hostname))) fail("SELLER_ORIGIN_INVALID", "seller transport requires HTTPS except on loopback");
     this.#blobs = new WalrusDealBlobs(app); this.#verifier = new LiveSellerPaymentVerifier(app, runtimeFactory);
+    this.#warmFacilitator = config.facilitatorUrl ? createWarmer(config.facilitatorUrl) : undefined;
     app.store.db.exec("CREATE TABLE IF NOT EXISTS seller_deal_prepares(session_id TEXT PRIMARY KEY,capability_id TEXT NOT NULL,buyer_address TEXT NOT NULL,buyer_public_key TEXT NOT NULL,offer_hash TEXT NOT NULL,offer_ciphertext TEXT NOT NULL,reply_ciphertext TEXT NOT NULL,offer_blob_id TEXT,reply_blob_id TEXT,payment_operation_id TEXT NOT NULL)");
     this.runtime = new SellerRuntime(app.store, {
       readBlob: (blobId) => this.#blobs.read(blobId),
@@ -92,7 +95,10 @@ export class LiveSellerTransport {
   }
   createServer(): Server { return createServer((request, response) => void this.handle(request, response)); }
 
-  async prepareRequest(body: Record<string, unknown>): Promise<Record<string, unknown>> { const result = await this.prepare(body); await this.config.persist?.(); return result; }
+  async prepareRequest(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    // Negotiation takes tens of seconds; wake a sleeping x402 facilitator now rather than at payment time.
+    if (this.#resources.size) this.#warmFacilitator?.();
+    const result = await this.prepare(body); await this.config.persist?.(); return result; }
   async fulfillRequest(body: Record<string, unknown>): Promise<Record<string, unknown>> { const result = await this.fulfill(body); await this.config.persist?.(); return result; }
 
   private async prepare(body: Record<string, unknown>): Promise<Record<string, unknown>> {
