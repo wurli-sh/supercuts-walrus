@@ -4,6 +4,17 @@ import { fail } from "./errors.js";
 import { canonicalJson } from "./settlement.js";
 import type { RoleStore } from "./store.js";
 
+/**
+ * Buyers may hold agreements under an active capability's signed terms, so those terms cannot change
+ * under the same ID until it expires. Provisioning runs the same rule before writing, so a seller is
+ * never left with a catalog entry it refuses to load at startup.
+ */
+export function assertCapabilityReplaceable(old: SignedCapabilityRegistration | undefined, next: SignedCapabilityRegistration, now = Date.now()): void {
+  if (!old || old.manifest.manifestHash === next.manifest.manifestHash) return;
+  if (old.manifest.sellerId !== next.manifest.sellerId || old.manifest.capabilityId !== next.manifest.capabilityId) fail("SELLER_CAPABILITY_CONFLICT", "a capability cannot change seller or ID");
+  if (old.manifest.expiresAt > now) fail("SELLER_CAPABILITY_CONFLICT", `${next.manifest.capabilityId} is active until ${new Date(old.manifest.expiresAt).toISOString()} and its signed terms cannot change; publish the new terms under a new capability ID, or wait until it expires`);
+}
+
 export interface ServiceRequest {
   dealId: string;
   capabilityId: string;
@@ -62,7 +73,7 @@ export class SellerRuntime {
     const saved = this.store.getSecret(`seller:capability:${id}`);
     const old = saved ? JSON.parse(saved.toString()) as SignedCapabilityRegistration : prior?.registration;
     if (old && old.manifest.manifestHash !== registration.manifest.manifestHash) {
-      if (old.manifest.expiresAt > Date.now() || old.manifest.sellerId !== registration.manifest.sellerId || old.manifest.capabilityId !== id) fail("SELLER_CAPABILITY_CONFLICT", "an active capability cannot be replaced with different terms");
+      assertCapabilityReplaceable(old, registration);
       this.store.putSecret(`seller:capability:${id}`, Buffer.from(canonicalJson(registration)));
     } else this.store.putSecretOnce(`seller:capability:${id}`, Buffer.from(canonicalJson(registration)));
     this.#handlers.set(id, { registration, handler });

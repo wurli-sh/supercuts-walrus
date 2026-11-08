@@ -1,14 +1,26 @@
 #!/usr/bin/env node
-import { readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { verifySignedCapability, validateCapabilityPayload, type SignedCapabilityRegistration } from "./capability.js";
 import { fail } from "./errors.js";
 import { SellerDatabase } from "./seller-database.js";
-import { captureSellerHome, decryptSellerSnapshot, encryptSellerSnapshot, type SellerSnapshot } from "./seller-state.js";
+import { captureSellerHome, decryptSellerSnapshot, encryptSellerSnapshot, restoreSellerHome, type SellerSnapshot } from "./seller-state.js";
+import { assertCapabilityReplaceable } from "./seller-runtime.js";
 import { Phase3App } from "./phase3.js";
 
+/** Registrations the seller already accepted, as its runtime will see them at startup. */
+function savedRegistrations(snapshot: SellerSnapshot, ids: string[]): Map<string, SignedCapabilityRegistration> {
+  const root = mkdtempSync(join(tmpdir(), "supercuts-provision-check-")), home = join(root, "seller"), saved = new Map<string, SignedCapabilityRegistration>();
+  let app: Phase3App | undefined;
+  try {
+    restoreSellerHome(home, snapshot); app = new Phase3App(home);
+    for (const id of ids) { const bytes = app.store.getSecret(`seller:capability:${id}`); if (bytes) saved.set(id, JSON.parse(bytes.toString()) as SignedCapabilityRegistration); }
+    return saved;
+  } finally { app?.close(); rmSync(root, { recursive: true, force: true }); }
+}
 interface Item { registrationFile: string; artifactFile: string; outputMetadata: Record<string, unknown>; contentType?: string; }
 interface Seller { sellerId: string; home?: string; capabilities: Item[]; }
 async function main(): Promise<void> {
@@ -54,6 +66,8 @@ async function main(): Promise<void> {
       snapshot.artifacts[registration.manifest.capabilityId] = artifact.toString("base64url");
       registrations.push({ registration, item });
     }
+    // Refuse before writing anything: a catalog row the seller rejects at startup takes the whole service down.
+    if (stored) { const saved = savedRegistrations(snapshot, registrations.map(({ registration }) => registration.manifest.capabilityId)); for (const { registration } of registrations) assertCapabilityReplaceable(saved.get(registration.manifest.capabilityId), registration); }
     await db.putSnapshot(encryptSellerSnapshot(snapshot, stateKey), stored?.revision);
     for (const { registration, item } of registrations) await db.putCatalog({ seller_id: seller.sellerId, capability_id: registration.manifest.capabilityId, manifest: registration.manifest, blob_id: registration.manifestBlobId, signature: registration.sellerSignature, transport_public_key: registration.transportPublicKey, preview: { genericV2: true, outputMetadata: item.outputMetadata, contentType: item.contentType ?? "application/octet-stream" } });
     process.stdout.write(`${JSON.stringify({ ok: true, sellerId: seller.sellerId, capabilities: registrations.map(({ registration }) => registration.manifest.capabilityId), restartRequired: true })}\n`);
