@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
@@ -7,6 +7,7 @@ import { createCapabilityManifest, type CapabilityManifest } from "./capability.
 import { fail } from "./errors.js";
 import { Phase3App, errorOutput } from "./phase3.js";
 import { executeMandated, loadMandate } from "./mandate.js";
+import { checkRegistrationOutput, writeRegistration } from "./seller-register.js";
 
 async function main(): Promise<void> {
   const home = process.argv[2], specPath = process.argv[3], outputPath = process.argv[4];
@@ -20,14 +21,15 @@ async function main(): Promise<void> {
     const decoded = decodeSuiPrivateKey(encoded);
     if (decoded.scheme !== "ED25519") fail("SIGNER_UNSUPPORTED", "seller requires an ED25519 signer");
     const signer = Ed25519Keypair.fromSecretKey(decoded.secretKey), manifest = createCapabilityManifest({ ...spec, sellerId: signer.toSuiAddress() });
+    const { renewing } = checkRegistrationOutput(resolve(outputPath), manifest.capabilityId);
     const published = await executeMandated(app, loadMandate(home), "capability.publish", { "operation-id": `publish-${manifest.manifestHash}`, manifest });
     const blobId = String(published.blobId ?? "");
     if (!blobId) fail("WALRUS_PUBLISH_FAILED", "capability publication omitted a Walrus blob ID");
     const transportPublicKey = app.store.getSecret("identity:x25519-public")?.toString("base64url") ?? fail("IDENTITY_MISSING", "seller transport key is missing");
     const sellerSignature = (await signer.signPersonalMessage(Buffer.from(`${manifest.manifestHash}:${transportPublicKey}`))).signature;
     const registration = { manifest, manifestBlobId: blobId, transportPublicKey, sellerSignature };
-    writeFileSync(resolve(outputPath), `${JSON.stringify(registration, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    process.stdout.write(`${JSON.stringify({ ok: true, capabilityId: manifest.capabilityId, manifestBlobId: blobId, registrationFile: resolve(outputPath) })}\n`);
+    writeRegistration(resolve(outputPath), registration, renewing);
+    process.stdout.write(`${JSON.stringify({ ok: true, capabilityId: manifest.capabilityId, manifestBlobId: blobId, registrationFile: resolve(outputPath), renewed: renewing, expiresAt: manifest.expiresAt })}\n`);
   } finally { app.close(); }
 }
 main().catch((error) => { process.stdout.write(`${JSON.stringify(errorOutput(error))}\n`); process.exitCode = 1; });
