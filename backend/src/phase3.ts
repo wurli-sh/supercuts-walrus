@@ -537,7 +537,8 @@ export class Phase3App {
     if (this.profile.mock || this.profile.role !== "buyer") fail("DEAL_LIVE_REQUIRED", "deal memory reconciliation requires a live buyer role");
     const journal = new DealJournal(this.store), view = journal.get(operationId);
     if (view.evidence.payment !== "finalized" || view.evidence.delivery !== "verified") fail("DEAL_DELIVERY_UNVERIFIED", "deal must have verified payment and delivery");
-    if (view.state === "complete") return { resolved: true, state: "complete", ...(journal.outcomeStatus(operationId)?.blobId ? { blobId: journal.outcomeStatus(operationId)!.blobId! } : {}) };
+    // A deal also completes with an unresolved outcome memory; only a resolved one may short-circuit here.
+    if (view.state === "complete" && view.evidence.outcomeMemory !== "unresolved") return { resolved: true, state: "complete", ...(journal.outcomeStatus(operationId)?.blobId ? { blobId: journal.outcomeStatus(operationId)!.blobId! } : {}) };
     const jobId = `verified:deal:${operationId}`;
     const row = (this.store.db.prepare("SELECT fact_hash,status FROM memory_jobs WHERE operation_id=?").get(jobId) as { fact_hash: string; status: string } | undefined) ?? fail("DEAL_MEMORY_INVALID", "verified outcome job is missing");
     const encoded = this.store.getSecret(`memory-outbox:${jobId}`) ?? fail("DEAL_MEMORY_INVALID", "verified outcome payload is missing");
