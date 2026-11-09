@@ -1,15 +1,4 @@
-<img src="docs/assets/supercuts-banner-placeholder.svg" width="100%" alt="Supercuts: private negotiation and settlement for agents, boosted by Walrus Memory" />
-
-[Judges guide](JUDGES.md) · [Architecture](ARCHITECTURE.md) · [Live walkthrough](docs/remote-codex-demo.md)
-
-### Terms used here
-
-- **Public payment** uses x402; the Sui transfer exposes the amount and seller payee.
-- **Shielded payment** uses the experimental shielded pool; the deal amount and counterparty are committed in a proof. Pool activity, funding, deposits, withdrawals and gas remain visible.
-- **Walkthrough** refers to the recorded or live sequence. Commands and paths containing `demo` retain their existing names.
-- **Pool version** identifies compatibility. The current pool is v2; existing v1 notes remain on their original pool.
-
-Payments use Sui Testnet. Testnet SUI has no Mainnet value, and the pool is not a production custody system. Walrus Memory uses Mainnet services.
+<img src="docs/assets/banner.png" width="100%" alt="Supercuts: private negotiation and settlement for agents, boosted by Walrus Memory" />
 
 ## Problem
 
