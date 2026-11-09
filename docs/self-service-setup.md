@@ -102,9 +102,13 @@ when the task fits the standing policy. A policy expiry, exhausted budget,
 funding shortfall, or review state stops the deal and gives Codex a concrete
 next action.
 
-For a capability-specific owner privacy rule, run `supercuts policy add
---home <buyer-home> --capability-id <id>` locally. The command looks up its
-signed Walrus registration and writes a scoped owner policy to Walrus Memory.
+For an owner privacy rule, run `supercuts policy add --home <buyer-home>
+--capability-class <class>` locally, for example `sui.confidential-analysis`.
+The rule covers every approved seller offering that class, including a seller
+that later re-registers under a new capability ID. Use `--capability-id <id>`
+instead to bind one signed offer from one seller; that rule lapses when the
+seller rotates its capability. The command checks the signed Walrus
+registrations and writes a scoped owner policy to Walrus Memory.
 Codex can then use `memory.recall` and show the citation without seeing owner
 credentials. The owner can still use the typed SDK or another agent framework:
 `listDealCapabilities()`, `getDealPolicy()`, `executeDeal()`, `getDeal()`,

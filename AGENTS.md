@@ -133,8 +133,16 @@ by Walrus Memory, is the core of the product. Codex drives every deal through
 `deal.execute`.
 
 1. Prefund the buyer with a standard v2 pool deposit before negotiation, and
-   save the owner privacy rule with `supercuts policy add`.
-2. Run `scripts/warm-hosted.sh` right before recording.
+   save the owner privacy rule once with `supercuts policy add --home
+   <buyer-home> --capability-class sui.confidential-analysis`. A class rule
+   survives a seller rotating its capability ID; a `--capability-id` rule
+   does not.
+2. Quit Codex and run `scripts/recording-new-run.sh --stop-codex` right before
+   recording. It rotates the run ID and event path in the Codex config, stops
+   the Codex daemon that otherwise keeps the old buyer MCP and its lease, checks
+   the embedding adapter, and wakes the hosted services (`--redeploy` recovers
+   a Render service that never wakes). Prompt Codex as an owner would; the deal
+   tools describe themselves.
 3. Confidential deal: Codex discovers signed sellers and requests
    `requestedRail: "x402"` from a seller offering both rails. The recalled
    owner privacy memory reroutes the deal to shielded: the evidence shows
@@ -146,12 +154,14 @@ by Walrus Memory, is the core of the product. Codex drives every deal through
    artifact. Verified outcomes rank the sellers; only label a seller change
    when `changedSeller` is true in the live evidence.
 6. Recover the confidential seller's note and queue a standard delayed exit.
-   For the hosted seller, run `supercuts-hosted-exit --seller-id <id>
-   --payment-digest <shielded digest> --events <event-path> --window-start
-   <ms> --window-end <ms>`, then restart the hosted seller.
-7. Run `supercuts-demo check --buyer-home <buyer-home> --events <event-path>`
-   with `--seller-home <home>` for a self-hosted seller, or `--seller-id <id>`
-   and the Supabase owner environment for the hosted seller.
+   For the hosted seller, quit Codex and run `scripts/recording-exit.sh`: it
+   queues the exit for the run's shielded payment, restarts the hosted seller,
+   and runs the acceptance gate. The manual form is `supercuts-hosted-exit
+   --seller-id <id> --payment-digest <shielded digest> --events <event-path>
+   --window-start <ms> --window-end <ms>`, then restart the hosted seller.
+7. Confirm `scripts/recording-check.mjs` (run by `recording-exit.sh`) reports
+   `readyForRecording: true`. For a self-hosted seller, run `supercuts-demo
+   check --buyer-home <buyer-home> --events <event-path> --seller-home <home>`.
 8. If needed, demonstrate the auditor's scoped Seal disclosure.
 
 Never print or record a Sui private key, seed phrase, note opening, approval

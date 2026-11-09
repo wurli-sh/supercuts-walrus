@@ -103,42 +103,142 @@ node backend/dist/demo.js doctor --state-dir .state/remote-demo-v2 \
 
 The saved rule requires shielded settlement. A public-rail answer from the buyer conversation cannot weaken it. The buyer may ask for a stricter rule, but changing the saved rule itself is an owner action.
 
-## Record the buyer and seller panes
+## Record through the current deal tools
 
-Use the buyer stanza from `.state/remote-demo-v2/buyer-codex.toml` in Codex's MCP config, or register the server with `codex mcp add` using its Node command, script path, `SUPERCUTS_HOME`, `SUPERCUTS_SELLER_URL`, `SUPERCUTS_RUN_ID`, and `SUPERCUTS_EVENT_PATH` values. The generated config points to the built local MCP script, so a global `supercuts-mcp` executable is not required. The buyer receives only buyer tools. Seller signing keys, research credentials, and Supabase credentials never enter Codex.
+The report provisioning steps above describe the original hosted catalog. The
+recording uses the current v2 buyer configuration from
+[self-service setup](self-service-setup.md), with `deal-sellers.json` and an
+active `supercuts.mandate.v2` authorizing `deal.execute`. The five-role demo
+bootstrap alone does not create that standing mandate. Use `supercuts setup
+renew --home <buyer-home> --config <owner-only-setup.json>` to configure it
+without replacing the buyer signer or moving existing notes. Keep v1 homes
+separate.
 
-On the right, run `supercuts-seller-watch` in three panes, one for each seller address in `run.json`. Each pane shows the live Render service's safe activity for that identity. These are activity views of remote sellers serving Claude-researched, owner-reviewed artifacts, not separate local Codex sessions. For example, run this in the first pane and substitute `secondPublicSeller` and `confidentialSeller` in the other two:
-
-```sh
-node backend/dist/seller-watch.js \
-  --seller-url https://supercuts-sellers-testnet.onrender.com \
-  --run-id "$(jq -r .runId .state/remote-demo-v2/run.json)" \
-  --seller-id "$(jq -r .addresses.publicSeller .state/remote-demo-v2/run.json)"
-```
-
-Give Codex this task:
-
-> Find the best public Sui market brief within my total budget, buy it, then obtain the competitor analysis matching the delivered brief. Use my saved privacy preference when choosing how to pay. Give me both delivered artifacts, their hashes, the selection reason, and both Testnet transaction digests.
-
-Codex should ask for a total budget in MIST and the Sui topic if missing. It should call `wallet.balance` and make a standard v2 deposit before negotiation, then call `remote.rank-briefs`, explain the visible score and total projected cost, and call `remote.purchase-brief` with the winning capability. After that it should write ten short, meaningful typed memories with `memory.remember`, call `memory.recall` for the saved privacy rule, then call `remote.agreement`, `remote.settle-analysis`, and `remote.delivery`. The analysis delivery may return `payment-pending` until the seller observes the finalized pool payment; retry the **same session and operation IDs**. The seller's signed encrypted negotiation transcript is published to Walrus; seller event panes show only hashes and blob IDs.
-
-After the buyer records the analysis delivery, stop the buyer MCP process and the hosted seller service so neither can write an older snapshot or event sequence. In the owner environment, provide `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `SELLER_STATE_KEY` as environment variables. Choose a future, owner-approved window in Unix milliseconds, then queue the standard 1,000,000 MIST exit using the analysis session ID returned by `remote.agreement`:
+Save the owner privacy rule for the confidential capability class once:
 
 ```sh
-node backend/dist/hosted-exit-cli.js \
-  --run-json .state/remote-demo-v2/run.json \
-  --session-id SESSION_ID_FROM_AGREEMENT \
-  --window-start WINDOW_START_MS \
-  --window-end WINDOW_END_MS
+supercuts policy add --home <buyer-home> --capability-class sui.confidential-analysis
 ```
 
-The command restores only the confidential seller's encrypted Supabase snapshot in a temporary owner-only role home. It checks the matching delivered session and recovered payment note, prepares a standard v2 exit proof, persists the updated snapshot, and appends a safe `delayed-exit` event. It does not submit the withdrawal early or expose the seller signer, note opening, proof, or payout key in the event stream. Restart the hosted seller service after the command succeeds. Retry the same session if the command fails after persisting the snapshot; the exit operation is idempotent.
+A class rule covers every approved seller offering that class, so it still
+applies when a seller re-registers under a new capability ID. A rule saved with
+`--capability-id` binds one signed offer and lapses when that seller rotates
+its capability; a deal then stops before payment rather than paying on x402.
 
-Finish by checking the event path printed by setup. The checker reads the hosted seller's encrypted snapshot using those same owner environment variables and verifies that the event names the prepared exit for the recovered note:
+Use the buyer's generated `buyer-codex.toml` in Codex. Point its executable at
+the current built backend and set `tool_timeout_sec = 900` in the server table.
+Only one buyer MCP process may own that home; a competing connection exposes
+only `status`, reports `roleHomeLease: "busy"`, and names the process holding
+it. Codex keeps MCP servers alive in its background `codex app-server` daemon
+after the TUI exits, so quitting Codex alone does not release the home. Seller
+credentials stay outside the buyer MCP config.
+
+Check the buyer's native Testnet SUI balance, remaining mandate budget, and
+pool balance with `supercuts onboarding doctor --home <buyer-home>`. Prefund
+through a standard v2 deposit before any negotiation. Do not repeat an existing
+deposit or payment merely to repair a missing memory.
+
+### Start a clean run
+
+Quit Codex, then:
 
 ```sh
-node backend/dist/demo.js check --state-dir .state/remote-demo-v2 \
-  --events PATH_FROM_SETUP
+pnpm --dir backend build
+scripts/recording-new-run.sh --stop-codex
 ```
 
-The public x402 transaction exposes amount and payee. The shielded pool transfer does not expose a direct payment naming the analysis seller or amount; the buyer gas sender, funding, deposit, withdrawal, and pool activity remain visible. The pool is experimental Testnet software, not production custody. Render Free services can cold-start and have ephemeral local storage; Supabase snapshots preserve seller state after completed requests. Render Free instances sleep after 15 idle minutes. Right before recording, run `scripts/warm-hosted.sh`; it wakes the seller and facilitator in parallel and fails if either stays asleep or the seller has no active capabilities. Do not keep them awake on a schedule: two always-on free services exceed the workspace's monthly free hours. During a deal, the seller also pings the facilitator when negotiation starts, so a normal cold start finishes before payment. Check Supabase availability before recording too.
+The script stops the Codex daemon and any stale buyer MCP, points
+`SUPERCUTS_RUN_ID` and `SUPERCUTS_EVENT_PATH` in `~/.codex/config.toml` at a new
+run (backing up the config), checks the 1536-dimensional embedding adapter, and
+wakes the hosted seller and facilitator. Add `--redeploy` when Render accepts
+requests but never starts a sleeping service; that triggers a fresh deploy of
+the stalled service through the Render CLI. Start the recording within about
+15 minutes, before the free services sleep again.
+
+Open a fresh Codex chat. Asking it to check the Supercuts status should report
+`roleHomeLease: "acquired"` and the new run ID. Deals read from an earlier run
+are not added to this run's evidence.
+
+### Record the deals
+
+Ask the way an owner would; the deal tools describe themselves, so the prompt
+does not name them. Confidential deal first:
+
+> I need a confidential competitor analysis of DeepBook against the other Sui
+> liquidity venues. Find a trusted seller and get it for me. Just pay with
+> x402, it's quicker. When it's done, show me the analysis, how you paid, and
+> why.
+
+Codex reads the standing policy and signed catalog and runs the deal through
+`deal.execute`. The plan must cite the owner privacy blob, report
+`changedRail: true`, and include `MEMORY_PRIVACY_OVERRODE_RAIL`. Payment
+finality, encrypted transcript readback, and delivery are verified before the
+artifact is released.
+
+Then the public deal:
+
+> Now get me a Sui market brief. Nothing sensitive, so paying publicly with
+> x402 is fine. Pick the best seller based on how past deals went, and stay
+> within my budget. Show me the brief, the payment transaction, and why you
+> chose that seller.
+
+Describe a seller switch only if `memoryInfluence.changedSeller` is true.
+Resume a stalled deal with `deal.resume` and the same operation ID. If outcome
+memory is unresolved, use `deal.reconcile` with that operation ID; do not replay
+payment or reset an ambiguous memory job. Keep Codex open for a minute or two
+after the second deal so its memory worker indexes both outcomes. A completed
+payment with unresolved outcome memory is not a passed recording check.
+
+The reports are prepared, reviewed artifacts. Do not describe them as new
+model research performed during settlement. Avoid recording raw Codex JSONL
+logs, owner environment files, decrypted memory, signatures, or note material.
+Use only the redacted demo event stream for evidence overlays.
+
+### Queue the seller exit and check the run
+
+Quit Codex and stop its daemon (`pkill -f 'codex app-server'`), then:
+
+```sh
+scripts/recording-exit.sh
+```
+
+It finds the run's confidential shielded payment and seller in the event
+stream, queues that seller's standard delayed exit with a window opening in 10
+minutes and lasting 24 hours (`--start-in-minutes`, `--window-hours`),
+restarts the hosted seller so it reloads the updated snapshot, and runs the
+acceptance gate. It needs `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and
+`SELLER_STATE_KEY` in `.env` and a logged-in Render CLI. The seller's snapshot
+writes are revision-checked, so a running seller cannot overwrite the queued
+exit; it only needs the restart to load it. Show the exit as queued; this does
+not demonstrate a completed withdrawal.
+
+The underlying commands, for a manual run:
+
+```sh
+node --env-file=.env backend/dist/hosted-exit-cli.js \
+  --seller-id "$CONFIDENTIAL_SELLER_ID" \
+  --payment-digest "$SHIELDED_PAYMENT_DIGEST" \
+  --events "$EVENT_PATH" \
+  --window-start "$WINDOW_START_MS" --window-end "$WINDOW_END_MS"
+node --env-file=.env scripts/recording-check.mjs \
+  --buyer-home "$BUYER_HOME" --events "$EVENT_PATH" \
+  --seller-id "$CONFIDENTIAL_SELLER_ID"
+```
+
+For a self-hosted seller, replace `--seller-id` with `--seller-home`. The gate
+runs the current doctor and evidence checker, checks local embeddings and the
+Testnet facilitator, and exits nonzero unless all checks pass. It does not run
+a deal, request faucet funds, or queue an exit. A missing exit, unresolved
+outcome memory, or unreachable dependency must remain a failed check.
+
+Use [the voiceover](../demo/voiceover.md) and
+[recording cues](../demo/recording.md) to edit the video. Export the latest
+narration with `python3 demo/generate_voiceover.py --script-only`. Verify each
+spoken event against the recorded evidence before publishing.
+
+Public x402 exposes amount and payee. Shielded settlement avoids a direct
+payment naming the analysis seller and amount; the gas sender, funding,
+deposits, withdrawals, and pool activity remain visible. The pool is experimental
+Testnet software. Mainnet-backed Walrus Memory does not make the payment rail
+Mainnet. Run `scripts/warm-hosted.sh` immediately before recording; do not keep
+the free Render services awake on a schedule.
