@@ -25,8 +25,14 @@ the sellers, saves the privacy rules to Walrus Memory, requests the Testnet
 faucet and makes the pool deposit, and writes the `supercuts-buyer` server,
 with its tool timeouts, into the Codex config after backing it up. It checks
 the embedding endpoint before changing anything, and rerunning it resumes an
-interrupted onboarding. For scripts, add an `onboarding` object (`sellers`:
-`"all"` or IDs, `privacyClasses`: `"all"` or classes, `funding`,
+interrupted onboarding. If a buyer already exists in that home it asks
+whether to resume it or start a new one; `new` moves the old home to
+`<home>-<timestamp>` (never deleted) once Codex no longer holds it. Its
+Walrus Memory namespace defaults to `auto`, a fresh
+`supercuts:buyer-<address>` stored only in the new buyer's encrypted copy, so
+several buyers can share one owner-only `memory.json` without sharing
+memories. For scripts, add `memoryNamespace` to the setup keys and an `onboarding` object (`sellers`:
+`"all"` or IDs, `replaceExisting`, `privacyClasses`: `"all"` or classes, `funding`,
 `codexConfig`) to the setup JSON below and run `supercuts onboard buyer --home
 <buyer-home> --config <file> --yes`. Approve more sellers later with
 `supercuts policy approve-seller --home <buyer-home> --all` or a
