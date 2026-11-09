@@ -22,12 +22,12 @@ blocked build makes `pnpm exec` refuse to run.
 ```sh
 mkdir my-buyer && cd my-buyer && pnpm init
 printf 'allowBuilds:\n  blake-hash: true\n' > pnpm-workspace.yaml
-pnpm add @supercuts-walrus/sdk@0.1.8 @supercuts-walrus/backend@0.1.8
+pnpm add @supercuts-walrus/sdk@0.1.9 @supercuts-walrus/backend@0.1.9
 ```
 
 Add the backend explicitly. It provides the `supercuts`, `supercuts-embedding-adapter`, and
 `supercuts-memory-worker` commands, and pnpm only links commands from direct dependencies. With npm, run
-`npm install @supercuts-walrus/sdk@0.1.8 @supercuts-walrus/backend@0.1.8` instead; npm needs no build approval.
+`npm install @supercuts-walrus/sdk@0.1.9 @supercuts-walrus/backend@0.1.9` instead; npm needs no build approval.
 
 **2. Store credentials in owner-only files.** Never paste them into an agent.
 
