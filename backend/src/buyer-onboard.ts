@@ -1,3 +1,4 @@
+import { color, heading, say, step, warn } from "./ui.js";
 import {
   chmodSync,
   copyFileSync,
@@ -12,6 +13,9 @@ import {
   addBuyerPrivacyRule,
   approveBuyerSeller,
   askBuyerSetup,
+  askValid,
+  askYesNo,
+  wholeMist,
   buyerSellerSource,
   fetchSellerListings,
   setupBuyerConfig,
@@ -60,6 +64,7 @@ export interface OnboardSteps {
       operationId: string;
       requestFaucet: boolean;
       confirmed: boolean;
+      depositConfirmed?: boolean;
     },
   ) => Promise<Record<string, unknown>>;
   codex: (home: string, configPath: string) => Record<string, unknown>;
@@ -167,48 +172,136 @@ export function writeCodexConfig(
 }
 
 /** Walrus Memory needs 1536-dimension embeddings from the owner's local endpoint; check it before anything is created. */
-export async function assertEmbeddingsReady(config: { embeddingApiBase: string; embeddingModel: string; embeddingApiKey?: string }, fetchImpl: typeof fetch = fetch): Promise<void> {
+export async function assertEmbeddingsReady(
+  config: {
+    embeddingApiBase: string;
+    embeddingModel: string;
+    embeddingApiKey?: string;
+  },
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
   const url = `${config.embeddingApiBase.replace(/\/+$/, "")}/embeddings`;
   let dims: number | undefined;
   try {
-    const response = await fetchImpl(url, { method: "POST", headers: { "content-type": "application/json", ...(config.embeddingApiKey ? { authorization: `Bearer ${config.embeddingApiKey}` } : {}) }, body: JSON.stringify({ model: config.embeddingModel, input: "supercuts onboarding probe" }), signal: AbortSignal.timeout(20_000) });
-    dims = ((await response.json()) as { data?: Array<{ embedding?: unknown[] }> }).data?.[0]?.embedding?.length;
-  } catch { fail("MEMORY_ENDPOINT_UNREACHABLE", `the embedding endpoint ${config.embeddingApiBase} is not answering; start supercuts-embedding-adapter (with EMBEDDING_UPSTREAM_BASE_URL and EMBEDDING_UPSTREAM_MODEL set), then rerun onboarding`); }
-  if (dims !== 1536) fail("MEMORY_EMBEDDING_INVALID", `the embedding endpoint returned ${dims ?? "no"} dimensions; Walrus Memory needs 1536, so point the Memory config at supercuts-embedding-adapter`);
+    const response = await fetchImpl(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(config.embeddingApiKey
+          ? { authorization: `Bearer ${config.embeddingApiKey}` }
+          : {}),
+      },
+      body: JSON.stringify({
+        model: config.embeddingModel,
+        input: "supercuts onboarding probe",
+      }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    dims = (
+      (await response.json()) as { data?: Array<{ embedding?: unknown[] }> }
+    ).data?.[0]?.embedding?.length;
+  } catch {
+    fail(
+      "MEMORY_ENDPOINT_UNREACHABLE",
+      `the embedding endpoint ${config.embeddingApiBase} is not answering; start supercuts-embedding-adapter (with EMBEDDING_UPSTREAM_BASE_URL and EMBEDDING_UPSTREAM_MODEL set), then rerun onboarding`,
+    );
+  }
+  if (dims !== 1536)
+    fail(
+      "MEMORY_EMBEDDING_INVALID",
+      `the embedding endpoint returned ${dims ?? "no"} dimensions; Walrus Memory needs 1536, so point the Memory config at supercuts-embedding-adapter`,
+    );
 }
-const memoryConfigOf = (setup: BuyerSetup | undefined): { embeddingApiBase: string; embeddingModel: string; embeddingApiKey?: string } | undefined =>
-  setup?.memoryConfigFile ? JSON.parse(readFileSync(resolve(setup.memoryConfigFile), "utf8")) as { embeddingApiBase: string; embeddingModel: string; embeddingApiKey?: string } : undefined;
+const memoryConfigOf = (
+  setup: BuyerSetup | undefined,
+):
+  | {
+      embeddingApiBase: string;
+      embeddingModel: string;
+      embeddingApiKey?: string;
+    }
+  | undefined =>
+  setup?.memoryConfigFile
+    ? (JSON.parse(readFileSync(resolve(setup.memoryConfigFile), "utf8")) as {
+        embeddingApiBase: string;
+        embeddingModel: string;
+        embeddingApiKey?: string;
+      })
+    : undefined;
 
 /** Runs each step in order; every step is idempotent, so a rerun resumes an interrupted onboarding. */
 export async function runBuyerOnboarding(
   home: string,
   plan: OnboardPlan,
   steps: OnboardSteps = defaultSteps,
+  options: { progress?: boolean } = {},
 ): Promise<Record<string, unknown>> {
+  // Interactive runs show a spinner per step; tests and scripts stay quiet.
+  const run = <T>(
+    label: string,
+    task: () => Promise<T> | T,
+    extra: { spin?: boolean; done?: (result: T) => string } = {},
+  ): Promise<T> =>
+    options.progress ? step(label, task, extra) : Promise.resolve(task());
   const resumed = steps.exists(home);
   if (!resumed && !plan.setup)
     fail("SETUP_REQUIRED", "a new buyer needs its standing policy");
-  const setup = resumed ? undefined : steps.setup(home, plan.setup!);
+  if (options.progress) heading(resumed ? "Resuming onboarding" : "Onboarding");
+  const setup = resumed
+    ? undefined
+    : await run(
+        "create buyer and standing policy",
+        () => steps.setup(home, plan.setup!),
+        { done: (result) => String(result.address ?? "") },
+      );
   const approved: Record<string, unknown>[] = [];
   for (const capabilityId of plan.sellers)
-    approved.push(await steps.approve(home, capabilityId));
+    approved.push(
+      await run(
+        `approve ${capabilityId}`,
+        () => steps.approve(home, capabilityId),
+        { done: () => "signature and Walrus manifest verified" },
+      ),
+    );
   const privacyRules: Record<string, unknown>[] = [];
   for (const capabilityClass of plan.privacyClasses)
-    privacyRules.push(await steps.privacy(home, { capabilityClass }));
+    privacyRules.push(
+      await run(
+        `save privacy rule for ${capabilityClass}`,
+        () => steps.privacy(home, { capabilityClass }),
+        { done: (result) => `Walrus Memory ${String(result.blobId ?? "")}` },
+      ),
+    );
   const { publicPayment, shieldedPayment, requestFaucet } = plan.funding;
   const funding =
     BigInt(publicPayment) > 0n || BigInt(shieldedPayment) > 0n
-      ? await steps.fund(home, {
-          publicPayment,
-          shieldedPayment,
-          operationId: "onboard-fund-1",
-          requestFaucet,
-          confirmed: true,
-        })
+      ? // The faucet prints to the terminal, so this step skips the spinner rather than overwrite it.
+        await run(
+          `fund buyer${requestFaucet ? " (faucet if short)" : ""} and prefund the shielded pool`,
+          () =>
+            steps.fund(home, {
+              publicPayment,
+              shieldedPayment,
+              operationId: "onboard-fund-1",
+              requestFaucet,
+              confirmed: true,
+              depositConfirmed: true,
+            }),
+          { spin: false },
+        )
       : undefined;
   const codex = plan.codexConfig
-    ? steps.codex(home, plan.codexConfig)
+    ? await run(
+        "write Codex config",
+        () => steps.codex(home, plan.codexConfig!),
+        { done: (result) => String(result.codexConfig ?? "") },
+      )
     : undefined;
+  if (options.progress) {
+    say(
+      `\n  ${color.green("Done.")} Keep the embedding adapter running, quit every Codex window, then open one and describe the task.`,
+    );
+  }
   return {
     home,
     resumed,
@@ -227,7 +320,7 @@ export async function runBuyerOnboarding(
     ...(codex ? { codex } : {}),
     nextSteps: [
       "Keep the Walrus Memory embedding adapter running (supercuts-embedding-adapter).",
-      "Open one Codex session and describe the task; the deal tools explain themselves.",
+      "Quit every Codex window, then open one session and describe the task; the deal tools explain themselves.",
     ],
   };
 }
@@ -259,136 +352,71 @@ export function describeListing(listing: SellerListing, index: number): string {
 }
 
 /** Interactive onboarding: every question first, one summary, one confirmation, then all steps. */
-export async function promptBuyerOnboarding(
-  home: string,
-): Promise<Record<string, unknown>> {
+export async function promptBuyerOnboarding(home: string): Promise<Record<string, unknown>> {
   const { ask, close } = terminalAsk();
   let plan: OnboardPlan;
-  try {
-    plan = await askOnboarding(home, ask);
-  } finally {
-    close();
-  }
-  return runBuyerOnboarding(home, plan);
+  try { plan = await askOnboarding(home, ask); } finally { close(); }
+  return runBuyerOnboarding(home, plan, defaultSteps, { progress: true });
 }
 
+/** Re-asks a selection until it parses. */
+async function askSelection(ask: Ask, label: string, count: number): Promise<"all" | "none" | number[]> {
+  const answer = await askValid(ask, label, "all", (value) => { try { parseSelection(value, count); return undefined; } catch { return `choose numbers from 1 to ${count}, all, or none`; } });
+  return parseSelection(answer, count);
+}
+const zeroOrMist = (value: string): string | undefined => value === "0" ? undefined : wholeMist(value);
+
 async function askOnboarding(home: string, ask: Ask): Promise<OnboardPlan> {
-  const say = (text: string) => process.stderr.write(`${text}\n`);
+  say(`${color.bold("Supercuts buyer onboarding")}  ${color.dim("one summary and one confirmation at the end; nothing changes before it")}`);
   const resumed = existsSync(join(home, "profile.json"));
-  let setup: BuyerSetup | undefined,
-    source: { directoryUrl?: string; origins?: string[] },
-    ceiling: string,
-    allowPublic: boolean;
+  let setup: BuyerSetup | undefined, source: { directoryUrl?: string; origins?: string[] }, ceiling: string, allowPublic: boolean;
   if (resumed) {
-    say(`Resuming the existing buyer in ${home}; its standing policy is kept.`);
+    say(color.dim(`Resuming the existing buyer in ${home}; its standing policy is kept.`));
     const mandate = loadMandate(home);
-    source = buyerSellerSource(home);
-    ceiling = mandate.perDealCeiling;
-    allowPublic = mandate.allowPublicX402 === true;
+    source = buyerSellerSource(home); ceiling = mandate.perDealCeiling; allowPublic = mandate.allowPublicX402 === true;
   } else {
-    say(
-      "Press Enter to accept a bracketed default. Credentials are read from owner-only files, never typed here.",
-    );
+    heading("1/4  Standing policy");
+    say(color.dim("Press Enter to accept a bracketed default. Credentials are read from owner-only files, never typed here."));
     setup = await askBuyerSetup(ask, { askCounterparties: false });
-    source = {
-      ...(setup.directoryUrl ? { directoryUrl: setup.directoryUrl } : {}),
-      origins: setup.sellerOrigins ?? [],
-    };
-    ceiling = setup.perDealCeiling;
-    allowPublic = setup.allowPublicX402 === true;
+    source = { ...(setup.directoryUrl ? { directoryUrl: setup.directoryUrl } : {}), origins: setup.sellerOrigins ?? [] };
+    ceiling = setup.perDealCeiling; allowPublic = setup.allowPublicX402 === true;
   }
-  const listings = await verifiedListings(source);
-  if (!listings.length)
-    fail(
-      "SELLER_DIRECTORY_UNAVAILABLE",
-      "no signed seller listings were found in the directory or seller origins",
-    );
-  say("\nSigned seller listings (a listing alone does not authorize payment):");
-  listings.forEach((listing, index) =>
-    say(`  ${describeListing(listing, index)}`),
-  );
-  const chosen = pick(
-    listings,
-    parseSelection(
-      await ask("Approve which sellers? numbers like 1,3, all, or none", "all"),
-      listings.length,
-    ),
-  );
+  heading("2/4  Sellers");
+  const listings = await step("load signed seller listings", () => verifiedListings(source), { done: (found) => `${found.length} verified` });
+  if (!listings.length) fail("SELLER_DIRECTORY_UNAVAILABLE", "no signed seller listings were found in the directory or seller origins");
+  say(color.dim("  A listing alone does not authorize payment."));
+  listings.forEach((listing, index) => say(`  ${color.cyan(String(index + 1).padStart(2))}  ${describeListing(listing, index).replace(/^\d+\. /, "")}`));
+  const chosen = pick(listings, await askSelection(ask, "Approve which sellers? numbers like 1,3, all, or none", listings.length));
   const classes = shieldedClasses(chosen);
   let privacyClasses: string[] = [];
+  heading("3/4  Privacy");
   if (classes.length) {
-    say("\nCapability classes these sellers offer privately:");
-    classes.forEach((item, index) => say(`  ${index + 1}. ${item}`));
-    privacyClasses = pick(
-      classes,
-      parseSelection(
-        await ask(
-          "Always settle these classes privately (shielded)? numbers, all, or none",
-          "all",
-        ),
-        classes.length,
-      ),
-    );
-  }
-  const offersPublic =
-    allowPublic &&
-    chosen.some((listing) =>
-      listing.registration.manifest.supportedRails.includes("x402"),
-    );
-  const offersShielded = chosen.some((listing) =>
-    listing.registration.manifest.supportedRails.includes("shielded"),
-  );
-  const publicPayment = await ask(
-    "Fund public x402 payments now, in MIST",
-    offersPublic ? ceiling : "0",
-  );
-  const shieldedPayment = await ask(
-    "Fund private shielded payments now, in MIST (deposited into the pool)",
-    offersShielded ? ceiling : "0",
-  );
-  const requestFaucet =
-    (
-      await ask(
-        "Request Testnet SUI from the faucet for this buyer? yes/no",
-        "yes",
-      )
-    ).toLowerCase() === "yes";
-  const codexAnswer = await ask(
-    "Write the supercuts-buyer server into this Codex config (backed up first), or none",
-    join(homedir(), ".codex", "config.toml"),
-  );
-  const plan: OnboardPlan = {
-    ...(setup ? { setup } : {}),
-    sellers: chosen.map(
-      (listing) => listing.registration.manifest.capabilityId,
-    ),
-    privacyClasses,
-    funding: { publicPayment, shieldedPayment, requestFaucet },
-    ...(codexAnswer.toLowerCase() === "none"
-      ? {}
-      : { codexConfig: codexAnswer }),
-  };
-  say("\nAbout to:");
-  if (setup)
-    say(
-      `  - create the buyer in ${home}: ${setup.perDealCeiling} MIST per deal, ${setup.totalBudget} MIST total, public x402 ${setup.allowPublicX402 ? "allowed" : "not allowed"}`,
-    );
-  say(
-    `  - approve ${plan.sellers.length ? plan.sellers.join(", ") : "no sellers"}`,
-  );
-  say(
-    `  - save a shielded-settlement rule to Walrus Memory for ${privacyClasses.length ? privacyClasses.join(", ") : "no classes"}`,
-  );
-  say(
-    `  - fund ${publicPayment} MIST public and ${shieldedPayment} MIST shielded${requestFaucet ? ", requesting the Testnet faucet if short" : ""}`,
-  );
-  say(
-    `  - ${plan.codexConfig ? `write the Codex config at ${plan.codexConfig}` : "leave the Codex config untouched"}`,
-  );
-  if ((await ask("Proceed? yes/no", "no")).toLowerCase() !== "yes")
-    fail("ONBOARD_CANCELLED", "nothing was changed");
+    say(color.dim("  Classes these sellers can settle through the shielded pool:"));
+    classes.forEach((item, index) => say(`  ${color.cyan(String(index + 1).padStart(2))}  ${item}`));
+    privacyClasses = pick(classes, await askSelection(ask, "Always settle these classes privately (shielded)? numbers, all, or none", classes.length));
+  } else say(color.dim("  None of the chosen sellers offers shielded settlement."));
+  heading("4/4  Funding and Codex");
+  const offersPublic = allowPublic && chosen.some((listing) => listing.registration.manifest.supportedRails.includes("x402"));
+  const offersShielded = chosen.some((listing) => listing.registration.manifest.supportedRails.includes("shielded"));
+  if (!allowPublic && chosen.some((listing) => listing.registration.manifest.supportedRails.includes("x402"))) warn("public x402 is not allowed by this policy, so x402-only sellers cannot be paid");
+  const publicPayment = await askValid(ask, "Fund public x402 payments now, in MIST (0 to skip)", offersPublic ? ceiling : "0", zeroOrMist);
+  const shieldedPayment = await askValid(ask, "Fund private shielded payments now, in MIST (0 to skip)", offersShielded ? ceiling : "0", zeroOrMist);
+  const requestFaucet = await askYesNo(ask, "Request Testnet SUI from the faucet if the buyer is short?", "yes");
+  const codexAnswer = await ask("Write the supercuts-buyer server into this Codex config (backed up first), or none", join(homedir(), ".codex", "config.toml"));
+  const plan: OnboardPlan = { ...(setup ? { setup } : {}), sellers: chosen.map((listing) => listing.registration.manifest.capabilityId), privacyClasses, funding: { publicPayment, shieldedPayment, requestFaucet }, ...(codexAnswer.toLowerCase() === "none" ? {} : { codexConfig: codexAnswer }) };
+  heading("About to");
+  const bullet = (text: string) => say(`  ${color.cyan("-")} ${text}`);
+  if (setup) bullet(`create the buyer in ${home}: ${setup.perDealCeiling} MIST per deal, ${setup.totalBudget} MIST total, public x402 ${setup.allowPublicX402 ? color.green("allowed") : color.yellow("not allowed")}`);
+  bullet(`approve ${plan.sellers.length ? plan.sellers.join(", ") : "no sellers"}`);
+  bullet(`save a shielded-settlement rule to Walrus Memory for ${privacyClasses.length ? privacyClasses.join(", ") : "no classes"}`);
+  if (publicPayment !== "0" || shieldedPayment !== "0") {
+    bullet(`fund ${publicPayment} MIST for public payments and ${shieldedPayment} MIST for shielded payments${requestFaucet ? ", requesting the Testnet faucet if short" : ""}`);
+    if (shieldedPayment !== "0") bullet(`deposit into the experimental Testnet shielded pool ${color.dim("(at least the pool minimum, so later private payments have a note to spend)")}`);
+  } else bullet("make no payment or deposit");
+  bullet(plan.codexConfig ? `write the Codex config at ${plan.codexConfig}` : "leave the Codex config untouched");
+  if (!(await askYesNo(ask, "Proceed?", "no"))) fail("ONBOARD_CANCELLED", "nothing was changed");
   const memory = memoryConfigOf(setup);
-  if (privacyClasses.length && memory) await assertEmbeddingsReady(memory);
+  if (privacyClasses.length && memory) await step("check the Walrus Memory embedding endpoint", () => assertEmbeddingsReady(memory), { done: () => "1536 dimensions" });
   return plan;
 }
 

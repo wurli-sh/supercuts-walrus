@@ -1,3 +1,4 @@
+import { color, say } from "./ui.js";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -70,34 +71,52 @@ function writePolicy(home: string, config: BuyerSetup): void {
 }
 export function setupBuyer(home: string, configPath: string): Record<string, unknown> { return setupBuyerConfig(home, readConfig(resolve(configPath))); }
 export type Ask = (label: string, fallback?: string) => Promise<string>;
-/** The standing-policy questions shared by setup buyer and onboard buyer. */
+
+/** Asks until check accepts the answer (check returns a problem to show, or nothing). */
+export async function askValid(ask: Ask, label: string, fallback: string | undefined, check: (value: string) => string | undefined): Promise<string> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const value = await ask(label, fallback), problem = check(value);
+    if (!problem) return value;
+    say(`  ${color.red("[!!]")} ${problem}`);
+  }
+  return fail("SETUP_INVALID", `${label}: too many invalid answers`);
+}
+export async function askYesNo(ask: Ask, label: string, fallback: "yes" | "no"): Promise<boolean> {
+  return /^y/i.test(await askValid(ask, `${label} yes/no`, fallback, (value) => /^(y|yes|n|no)$/i.test(value) ? undefined : "answer yes or no"));
+}
+export const wholeMist = (value: string): string | undefined => /^[1-9][0-9]*$/.test(value) ? undefined : "enter a whole number of MIST above zero";
+const ownerOnlyPath = (value: string): string | undefined => {
+  if (!value) return "a file path is required";
+  try { return (statSync(resolve(value)).mode & 0o077) !== 0 ? `${value} must be owner-only: chmod 600 ${value}` : undefined; } catch { return `${value} does not exist`; }
+};
+const originAnswer = (value: string): string | undefined => { try { origins([value]); return undefined; } catch { return "enter an https:// origin with no path, or none"; } };
+
+/** The standing-policy questions shared by setup buyer and onboard buyer; each answer is checked as it is given. */
 export async function askBuyerSetup(ask: Ask, options: { askCounterparties?: boolean } = {}): Promise<BuyerSetup> {
-  const days = Number(await ask("Policy duration in days", "14"));
-  if (!Number.isSafeInteger(days) || days < 1 || days > 365) fail("SETUP_INVALID", "policy duration must be 1..365 days");
-  const config: BuyerSetup = {
-    deploymentConfig: await ask("Pinned Testnet deployment config path", "bundled"), tatumKeyFile: await ask("Owner-only Tatum API key file path"),
-    writeGrpc: await ask("Sui write gRPC URL", TESTNET_DEFAULTS.writeGrpc), tatumGrpc: await ask("Tatum read gRPC URL", TESTNET_DEFAULTS.tatumGrpc),
-    walrusPublisher: await ask("Walrus publisher URL", TESTNET_DEFAULTS.walrusPublisher), walrusAggregator: await ask("Walrus aggregator URL", TESTNET_DEFAULTS.walrusAggregator),
-    memoryConfigFile: await ask("Owner-only Walrus Memory config path (blank to skip Memory)"),
-    directoryUrl: await ask("Shared directory origin (type none for direct sellers only)", TESTNET_DEFAULTS.directoryUrl),
-    sellerOrigins: (await ask("Additional seller HTTPS origins, comma separated (or blank)")).split(",").map((item) => item.trim()).filter(Boolean),
-    allowedCounterparties: options.askCounterparties === false ? [] : (await ask("Initially approved seller Sui addresses, comma separated (or blank)")).split(",").map((item) => item.trim()).filter(Boolean),
-    perDealCeiling: await ask("Maximum per deal in MIST", "2000000"), totalBudget: await ask("Lifetime cumulative budget in MIST", "10000000"),
-    expiresAt: Date.now() + days * 24 * 60 * 60 * 1000, allowPublicX402: (await ask("Allow public x402 when requested? yes/no")).toLowerCase() === "yes",
-  };
-  if (config.deploymentConfig === "bundled") config.deploymentConfig = "";
-  if (!config.directoryUrl || config.directoryUrl === "none") delete config.directoryUrl;
+  const days = Number(await askValid(ask, "Policy duration in days", "14", (value) => /^[0-9]+$/.test(value) && Number(value) >= 1 && Number(value) <= 365 ? undefined : "enter 1 to 365 days"));
+  const deploymentConfig = await askValid(ask, "Pinned Testnet deployment config path", "bundled", (value) => value === "bundled" || existsSync(resolve(value)) ? undefined : `${value} does not exist`);
+  const tatumKeyFile = await askValid(ask, "Owner-only Tatum API key file path", undefined, ownerOnlyPath);
+  const writeGrpc = await ask("Sui write gRPC URL", TESTNET_DEFAULTS.writeGrpc), tatumGrpc = await ask("Tatum read gRPC URL", TESTNET_DEFAULTS.tatumGrpc);
+  const walrusPublisher = await ask("Walrus publisher URL", TESTNET_DEFAULTS.walrusPublisher), walrusAggregator = await ask("Walrus aggregator URL", TESTNET_DEFAULTS.walrusAggregator);
+  const memoryConfigFile = await askValid(ask, "Owner-only Walrus Memory config path (blank to skip Memory)", undefined, (value) => value ? ownerOnlyPath(value) : undefined);
+  const directoryUrl = await askValid(ask, "Shared directory origin (none for direct sellers only)", TESTNET_DEFAULTS.directoryUrl, (value) => value === "none" ? undefined : originAnswer(value));
+  const sellerOrigins = (await askValid(ask, "Additional seller HTTPS origins, comma separated (or blank)", undefined, (value) => value.split(",").map((item) => item.trim()).filter(Boolean).map(originAnswer).find(Boolean))).split(",").map((item) => item.trim()).filter(Boolean);
+  const allowedCounterparties = options.askCounterparties === false ? [] : (await askValid(ask, "Initially approved seller Sui addresses, comma separated (or blank)", undefined, (value) => value.split(",").map((item) => item.trim()).filter(Boolean).every((item) => /^0x[0-9a-f]{64}$/i.test(item)) ? undefined : "enter 0x-prefixed 32-byte Sui addresses")).split(",").map((item) => item.trim()).filter(Boolean);
+  const perDealCeiling = await askValid(ask, "Maximum per deal in MIST", "3000000", wholeMist);
+  const totalBudget = await askValid(ask, "Lifetime cumulative budget in MIST", "12000000", (value) => wholeMist(value) ?? (BigInt(value) < BigInt(perDealCeiling) ? `the lifetime budget must cover one deal of ${perDealCeiling} MIST` : undefined));
+  const allowPublicX402 = await askYesNo(ask, "Allow public x402 when a deal asks for it?", "no");
+  const config: BuyerSetup = { deploymentConfig: deploymentConfig === "bundled" ? "" : deploymentConfig, tatumKeyFile, writeGrpc, tatumGrpc, walrusPublisher, walrusAggregator, memoryConfigFile, ...(directoryUrl === "none" ? {} : { directoryUrl }), sellerOrigins, allowedCounterparties, perDealCeiling, totalBudget, expiresAt: Date.now() + days * 24 * 60 * 60 * 1000, allowPublicX402 };
   return validateConfig(config);
 }
 export function terminalAsk(): { ask: Ask; close: () => void } {
   if (!process.stdin.isTTY) fail("SETUP_INPUT_REQUIRED", "interactive setup requires a terminal; use --config with an owner-only JSON file");
   const rl = createInterface({ input: process.stdin, output: process.stderr });
-  return { ask: async (label, fallback) => (await rl.question(fallback ? `${label} [${fallback}]: ` : `${label}: `)).trim() || fallback || "", close: () => rl.close() };
+  return { ask: async (label, fallback) => (await rl.question(`${color.cyan("?")} ${label}${fallback ? color.dim(` [${fallback}]`) : ""}: `)).trim() || fallback || "", close: () => rl.close() };
 }
 export async function promptBuyerSetup(home: string): Promise<Record<string, unknown>> {
   const { ask, close } = terminalAsk();
   try {
-    process.stderr.write("Press Enter to accept a bracketed default. Credentials are read from owner-only files, never typed here.\n");
+    say(color.dim("Press Enter to accept a bracketed default. Credentials are read from owner-only files, never typed here."));
     return setupBuyerConfig(home, await askBuyerSetup(ask));
   } finally { close(); }
 }

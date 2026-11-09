@@ -174,3 +174,33 @@ test("onboarding checks the embedding endpoint before changing anything when a p
   await assert.rejects(() => assertEmbeddingsReady(config, short), { code: "MEMORY_EMBEDDING_INVALID" });
   await assert.rejects(() => assertEmbeddingsReady(config, down), { code: "MEMORY_ENDPOINT_UNREACHABLE" });
 });
+
+test("setup questions re-ask bad answers, default to 3000000/12000000, and require yes or no", async () => {
+  const { askBuyerSetup, askYesNo } = await import("../src/buyer-setup.js");
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join, resolve } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const dir = mkdtempSync(join(tmpdir(), "supercuts-ask-")), key = join(dir, "tatum.key");
+  writeFileSync(key, "k", { mode: 0o600 });
+  const deployment = resolve(fileURLToPath(import.meta.url), "../../../config/phase1.testnet.json");
+  const asked: string[] = [];
+  const script = ["0", "14", deployment, join(dir, "missing.key"), key, "", "", "", "", "", "", "", "", "100", "", "maybe", "y"];
+  const ask = async (label: string, fallback?: string) => { asked.push(`${label}|${fallback ?? ""}`); const answer = script.shift() ?? ""; return answer || fallback || ""; };
+  const config = await askBuyerSetup(ask, { askCounterparties: false });
+  assert.equal(config.perDealCeiling, "3000000");
+  assert.equal(config.totalBudget, "12000000", "the bad 100 budget was re-asked and the default accepted");
+  assert.equal(config.allowPublicX402, true, "maybe was re-asked; y means yes");
+  assert.ok(asked.some((line) => line.startsWith("Allow public x402") && line.endsWith("|no")), "the yes/no default is shown");
+  assert.equal(asked.filter((line) => line.startsWith("Policy duration")).length, 2, "0 days was re-asked");
+  assert.equal(asked.filter((line) => line.startsWith("Owner-only Tatum")).length, 2, "a missing key file was re-asked");
+  assert.equal(await askYesNo(async (_label, fallback) => fallback ?? "", "Proceed?", "no"), false, "blank takes the shown default");
+});
+
+test("onboarding's single confirmation covers the pool deposit", async () => {
+  let deposit: unknown;
+  const steps = { exists: () => true, setup: () => ({}), approve: async () => ({}), privacy: async () => ({}), codex: () => ({}),
+    fund: async (_home: string, values: { depositConfirmed?: boolean }) => { deposit = values.depositConfirmed; return {}; } } as unknown as OnboardSteps;
+  await runBuyerOnboarding("/home", { sellers: [], privacyClasses: [], funding: { publicPayment: "0", shieldedPayment: "3000000", requestFaucet: false } }, steps);
+  assert.equal(deposit, true);
+});

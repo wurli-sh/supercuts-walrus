@@ -42,7 +42,7 @@ export async function prepareFunding(home: string, values: { publicPayment: stri
   } finally { app.close(); }
 }
 
-export async function executeFunding(home: string, values: { publicPayment: string; shieldedPayment: string; gasReserve?: string; changeReserve?: string; operationId: string; requestFaucet: boolean; confirmed: boolean }): Promise<Record<string, unknown>> {
+export async function executeFunding(home: string, values: { publicPayment: string; shieldedPayment: string; gasReserve?: string; changeReserve?: string; operationId: string; requestFaucet: boolean; confirmed: boolean; depositConfirmed?: boolean }): Promise<Record<string, unknown>> {
   if (!values.confirmed) fail("FUNDING_CONFIRMATION_REQUIRED", "funding execution requires --confirm after reviewing the plan");
   let plan = await prepareFunding(home, values);
   if (plan.faucetRequired) {
@@ -63,7 +63,8 @@ export async function executeFunding(home: string, values: { publicPayment: stri
   if (!values.operationId) fail("ARGUMENT_REQUIRED", "funding execute requires --operation-id for safe retry");
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   try {
-    if (process.stdin.isTTY) {
+    // Onboarding already showed the deposit in its one summary and confirmation.
+    if (process.stdin.isTTY && !values.depositConfirmed) {
       const answer = (await rl.question(`Deposit ${plan.poolDepositMist} MIST into the experimental Testnet pool? type yes: `)).trim().toLowerCase();
       if (answer !== "yes") fail("FUNDING_CANCELLED", "pool deposit was not confirmed");
     }
