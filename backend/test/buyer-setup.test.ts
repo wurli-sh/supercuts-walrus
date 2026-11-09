@@ -83,3 +83,20 @@ test("Codex MCP config survives package upgrades and ships a codex mcp add comma
   const command = codexAddCommand("/usr/bin/node", stable, { SUPERCUTS_HOME: "/h/it's buyer", SUPERCUTS_RUN_ID: "r1" });
   assert.equal(command, `codex mcp add supercuts-buyer --env 'SUPERCUTS_HOME=/h/it'\\''s buyer' --env 'SUPERCUTS_RUN_ID=r1' -- '/usr/bin/node' '${stable}'`);
 });
+
+test("a buyer gets its own Walrus Memory namespace without editing the shared memory config", async () => {
+  const { Phase3App: App } = await import("../src/phase3.js");
+  const root = mkdtempSync(join(tmpdir(), "supercuts-namespace-")), tatum = join(root, "tatum.key"), memory = join(root, "memory.json");
+  writeFileSync(tatum, "test-key", { mode: 0o600 });
+  writeFileSync(memory, JSON.stringify({ key: "delegate-key", accountId: "0xaccount", suiPrivateKey: "memory-signer", namespace: "shared:old" }), { mode: 0o600 });
+  const base = { deploymentConfig: resolve(fileURLToPath(import.meta.url), "../../../config/phase1.testnet.json"), tatumKeyFile: tatum, writeGrpc: "https://fullnode.testnet.sui.io:443", tatumGrpc: "https://example.invalid:443", walrusPublisher: "https://publisher.example", walrusAggregator: "https://aggregator.example", memoryConfigFile: memory, sellerOrigins: ["https://seller.example"], perDealCeiling: "100", totalBudget: "500", expiresAt: Date.now() + 86_400_000 };
+  const namespaceOf = (home: string) => { const app = new App(home); try { return (JSON.parse(app.store.getSecret("live:memory-config")!.toString()) as { namespace: string }).namespace; } finally { app.close(); } };
+  for (const [name, memoryNamespace, expected] of [["auto", "auto", /^supercuts:buyer-[0-9a-f]{8}$/], ["named", "supercuts:rec-take2", /^supercuts:rec-take2$/], ["kept", undefined, /^shared:old$/]] as const) {
+    const path = join(root, `${name}.json`);
+    writeFileSync(path, JSON.stringify({ ...base, ...(memoryNamespace ? { memoryNamespace } : {}) }), { mode: 0o600 });
+    const setup = setupBuyer(join(root, name), path);
+    assert.match(namespaceOf(join(root, name)), expected);
+    if (memoryNamespace) assert.equal(setup.memoryNamespace, namespaceOf(join(root, name)));
+  }
+  assert.equal((JSON.parse(readFileSync(memory, "utf8")) as { namespace: string }).namespace, "shared:old", "the shared memory config file is never edited");
+});

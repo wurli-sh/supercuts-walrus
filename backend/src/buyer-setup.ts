@@ -20,6 +20,8 @@ import { TESTNET_DEFAULTS, withTestnetDefaults } from "./testnet-defaults.js";
 export interface BuyerSetup {
   deploymentConfig: string; tatumKeyFile: string; writeGrpc: string; tatumGrpc: string;
   walrusPublisher: string; walrusAggregator: string; memoryConfigFile?: string;
+  /** "auto" gives this buyer its own fresh namespace; a name shares it on purpose; omitted keeps the config file's. */
+  memoryNamespace?: string;
   sellerOrigins?: string[]; directoryUrl?: string; allowedCounterparties?: string[]; allowedCapabilityIds?: string[];
   allowedCapabilityClasses?: string[]; perDealCeiling: string; totalBudget: string;
   expiresAt: number; allowPublicX402?: boolean; suiKeyFile?: string; rapidsnark?: string;
@@ -55,6 +57,7 @@ export function validateConfig(config: BuyerSetup): BuyerSetup {
   const deployment = JSON.parse(readFileSync(resolve(config.deploymentConfig), "utf8")) as { verifierVersion?: number; network?: string };
   if (deployment.network !== "testnet" || deployment.verifierVersion !== 2) fail("SETUP_INVALID", "buyer setup requires the pinned v2 Testnet deployment");
   if (config.allowPublicX402 !== undefined && typeof config.allowPublicX402 !== "boolean") fail("SETUP_INVALID", "allowPublicX402 must be boolean");
+  if (config.memoryNamespace !== undefined && (!config.memoryConfigFile || config.memoryNamespace !== "auto" && !/^[A-Za-z0-9:._-]{1,64}$/.test(config.memoryNamespace))) fail("SETUP_INVALID", "memoryNamespace needs a memoryConfigFile and must be auto or 1..64 letters, digits, and :._-");
   for (const list of [config.allowedCapabilityIds, config.allowedCapabilityClasses]) if (list !== undefined && (!Array.isArray(list) || list.some((item) => typeof item !== "string" || !item))) fail("SETUP_INVALID", "capability allowlists must contain nonempty strings");
   return config;
 }
@@ -99,13 +102,14 @@ export async function askBuyerSetup(ask: Ask, options: { askCounterparties?: boo
   const writeGrpc = await ask("Sui write gRPC URL", TESTNET_DEFAULTS.writeGrpc), tatumGrpc = await ask("Tatum read gRPC URL", TESTNET_DEFAULTS.tatumGrpc);
   const walrusPublisher = await ask("Walrus publisher URL", TESTNET_DEFAULTS.walrusPublisher), walrusAggregator = await ask("Walrus aggregator URL", TESTNET_DEFAULTS.walrusAggregator);
   const memoryConfigFile = await askValid(ask, "Owner-only Walrus Memory config path (blank to skip Memory)", undefined, (value) => value ? ownerOnlyPath(value) : undefined);
+  const memoryNamespace = memoryConfigFile ? await askValid(ask, "Walrus Memory namespace (auto = fresh memories for this buyer; a name shares them)", "auto", (value) => value === "auto" || /^[A-Za-z0-9:._-]{1,64}$/.test(value) ? undefined : "use auto or 1-64 letters, digits, and :._-") : undefined;
   const directoryUrl = await askValid(ask, "Shared directory origin (none for direct sellers only)", TESTNET_DEFAULTS.directoryUrl, (value) => value === "none" ? undefined : originAnswer(value));
   const sellerOrigins = (await askValid(ask, "Additional seller HTTPS origins, comma separated (or blank)", undefined, (value) => value.split(",").map((item) => item.trim()).filter(Boolean).map(originAnswer).find(Boolean))).split(",").map((item) => item.trim()).filter(Boolean);
   const allowedCounterparties = options.askCounterparties === false ? [] : (await askValid(ask, "Initially approved seller Sui addresses, comma separated (or blank)", undefined, (value) => value.split(",").map((item) => item.trim()).filter(Boolean).every((item) => /^0x[0-9a-f]{64}$/i.test(item)) ? undefined : "enter 0x-prefixed 32-byte Sui addresses")).split(",").map((item) => item.trim()).filter(Boolean);
   const perDealCeiling = await askValid(ask, "Maximum per deal in MIST", "3000000", wholeMist);
   const totalBudget = await askValid(ask, "Lifetime cumulative budget in MIST", "12000000", (value) => wholeMist(value) ?? (BigInt(value) < BigInt(perDealCeiling) ? `the lifetime budget must cover one deal of ${perDealCeiling} MIST` : undefined));
   const allowPublicX402 = await askYesNo(ask, "Allow public x402 when a deal asks for it?", "no");
-  const config: BuyerSetup = { deploymentConfig: deploymentConfig === "bundled" ? "" : deploymentConfig, tatumKeyFile, writeGrpc, tatumGrpc, walrusPublisher, walrusAggregator, memoryConfigFile, ...(directoryUrl === "none" ? {} : { directoryUrl }), sellerOrigins, allowedCounterparties, perDealCeiling, totalBudget, expiresAt: Date.now() + days * 24 * 60 * 60 * 1000, allowPublicX402 };
+  const config: BuyerSetup = { deploymentConfig: deploymentConfig === "bundled" ? "" : deploymentConfig, tatumKeyFile, writeGrpc, tatumGrpc, walrusPublisher, walrusAggregator, memoryConfigFile, ...(memoryNamespace ? { memoryNamespace } : {}), ...(directoryUrl === "none" ? {} : { directoryUrl }), sellerOrigins, allowedCounterparties, perDealCeiling, totalBudget, expiresAt: Date.now() + days * 24 * 60 * 60 * 1000, allowPublicX402 };
   return validateConfig(config);
 }
 export function terminalAsk(): { ask: Ask; close: () => void } {
@@ -120,6 +124,18 @@ export async function promptBuyerSetup(home: string): Promise<Record<string, unk
     return setupBuyerConfig(home, await askBuyerSetup(ask));
   } finally { close(); }
 }
+/**
+ * Stores the namespace only in this buyer's encrypted copy of the Memory config, so several buyers can
+ * share one owner-only memory.json without sharing memories, and the file itself is never edited.
+ */
+function setBuyerMemoryNamespace(home: string, namespace: string): string {
+  const app = new Phase3App(home);
+  try {
+    const saved = app.store.getSecret("live:memory-config") ?? fail("LIVE_MEMORY_CONFIG_MISSING", "buyer memory configuration is missing");
+    app.store.putSecret("live:memory-config", Buffer.from(JSON.stringify({ ...JSON.parse(saved.toString()) as Record<string, unknown>, namespace })));
+    return namespace;
+  } finally { app.close(); }
+}
 export function setupBuyerConfig(home: string, config: BuyerSetup): Record<string, unknown> {
   if (existsSync(join(home, "profile.json"))) fail("PROFILE_EXISTS", "buyer home already exists; use setup renew for a standing policy update");
   mkdirSync(home, { recursive: true, mode: 0o700 }); chmodSync(home, 0o700);
@@ -132,7 +148,8 @@ export function setupBuyerConfig(home: string, config: BuyerSetup): Record<strin
   const decoded = decodeSuiPrivateKey(readFileSync(keyPath, "utf8").trim());
   if (decoded.scheme !== "ED25519") fail("SETUP_INVALID", "buyer key must use ED25519");
   const address = Ed25519Keypair.fromSecretKey(decoded.secretKey).toSuiAddress();
-  return { home, address, ...session, policy: "configured", nextSteps: [
+  const memoryNamespace = config.memoryNamespace && config.memoryConfigFile ? setBuyerMemoryNamespace(home, config.memoryNamespace === "auto" ? `supercuts:buyer-${address.slice(2, 10)}` : config.memoryNamespace) : undefined;
+  return { home, address, ...(memoryNamespace ? { memoryNamespace } : {}), ...session, policy: "configured", nextSteps: [
     `Fund only this buyer with Testnet SUI: supercuts funding execute --home ${home} --public-payment <MIST> --shielded-payment 0 --operation-id fund-1 --request-faucet --confirm (or use https://faucet.sui.io for ${address})`,
     ...(config.allowedCounterparties?.length ? [] : [`Review the directory, then approve a seller: supercuts policy approve-seller --home ${home} --capability-id <id>`]),
     ...(config.memoryConfigFile ? [`Keep the Walrus Memory embedding adapter running (supercuts-embedding-adapter). An MCP agent flushes outcome memories itself; SDK-only hosts also run: supercuts-memory-worker ${home}`] : []),

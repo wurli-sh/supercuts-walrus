@@ -204,3 +204,31 @@ test("onboarding's single confirmation covers the pool deposit", async () => {
   await runBuyerOnboarding("/home", { sellers: [], privacyClasses: [], funding: { publicPayment: "0", shieldedPayment: "3000000", requestFaucet: false } }, steps);
   assert.equal(deposit, true);
 });
+
+test("starting a new buyer moves the old home aside and refuses while an MCP server holds it", async () => {
+  const { moveBuyerAside } = await import("../src/buyer-onboard.js");
+  const { existsSync, mkdirSync, mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = mkdtempSync(join(tmpdir(), "supercuts-aside-")), home = join(root, "buyer");
+  mkdirSync(home); writeFileSync(join(home, "profile.json"), "{}");
+  writeFileSync(join(home, ".mcp.lock"), JSON.stringify({ pid: process.pid }));
+  assert.throws(() => moveBuyerAside(home), { code: "ROLE_HOME_BUSY" });
+  writeFileSync(join(home, ".mcp.lock"), JSON.stringify({ pid: 2 ** 22 + 7 }));
+  const moved = moveBuyerAside(home, new Date("2026-11-09T10:11:12Z"));
+  assert.equal(moved, `${home}-20261109-101112`);
+  assert.equal(existsSync(join(moved, "profile.json")), true, "nothing is deleted");
+  assert.equal(existsSync(home), false);
+});
+
+test("start new moves the old buyer aside, then sets up a fresh one in the same place", async () => {
+  let exists = true;
+  const calls: string[] = [];
+  const steps = { exists: () => exists, setup: () => { calls.push("setup"); return { address: "0xnew", memoryNamespace: "supercuts:buyer-abcdef12" }; }, approve: async () => ({}), privacy: async () => ({}), fund: async () => ({}), codex: () => ({}),
+    moveAside: (home: string) => { calls.push("moveAside"); exists = false; return `${home}-20261109-101112`; } } as unknown as OnboardSteps;
+  const result = await runBuyerOnboarding("/home/buyer", { ...plan, replaceExisting: true, sellers: [], privacyClasses: [], funding: { publicPayment: "0", shieldedPayment: "0", requestFaucet: false } }, steps);
+  assert.deepEqual(calls, ["moveAside", "setup"]);
+  assert.equal(result.movedAside, "/home/buyer-20261109-101112");
+  assert.equal(result.memoryNamespace, "supercuts:buyer-abcdef12");
+  assert.equal(result.resumed, false);
+});

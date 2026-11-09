@@ -1,3 +1,4 @@
+import { roleHomeBusyRecovery } from "./role-lock.js";
 import { color, heading, say, step, warn } from "./ui.js";
 import {
   chmodSync,
@@ -6,6 +7,7 @@ import {
   readFileSync,
   statSync,
   writeFileSync,
+  renameSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -41,6 +43,8 @@ export interface OnboardPlan {
     shieldedPayment: string;
     requestFaucet: boolean;
   };
+  /** Move an existing buyer home aside (never delete it) and onboard a new buyer in its place. */
+  replaceExisting?: boolean;
   /** Codex config.toml to receive the supercuts-buyer server; omit to skip. */
   codexConfig?: string;
 }
@@ -68,6 +72,7 @@ export interface OnboardSteps {
     },
   ) => Promise<Record<string, unknown>>;
   codex: (home: string, configPath: string) => Record<string, unknown>;
+  moveAside?: (home: string) => string;
 }
 
 const defaultSteps: OnboardSteps = {
@@ -171,6 +176,27 @@ export function writeCodexConfig(
   };
 }
 
+/** The live MCP process holding this buyer home, if any. */
+export function buyerLeaseHolder(home: string): number | undefined {
+  try {
+    const pid = Number((JSON.parse(readFileSync(join(home, ".mcp.lock"), "utf8")) as { pid?: number }).pid);
+    if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+    process.kill(pid, 0);
+    return pid;
+  } catch { return undefined; }
+}
+
+/** Renames an existing buyer home to <home>-YYYYMMDD-HHMMSS, keeping its wallet, deals, and evidence. */
+export function moveBuyerAside(home: string, now = new Date()): string {
+  const holder = buyerLeaseHolder(home);
+  if (holder) fail("ROLE_HOME_BUSY", `quit Codex (/exit) first: ${roleHomeBusyRecovery(holder)}`);
+  const stamp = now.toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+  const target = `${resolve(home)}-${stamp}`;
+  if (existsSync(target)) fail("SETUP_INVALID", `${target} already exists`);
+  renameSync(resolve(home), target);
+  return target;
+}
+
 /** Walrus Memory needs 1536-dimension embeddings from the owner's local endpoint; check it before anything is created. */
 export async function assertEmbeddingsReady(
   config: {
@@ -243,10 +269,11 @@ export async function runBuyerOnboarding(
     extra: { spin?: boolean; done?: (result: T) => string } = {},
   ): Promise<T> =>
     options.progress ? step(label, task, extra) : Promise.resolve(task());
+  const replacing = plan.replaceExisting === true && steps.exists(home);
+  if (options.progress) heading(replacing || !steps.exists(home) ? "Onboarding" : "Resuming onboarding");
+  const movedAside = replacing ? await run("move the existing buyer aside", () => (steps.moveAside ?? moveBuyerAside)(home), { done: (target) => `kept at ${target}` }) : undefined;
   const resumed = steps.exists(home);
-  if (!resumed && !plan.setup)
-    fail("SETUP_REQUIRED", "a new buyer needs its standing policy");
-  if (options.progress) heading(resumed ? "Resuming onboarding" : "Onboarding");
+  if (!resumed && !plan.setup) fail("SETUP_REQUIRED", "a new buyer needs its standing policy");
   const setup = resumed
     ? undefined
     : await run(
@@ -303,9 +330,8 @@ export async function runBuyerOnboarding(
     );
   }
   return {
-    home,
-    resumed,
-    ...(setup ? { address: setup.address, runId: setup.runId } : {}),
+    home, resumed, ...(movedAside ? { movedAside } : {}),
+    ...(setup ? { address: setup.address, runId: setup.runId, ...(setup.memoryNamespace ? { memoryNamespace: setup.memoryNamespace } : {}) } : {}),
     approved: approved.map((item) => ({
       capabilityId: item.capabilityId,
       sellerId: item.sellerId,
@@ -368,7 +394,16 @@ const zeroOrMist = (value: string): string | undefined => value === "0" ? undefi
 
 async function askOnboarding(home: string, ask: Ask): Promise<OnboardPlan> {
   say(`${color.bold("Supercuts buyer onboarding")}  ${color.dim("one summary and one confirmation at the end; nothing changes before it")}`);
-  const resumed = existsSync(join(home, "profile.json"));
+  let resumed = existsSync(join(home, "profile.json")), replaceExisting = false;
+  if (resumed) {
+    say(color.dim(`A buyer already exists in ${home}.`));
+    const choice = await askValid(ask, "Resume it, or start a new buyer here (the old one is moved aside, never deleted)? resume/new", "resume", (value) => /^(resume|new)$/i.test(value) ? undefined : "answer resume or new");
+    if (/^new$/i.test(choice)) {
+      const holder = buyerLeaseHolder(home);
+      if (holder) fail("ROLE_HOME_BUSY", `quit Codex (/exit) first: ${roleHomeBusyRecovery(holder)}`);
+      resumed = false; replaceExisting = true;
+    }
+  }
   let setup: BuyerSetup | undefined, source: { directoryUrl?: string; origins?: string[] }, ceiling: string, allowPublic: boolean;
   if (resumed) {
     say(color.dim(`Resuming the existing buyer in ${home}; its standing policy is kept.`));
@@ -403,9 +438,10 @@ async function askOnboarding(home: string, ask: Ask): Promise<OnboardPlan> {
   const shieldedPayment = await askValid(ask, "Fund private shielded payments now, in MIST (0 to skip)", offersShielded ? ceiling : "0", zeroOrMist);
   const requestFaucet = await askYesNo(ask, "Request Testnet SUI from the faucet if the buyer is short?", "yes");
   const codexAnswer = await ask("Write the supercuts-buyer server into this Codex config (backed up first), or none", join(homedir(), ".codex", "config.toml"));
-  const plan: OnboardPlan = { ...(setup ? { setup } : {}), sellers: chosen.map((listing) => listing.registration.manifest.capabilityId), privacyClasses, funding: { publicPayment, shieldedPayment, requestFaucet }, ...(codexAnswer.toLowerCase() === "none" ? {} : { codexConfig: codexAnswer }) };
+  const plan: OnboardPlan = { ...(replaceExisting ? { replaceExisting } : {}), ...(setup ? { setup } : {}), sellers: chosen.map((listing) => listing.registration.manifest.capabilityId), privacyClasses, funding: { publicPayment, shieldedPayment, requestFaucet }, ...(codexAnswer.toLowerCase() === "none" ? {} : { codexConfig: codexAnswer }) };
   heading("About to");
   const bullet = (text: string) => say(`  ${color.cyan("-")} ${text}`);
+  if (replaceExisting) bullet(`move the existing buyer aside to ${home}-<timestamp> ${color.dim("(kept, not deleted)")}`);
   if (setup) bullet(`create the buyer in ${home}: ${setup.perDealCeiling} MIST per deal, ${setup.totalBudget} MIST total, public x402 ${setup.allowPublicX402 ? color.green("allowed") : color.yellow("not allowed")}`);
   bullet(`approve ${plan.sellers.length ? plan.sellers.join(", ") : "no sellers"}`);
   bullet(`save a shielded-settlement rule to Walrus Memory for ${privacyClasses.length ? privacyClasses.join(", ") : "no classes"}`);
@@ -437,6 +473,7 @@ export async function onboardBuyerFromConfig(
   const raw = JSON.parse(readFileSync(path, "utf8")) as BuyerSetup & {
     onboarding?: {
       sellers?: "all" | string[];
+      replaceExisting?: boolean;
       privacyClasses?: "all" | string[];
       funding?: Partial<OnboardPlan["funding"]>;
       codexConfig?: string;
@@ -449,7 +486,9 @@ export async function onboardBuyerFromConfig(
       "noninteractive onboarding funds and approves sellers; rerun with --yes after reviewing the config",
     );
   const { onboarding, ...setupKeys } = raw;
-  const resumed = existsSync(join(home, "profile.json"));
+  const replaceExisting = onboarding.replaceExisting === true && existsSync(join(home, "profile.json"));
+  if (replaceExisting && buyerLeaseHolder(home)) fail("ROLE_HOME_BUSY", `quit Codex (/exit) first: ${roleHomeBusyRecovery(buyerLeaseHolder(home))}`);
+  const resumed = existsSync(join(home, "profile.json")) && !replaceExisting;
   const setup = resumed ? undefined : validateConfig(setupKeys as BuyerSetup);
   const source = resumed
     ? buyerSellerSource(home)
@@ -475,6 +514,7 @@ export async function onboardBuyerFromConfig(
   const memory = memoryConfigOf(setup);
   if (privacyClasses.length && memory) await assertEmbeddingsReady(memory);
   return runBuyerOnboarding(home, {
+    ...(replaceExisting ? { replaceExisting } : {}),
     ...(setup ? { setup } : {}),
     sellers,
     privacyClasses,
