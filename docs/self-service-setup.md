@@ -9,8 +9,31 @@ not call Walrus directly. The shielded pool is experimental and runs only on Sui
 
 ## Buyer: configure once
 
-Install and build the backend, then run `supercuts setup buyer --home
-<owner-only-directory>`. The command prompts in the local terminal for the
+The quickest path is one guided command:
+
+```sh
+pnpm add @supercuts-walrus/backend
+supercuts-embedding-adapter &   # with EMBEDDING_UPSTREAM_BASE_URL and EMBEDDING_UPSTREAM_MODEL set
+supercuts onboard buyer --home ./buyer
+```
+
+It asks every question first: the standing policy below, which signed
+directory sellers to approve, which capability classes to always settle
+privately (shielded), how much to fund, and which Codex config to update. It
+then shows one summary and asks once. On `yes` it creates the buyer, approves
+the sellers, saves the privacy rules to Walrus Memory, requests the Testnet
+faucet and makes the pool deposit, and writes the `supercuts-buyer` server,
+with its tool timeouts, into the Codex config after backing it up. It checks
+the embedding endpoint before changing anything, and rerunning it resumes an
+interrupted onboarding. For scripts, add an `onboarding` object (`sellers`:
+`"all"` or IDs, `privacyClasses`: `"all"` or classes, `funding`,
+`codexConfig`) to the setup JSON below and run `supercuts onboard buyer --home
+<buyer-home> --config <file> --yes`. Approve more sellers later with
+`supercuts policy approve-seller --home <buyer-home> --all` or a
+comma-separated `--capability-id`.
+
+The individual steps remain available. `supercuts setup buyer --home
+<owner-only-directory>` creates only the standing policy. The command prompts in the local terminal for the
 pinned deployment path, RPC and Walrus endpoints, credential **file paths**,
 seller HTTPS origins and Sui addresses, a per-deal ceiling, a lifetime
 cumulative budget, a policy duration, and whether public x402 is allowed. It
