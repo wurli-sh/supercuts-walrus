@@ -16,7 +16,7 @@ import { canonicalJson } from "./settlement.js";
 import { validateDirectoryOrigin } from "./seller-directory.js";
 import { TESTNET_DEFAULTS, withTestnetDefaults } from "./testnet-defaults.js";
 
-interface BuyerSetup {
+export interface BuyerSetup {
   deploymentConfig: string; tatumKeyFile: string; writeGrpc: string; tatumGrpc: string;
   walrusPublisher: string; walrusAggregator: string; memoryConfigFile?: string;
   sellerOrigins?: string[]; directoryUrl?: string; allowedCounterparties?: string[]; allowedCapabilityIds?: string[];
@@ -39,7 +39,7 @@ function origins(values: unknown): string[] {
     return url.origin;
   });
 }
-function validateConfig(config: BuyerSetup): BuyerSetup {
+export function validateConfig(config: BuyerSetup): BuyerSetup {
   withTestnetDefaults(config);
   if (!config.sellerOrigins?.length && !config.directoryUrl) config.directoryUrl = TESTNET_DEFAULTS.directoryUrl;
   amount(config.perDealCeiling, "perDealCeiling"); amount(config.totalBudget, "totalBudget");
@@ -69,31 +69,39 @@ function writePolicy(home: string, config: BuyerSetup): void {
   writeFileSync(profilePath, `${JSON.stringify(profile, null, 2)}\n`, { mode: 0o600 }); chmodSync(profilePath, 0o600);
 }
 export function setupBuyer(home: string, configPath: string): Record<string, unknown> { return setupBuyerConfig(home, readConfig(resolve(configPath))); }
-export async function promptBuyerSetup(home: string): Promise<Record<string, unknown>> {
+export type Ask = (label: string, fallback?: string) => Promise<string>;
+/** The standing-policy questions shared by setup buyer and onboard buyer. */
+export async function askBuyerSetup(ask: Ask, options: { askCounterparties?: boolean } = {}): Promise<BuyerSetup> {
+  const days = Number(await ask("Policy duration in days", "14"));
+  if (!Number.isSafeInteger(days) || days < 1 || days > 365) fail("SETUP_INVALID", "policy duration must be 1..365 days");
+  const config: BuyerSetup = {
+    deploymentConfig: await ask("Pinned Testnet deployment config path", "bundled"), tatumKeyFile: await ask("Owner-only Tatum API key file path"),
+    writeGrpc: await ask("Sui write gRPC URL", TESTNET_DEFAULTS.writeGrpc), tatumGrpc: await ask("Tatum read gRPC URL", TESTNET_DEFAULTS.tatumGrpc),
+    walrusPublisher: await ask("Walrus publisher URL", TESTNET_DEFAULTS.walrusPublisher), walrusAggregator: await ask("Walrus aggregator URL", TESTNET_DEFAULTS.walrusAggregator),
+    memoryConfigFile: await ask("Owner-only Walrus Memory config path (blank to skip Memory)"),
+    directoryUrl: await ask("Shared directory origin (type none for direct sellers only)", TESTNET_DEFAULTS.directoryUrl),
+    sellerOrigins: (await ask("Additional seller HTTPS origins, comma separated (or blank)")).split(",").map((item) => item.trim()).filter(Boolean),
+    allowedCounterparties: options.askCounterparties === false ? [] : (await ask("Initially approved seller Sui addresses, comma separated (or blank)")).split(",").map((item) => item.trim()).filter(Boolean),
+    perDealCeiling: await ask("Maximum per deal in MIST", "2000000"), totalBudget: await ask("Lifetime cumulative budget in MIST", "10000000"),
+    expiresAt: Date.now() + days * 24 * 60 * 60 * 1000, allowPublicX402: (await ask("Allow public x402 when requested? yes/no")).toLowerCase() === "yes",
+  };
+  if (config.deploymentConfig === "bundled") config.deploymentConfig = "";
+  if (!config.directoryUrl || config.directoryUrl === "none") delete config.directoryUrl;
+  return validateConfig(config);
+}
+export function terminalAsk(): { ask: Ask; close: () => void } {
   if (!process.stdin.isTTY) fail("SETUP_INPUT_REQUIRED", "interactive setup requires a terminal; use --config with an owner-only JSON file");
   const rl = createInterface({ input: process.stdin, output: process.stderr });
-  try {
-    const ask = async (label: string, fallback?: string) => (await rl.question(fallback ? `${label} [${fallback}]: ` : `${label}: `)).trim() || fallback || "";
-    process.stderr.write("Press Enter to accept a bracketed default. Credentials are read from owner-only files, never typed here.\n");
-    const days = Number(await ask("Policy duration in days", "14"));
-    if (!Number.isSafeInteger(days) || days < 1 || days > 365) fail("SETUP_INVALID", "policy duration must be 1..365 days");
-    const config: BuyerSetup = {
-      deploymentConfig: await ask("Pinned Testnet deployment config path", "bundled"), tatumKeyFile: await ask("Owner-only Tatum API key file path"),
-      writeGrpc: await ask("Sui write gRPC URL", TESTNET_DEFAULTS.writeGrpc), tatumGrpc: await ask("Tatum read gRPC URL", TESTNET_DEFAULTS.tatumGrpc),
-      walrusPublisher: await ask("Walrus publisher URL", TESTNET_DEFAULTS.walrusPublisher), walrusAggregator: await ask("Walrus aggregator URL", TESTNET_DEFAULTS.walrusAggregator),
-      memoryConfigFile: await ask("Owner-only Walrus Memory config path (blank to skip Memory)"),
-      directoryUrl: await ask("Shared directory origin (type none for direct sellers only)", TESTNET_DEFAULTS.directoryUrl),
-      sellerOrigins: (await ask("Additional seller HTTPS origins, comma separated (or blank)")).split(",").map((item) => item.trim()).filter(Boolean),
-      allowedCounterparties: (await ask("Initially approved seller Sui addresses, comma separated (or blank)")).split(",").map((item) => item.trim()).filter(Boolean),
-      perDealCeiling: await ask("Maximum per deal in MIST", "2000000"), totalBudget: await ask("Lifetime cumulative budget in MIST", "10000000"),
-      expiresAt: Date.now() + days * 24 * 60 * 60 * 1000, allowPublicX402: (await ask("Allow public x402 when requested? yes/no")).toLowerCase() === "yes",
-    };
-    if (config.deploymentConfig === "bundled") config.deploymentConfig = "";
-    if (!config.directoryUrl || config.directoryUrl === "none") delete config.directoryUrl;
-    return setupBuyerConfig(home, validateConfig(config));
-  } finally { rl.close(); }
+  return { ask: async (label, fallback) => (await rl.question(fallback ? `${label} [${fallback}]: ` : `${label}: `)).trim() || fallback || "", close: () => rl.close() };
 }
-function setupBuyerConfig(home: string, config: BuyerSetup): Record<string, unknown> {
+export async function promptBuyerSetup(home: string): Promise<Record<string, unknown>> {
+  const { ask, close } = terminalAsk();
+  try {
+    process.stderr.write("Press Enter to accept a bracketed default. Credentials are read from owner-only files, never typed here.\n");
+    return setupBuyerConfig(home, await askBuyerSetup(ask));
+  } finally { close(); }
+}
+export function setupBuyerConfig(home: string, config: BuyerSetup): Record<string, unknown> {
   if (existsSync(join(home, "profile.json"))) fail("PROFILE_EXISTS", "buyer home already exists; use setup renew for a standing policy update");
   mkdirSync(home, { recursive: true, mode: 0o700 }); chmodSync(home, 0o700);
   const keyPath = config.suiKeyFile ? resolve(config.suiKeyFile) : join(home, "buyer.sui.key");
@@ -154,22 +162,20 @@ export function renewBuyer(home: string, configPath: string): Record<string, unk
   writePolicy(home, config);
   return { home, policy: "renewed", reservedMist: spent.toString(), remainingMist: (BigInt(config.totalBudget) - spent).toString() };
 }
-export async function approveBuyerSeller(home: string, capabilityId: string): Promise<Record<string, unknown>> {
-  if (!capabilityId) fail("ARGUMENT_REQUIRED", "--capability-id is required");
-  const mandate = loadMandate(home);
-  if (mandate.role !== "buyer" || mandate.version !== "supercuts.mandate.v2") fail("SETUP_INVALID", "seller approval requires a v2 buyer home");
-  const sourcePath = join(home, "deal-sellers.json"); ownerFile(sourcePath);
-  const source = JSON.parse(readFileSync(sourcePath, "utf8")) as { directoryUrl?: string; origins?: string[] };
-  if (!source.directoryUrl && !source.origins?.length) fail("SELLER_DIRECTORY_UNAVAILABLE", "buyer has no configured shared directory or seller origins");
-  const matches: SignedCapabilityRegistration[] = [], direct = new Set<SignedCapabilityRegistration>();
-  // Owner-configured seller origins are searched first; their signed capabilities must point back at that origin.
+export interface SellerListing { registration: SignedCapabilityRegistration; direct: boolean }
+/**
+ * Every signed capability offered by the owner's direct seller origins and shared directory.
+ * Direct-origin capabilities must point back at that origin. Nothing here authorizes payment.
+ */
+export async function fetchSellerListings(source: { directoryUrl?: string; origins?: string[] }): Promise<SellerListing[]> {
+  const listings: SellerListing[] = [];
   for (const origin of source.origins ?? []) {
     const response = await fetch(new URL("/v2/catalog", origin), { redirect: "error", signal: AbortSignal.timeout(15_000) }).catch(() => undefined);
     if (!response?.ok) continue;
     const catalog = await response.json() as { capabilities?: SignedCapabilityRegistration[] };
     for (const item of Array.isArray(catalog.capabilities) ? catalog.capabilities.slice(0, 100) : []) {
-      if (item.manifest?.capabilityId !== capabilityId || new URL(item.manifest.endpoint).origin !== new URL(origin).origin) continue;
-      matches.push(item); direct.add(item);
+      if (!item.manifest?.endpoint || new URL(item.manifest.endpoint).origin !== new URL(origin).origin) continue;
+      listings.push({ registration: item, direct: true });
     }
   }
   for (let offset = 0; source.directoryUrl && offset <= 100_000;) {
@@ -177,15 +183,30 @@ export async function approveBuyerSeller(home: string, capabilityId: string): Pr
     if (!response.ok) fail("SELLER_DIRECTORY_UNAVAILABLE", `directory returned HTTP ${response.status}`);
     const catalog = await response.json() as { capabilities?: SignedCapabilityRegistration[]; nextOffset?: number };
     if (!Array.isArray(catalog.capabilities) || catalog.capabilities.length > 100) fail("SELLER_DIRECTORY_INVALID", "directory catalog is invalid");
-    matches.push(...(catalog.capabilities ?? []).filter((item) => item.manifest?.capabilityId === capabilityId));
+    listings.push(...(catalog.capabilities ?? []).map((registration) => ({ registration, direct: false })));
     if (catalog.nextOffset === undefined) break;
     if (catalog.nextOffset !== offset + 100 || catalog.capabilities?.length !== 100) fail("SELLER_DIRECTORY_INVALID", "directory pagination is invalid");
     offset = catalog.nextOffset;
   }
+  return listings;
+}
+export function buyerSellerSource(home: string): { directoryUrl?: string; origins?: string[] } {
+  const sourcePath = join(home, "deal-sellers.json"); ownerFile(sourcePath);
+  return JSON.parse(readFileSync(sourcePath, "utf8")) as { directoryUrl?: string; origins?: string[] };
+}
+export async function approveBuyerSeller(home: string, capabilityId: string): Promise<Record<string, unknown>> {
+  if (!capabilityId) fail("ARGUMENT_REQUIRED", "--capability-id is required");
+  const mandate = loadMandate(home);
+  if (mandate.role !== "buyer" || mandate.version !== "supercuts.mandate.v2") fail("SETUP_INVALID", "seller approval requires a v2 buyer home");
+  const sourcePath = join(home, "deal-sellers.json"); ownerFile(sourcePath);
+  const source = JSON.parse(readFileSync(sourcePath, "utf8")) as { directoryUrl?: string; origins?: string[] };
+  if (!source.directoryUrl && !source.origins?.length) fail("SELLER_DIRECTORY_UNAVAILABLE", "buyer has no configured shared directory or seller origins");
+  const listings = await fetchSellerListings(source);
+  const matches = listings.filter((listing) => listing.registration.manifest?.capabilityId === capabilityId);
   if (matches.length !== 1) fail("SELLER_DIRECTORY_INVALID", "capability must resolve to exactly one live registration in the directory or configured seller origins");
-  const registration = matches[0]!; await verifySignedCapability(registration);
+  const { registration, direct } = matches[0]!; await verifySignedCapability(registration);
   // Directory listings must use public HTTPS origins; a direct origin was chosen by the owner at setup.
-  const endpoint = direct.has(registration) ? new URL(registration.manifest.endpoint) : await validateDirectoryOrigin(registration.manifest.endpoint);
+  const endpoint = direct ? new URL(registration.manifest.endpoint) : await validateDirectoryOrigin(registration.manifest.endpoint);
   const sellerResponse = await fetch(new URL("/v2/catalog", endpoint.origin), { redirect: "error", signal: AbortSignal.timeout(15_000) });
   if (!sellerResponse.ok) fail("SELLER_CATALOG_INVALID", "seller endpoint is unavailable");
   const served = await sellerResponse.json() as { capabilities?: unknown[] };
@@ -233,10 +254,14 @@ export async function addBuyerPrivacyRule(home: string, selector: PrivacyRuleSel
     const mandate = loadMandate(home);
     const catalog = (await new LiveDealPorts(app, mandate).catalog()).map(({ registration }) => registration.manifest);
     const rule = ownerPrivacyRule(catalog, selector);
-    const args = { "operation-id": rule.operationId, memory: Buffer.from(JSON.stringify(rule.memory)).toString("base64url") };
+    // A retry must send the exact rule first authorized under this operation ID, including its createdAt.
+    const savedKey = `owner-privacy-rule:${rule.operationId}`, saved = app.store.getSecret(savedKey);
+    const memory = saved ? JSON.parse(saved.toString()) as Record<string, unknown> : rule.memory;
+    if (!saved) app.store.putSecretOnce(savedKey, Buffer.from(JSON.stringify(memory)));
+    const args = { "operation-id": rule.operationId, memory: Buffer.from(JSON.stringify(memory)).toString("base64url") };
     const approval = app.approve(app.preview("memory.policy", args).challengeId);
     const result = (await app.execute("memory.policy", { ...args, "approval-token": approval.token })).data;
-    const scope = rule.memory.scope as { counterparty?: string };
+    const scope = memory.scope as { counterparty?: string };
     return { ...selector, ...(scope.counterparty ? { sellerId: scope.counterparty } : {}), coveredCapabilities: rule.matched, blobId: result.blobId, kind: result.kind, provenance: result.provenance };
   } finally { app.close(); }
 }
