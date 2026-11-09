@@ -4,14 +4,14 @@ import { createMemoryFlusher } from "./memory-flusher.js";
 import { Phase3App, errorOutput, homePath } from "./phase3.js";
 import { executeMandated, loadMandate, toolSchema } from "./mandate.js";
 import { RemoteBuyer } from "./remote-buyer.js";
-import { DemoEventLog } from "./events.js";
+import { DemoEventLog, dealBelongsToRun, runStartedAt } from "./events.js";
 import { DealJournal, type ExecuteDealInput } from "./deal.js";
 import { createConfiguredDealEngine } from "./deal-adapter.js";
 import { LiveDealPorts } from "./live-deal-ports.js";
 import type { SettlementPlanV1 } from "./settlement.js";
 import { createRequire } from "node:module";
 import { fail } from "./errors.js";
-import { acquireRoleHomeLease } from "./role-lock.js";
+import { acquireRoleHomeLease, roleHomeBusyRecovery } from "./role-lock.js";
 
 const PACKAGE_VERSION = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -23,6 +23,7 @@ const mandate = loadMandate(home);
 const remote = roleLease.acquired && app.profile.role === "buyer" && !app.profile.mock && process.env.SUPERCUTS_SELLER_URL ? new RemoteBuyer(app, mandate, process.env.SUPERCUTS_SELLER_URL) : undefined;
 const eventLog = roleLease.acquired && process.env.SUPERCUTS_EVENT_PATH && process.env.SUPERCUTS_RUN_ID ? new DemoEventLog(process.env.SUPERCUTS_EVENT_PATH, process.env.SUPERCUTS_RUN_ID) : undefined;
 if (eventLog) eventLog.append({ actor: "operator", stage: "run", status: "started", publicDetails: { flow: remote ? "codex-remote" : "codex-deal-v2" }, evidenceHashes: [], explorerLinks: [] });
+const runStart = eventLog ? runStartedAt(eventLog.path) : undefined;
 const memoryFlusher = createMemoryFlusher(() => app.processMemoryOutbox(), (error) => process.stderr.write(`${error && typeof error === "object" && "code" in error ? String(error.code) : "MEMORY_WORKER_ERROR"}\n`));
 const memoryTick = async () => { memoryFlusher.kick(); };
 const memoryConfigured = roleLease.acquired && app.profile.role === "buyer" && !app.profile.mock && Boolean(app.store.getSecret("live:memory-config"));
@@ -68,6 +69,9 @@ function logTool(name: string, data: Record<string, unknown>): void {
   if (name === "remote.settle-analysis") append("buyer", "private-settlement", { rail: "shielded", transactionDigest: data.transactionDigest, checkpoint: data.checkpoint, planHash: data.planHash, visibility: data.visibility }, typeof data.dealCommitment === "string" ? [data.dealCommitment] : []);
   if (name === "remote.delivery" && data.status === "delivered") append("buyer", "artifact-delivery", { kind: "competitor-analysis", artifactSha256: data.artifactSha256, sessionId: data.sessionId }, typeof data.artifactSha256 === "string" ? [data.artifactSha256] : []);
   if ((name === "deal.execute" || name === "deal.resume" || name === "deal.get") && typeof data.dealId === "string") {
+    // Reading an earlier run's deal must not join this run's recorded evidence.
+    const created = (app.store.db.prepare("SELECT created_at FROM deal_operations WHERE operation_id=?").get(String(data.operationId)) as { created_at: number } | undefined)?.created_at;
+    if (!dealBelongsToRun(created, runStart)) return;
     const journal = new DealJournal(app.store), evidence = journal.evidence(data.dealId);
     const plan = journal.step<SettlementPlanV1>(String(data.operationId), "planning");
     if (plan) append("supercuts", "settlement-plan", { phase: "after-memory", planHash: plan.planHash, capabilityId: plan.capabilityId, rail: plan.rail, openingAmount: plan.openingAmount, maximumAmount: plan.maximumAmount, riskLevel: plan.riskLevel, reasonCodes: plan.reasonCodes, blobIds: plan.citations.map((item) => item.blobId) });
@@ -89,7 +93,7 @@ rl.on("line", (line) => { queue = queue.then(async () => {
     if (request.method === "tools/list") return send({ jsonrpc: "2.0", id: request.id, result: { tools: available.map((name) => { const spec = toolSchema(name); return { name, description: spec.description, inputSchema: spec.inputSchema }; }) } });
     if (request.method === "tools/call") {
       const name = String(request.params?.name ?? ""), raw = (request.params?.arguments ?? {}) as Record<string, unknown>;
-      if (!available.includes(name)) return send({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: "Tool is unavailable for this role or configuration" } });
+      if (!available.includes(name)) return send({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: roleLease.acquired ? "Tool is unavailable for this role or configuration" : roleHomeBusyRecovery(roleLease.ownerPid) } });
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) return send({ jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "Tool arguments must be an object" } });
       let data: Record<string, unknown>;
       if (name.startsWith("deal.")) {
@@ -132,7 +136,7 @@ rl.on("line", (line) => { queue = queue.then(async () => {
           name === "remote.events" ? await buyer.events(String(raw.runId)) :
           name === "remote.research" ? await buyer.research({ operationId: String(raw["operation-id"]), runId: String(raw.runId), topic: String(raw.topic), budget: String(raw.budget) }) : {};
       } else data = await executeMandated(app, mandate, name, raw);
-      if (name === "status") data = { ...data, session: { runId: process.env.SUPERCUTS_RUN_ID ?? null }, roleHomeLease: roleLease.acquired ? "acquired" : "busy", ...(roleLease.ownerPid ? { roleHomeOwnerPid: roleLease.ownerPid } : {}) };
+      if (name === "status") data = { ...data, session: { runId: process.env.SUPERCUTS_RUN_ID ?? null }, roleHomeLease: roleLease.acquired ? "acquired" : "busy", ...(roleLease.ownerPid ? { roleHomeOwnerPid: roleLease.ownerPid } : {}), ...(roleLease.acquired ? {} : { recovery: roleHomeBusyRecovery(roleLease.ownerPid) }) };
       logTool(name, data);
       const result = { schemaVersion: "supercuts.v1", ok: true, command: name, data };
       return send({ jsonrpc: "2.0", id: request.id, result: { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result } });

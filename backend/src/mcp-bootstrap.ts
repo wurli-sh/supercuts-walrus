@@ -3,7 +3,11 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { createRequire } from "node:module";
-import { homePath } from "./phase3.js";
+import { assertSupportedNode } from "./node-guard.js";
+
+// stdout carries JSON-RPC, so a version failure is reported on stderr.
+assertSupportedNode("stderr");
+const { homePath } = await import("./phase3.js");
 
 const PACKAGE_VERSION = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 const home = homePath({});

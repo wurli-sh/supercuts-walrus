@@ -13,6 +13,14 @@ function active(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+/** Owner-facing steps when another MCP process already serves this role home. */
+export function roleHomeBusyRecovery(ownerPid: number | undefined): string {
+  const holder = ownerPid ? `process ${ownerPid}` : "another Supercuts MCP process";
+  return `This role home is served by ${holder}; this connection exposes only status. ` +
+    "Close other agent sessions that use this home. Codex keeps MCP servers alive in its background daemon after the TUI exits, " +
+    `so stop it with \`pkill -f 'codex app-server'\`${ownerPid ? ` and the stale server with \`kill ${ownerPid}\`` : ""}, then restart the agent.`;
+}
+
 /** Best-effort process lease. SQLite still owns data integrity; this prevents
  * multiple long-running role workers from operating one role home at once. */
 export function acquireRoleHomeLease(home: string): RoleHomeLease {

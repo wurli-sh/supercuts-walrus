@@ -1,38 +1,5 @@
 #!/usr/bin/env node
-import { Phase3App, errorOutput, homePath, initialize, parseArgs } from "./phase3.js";
-import { addBuyerPrivacyRule, approveBuyerSeller, createBuyerSession, promptBuyerSetup, renewBuyer, setupBuyer } from "./buyer-setup.js";
-import { onboardingDoctor } from "./onboarding-doctor.js";
-import { executeFunding, prepareFunding } from "./funding.js";
-import { packageHostedSeller } from "./seller-package.js";
-import { promptSellerSetup, setupSeller } from "./seller-setup.js";
-import { scaffoldSeller } from "./seller-scaffold.js";
-import { generateSellerResearch } from "./seller-research.js";
-import { installProofs, proofsStatus } from "./proofs-install.js";
+import { assertSupportedNode } from "./node-guard.js";
 
-const words = process.argv.slice(2);
-let command = words.shift() ?? "";
-if (["wallet", "offer", "pay", "resource", "memory", "audit", "capability", "settlement", "setup", "policy", "onboarding", "onboard", "funding", "seller", "proofs"].includes(command)) command += `.${words.shift() ?? ""}`;
-if (command === "wallet.exit" && ["queue", "status", "finalize"].includes(words[0] ?? "")) command += `.${words.shift()}`;
-try {
-  // A trailing --help must never fall through and run the command against the default home.
-  const subcommandHelp = words.includes("--help") || words.includes("-h");
-  if (!command || command === "help" || command === "--help" || command === "-h" || command === "setup." || subcommandHelp) {
-    process.stdout.write(`${JSON.stringify({ schemaVersion: "supercuts.help.v1", ok: true, ...(subcommandHelp ? { command: command.replace(".", " ") } : {}), commands: ["onboard buyer", "onboard seller", "seller scaffold", "seller research", "seller package", "funding prepare", "funding execute", "setup buyer", "setup seller", "setup renew", "setup session", "init", "doctor", "status", "wallet", "offer", "pay", "memory", "memory insights", "proofs install", "proofs status", "capability", "audit"], setup: "Run supercuts onboard buyer or supercuts onboard seller with an isolated --home. Then use seller scaffold to generate a capability. Research sellers can use seller research to create a cited owner-review draft before packaging.", live: "Fund only the generated buyer address. A seller does not need faucet funds to publish or receive a capability payment." })}\n`);
-    process.exit(0);
-  }
-  const args = parseArgs(words);
-  if (command === "proofs.install" || command === "proofs.status") {
-    // Proving keys are shared, public, hash-pinned files; they need no role home.
-    const dir = typeof args.dir === "string" ? args.dir : undefined;
-    const data = command === "proofs.status" ? await proofsStatus(dir) : await installProofs({ ...(dir ? { dir } : {}), ...(typeof args.source === "string" ? { source: args.source } : {}), onProgress: (file) => process.stderr.write(`verifying ${file.path} (${Math.ceil(file.size / 1048576)} MB)\n`) });
-    process.stdout.write(`${JSON.stringify({ schemaVersion: "supercuts.proofs.v1", ok: true, command, data })}\n`);
-    process.exit(0);
-  }
-  const home = homePath(args);
-  const fundingInput = { publicPayment: String(args["public-payment"] ?? "0"), shieldedPayment: String(args["shielded-payment"] ?? "0"), ...(typeof args["gas-reserve"] === "string" ? { gasReserve: args["gas-reserve"] } : {}), ...(typeof args["change-reserve"] === "string" ? { changeReserve: args["change-reserve"] } : {}) };
-  const result = command === "init" ? initialize(home, args) : command === "setup.buyer" || command === "onboard.buyer" ? { schemaVersion: "supercuts.setup.v1", ok: true, command, data: typeof args.config === "string" ? setupBuyer(home, args.config) : await promptBuyerSetup(home) } : command === "setup.seller" || command === "onboard.seller" ? { schemaVersion: "supercuts.setup.v1", ok: true, command, data: typeof args.config === "string" ? setupSeller(home, args.config) : await promptSellerSetup(home) } : command === "seller.scaffold" ? { schemaVersion: "supercuts.seller-scaffold.v1", ok: true, command, data: scaffoldSeller({ ...args, home }) } : command === "seller.research" ? { schemaVersion: "supercuts.seller-research.v1", ok: true, command, data: await generateSellerResearch({ kind: String(args.kind ?? ""), topic: String(args.topic ?? ""), output: String(args.output ?? ""), ...(typeof args["context-file"] === "string" ? { contextFile: args["context-file"] } : {}), ...(typeof args["allowed-domains"] === "string" ? { allowedDomains: args["allowed-domains"] } : {}), ...(typeof args.model === "string" ? { model: args.model } : {}) }) } : command === "setup.renew" ? { schemaVersion: "supercuts.setup.v1", ok: true, command, data: renewBuyer(home, String(args.config ?? "")) } : command === "setup.session" ? { schemaVersion: "supercuts.setup.v1", ok: true, command, data: createBuyerSession(home) } : command === "funding.prepare" ? { schemaVersion: "supercuts.funding.v1", ok: true, command, data: await prepareFunding(home, fundingInput) } : command === "funding.execute" ? { schemaVersion: "supercuts.funding.v1", ok: true, command, data: await executeFunding(home, { ...fundingInput, operationId: String(args["operation-id"] ?? ""), requestFaucet: args["request-faucet"] === true, confirmed: args.confirm === true }) } : command === "seller.package" ? { schemaVersion: "supercuts.seller-package.v1", ok: true, command, data: await packageHostedSeller({ home, spec: String(args.spec ?? ""), artifact: String(args.artifact ?? ""), metadata: String(args.metadata ?? ""), registration: String(args.registration ?? ""), bundle: String(args.bundle ?? ""), ...(typeof args["content-type"] === "string" ? { contentType: args["content-type"] } : {}) }) } : command === "policy.add" ? { schemaVersion: "supercuts.setup.v1", ok: true, command, data: await addBuyerPrivacyRule(home, String(args["capability-id"] ?? "")) } : command === "policy.approve-seller" ? { schemaVersion: "supercuts.setup.v1", ok: true, command, data: await approveBuyerSeller(home, String(args["capability-id"] ?? "")) } : command === "memory.insights" ? await (async () => { const app = new Phase3App(home); try { return { schemaVersion: "supercuts.memory-insights.v1", ok: true, command, data: await app.memoryInsights() }; } finally { app.close(); } })() : command === "onboarding.doctor" ? { schemaVersion: "supercuts.onboarding.v1", ok: true, command, data: await onboardingDoctor(home, typeof args.config === "string" ? args.config : undefined) } : await (async () => { const app = new Phase3App(home); try { return await app.execute(command, args); } finally { app.close(); } })();
-  if (args.authorize === true) (result as typeof result & { warnings?: string[] }).warnings = ["--authorize is a deprecated compatibility path; SDK integrations must use bound approval tokens"];
-  process.stdout.write(`${JSON.stringify(result)}\n`);
-} catch (error) {
-  process.stdout.write(`${JSON.stringify(errorOutput(error))}\n`); process.exitCode = 1;
-}
+assertSupportedNode();
+await import("./cli-main.js");

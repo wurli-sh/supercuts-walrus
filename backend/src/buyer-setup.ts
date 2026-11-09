@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync,
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
@@ -10,7 +10,7 @@ import { fail } from "./errors.js";
 import { Phase3App, initialize } from "./phase3.js";
 import { loadMandate, type AgentMandate } from "./mandate.js";
 import { LiveDealPorts } from "./live-deal-ports.js";
-import { verifySignedCapability, type SignedCapabilityRegistration } from "./capability.js";
+import { verifySignedCapability, type CapabilityManifest, type SignedCapabilityRegistration } from "./capability.js";
 import { WalrusDealBlobs } from "./deal-wire.js";
 import { canonicalJson } from "./settlement.js";
 import { validateDirectoryOrigin } from "./seller-directory.js";
@@ -204,19 +204,40 @@ export async function approveBuyerSeller(home: string, capabilityId: string): Pr
   writeFileSync(profilePath, `${JSON.stringify(profile, null, 2)}\n`, { mode: 0o600 });
   return { capabilityId, sellerId: registration.manifest.sellerId, approved: true, manifestHash: registration.manifest.manifestHash, description: registration.manifest.description, priceBand: registration.manifest.priceBand, asset: registration.manifest.asset, supportedRails: registration.manifest.supportedRails, expiresAt: registration.manifest.expiresAt };
 }
-export async function addBuyerPrivacyRule(home: string, capabilityId: string): Promise<Record<string, unknown>> {
+export interface PrivacyRuleSelector { capabilityId?: string; capabilityClass?: string }
+
+/**
+ * Builds the owner's shielded-settlement rule. A capability ID binds one signed offer from one
+ * seller; a capability class (for example sui.confidential-analysis) covers every seller offering
+ * that class, so the rule still applies when a seller re-registers under a new capability ID.
+ */
+export function ownerPrivacyRule(manifests: CapabilityManifest[], selector: PrivacyRuleSelector, now = Date.now()): { memory: Record<string, unknown>; operationId: string; matched: string[] } {
+  const { capabilityId, capabilityClass } = selector;
+  if (Boolean(capabilityId) === Boolean(capabilityClass)) fail("POLICY_SCOPE_INVALID", "privacy rule needs exactly one of --capability-id or --capability-class");
+  const matches = manifests.filter((manifest) => capabilityId ? manifest.capabilityId === capabilityId : manifest.capability === capabilityClass);
+  if (!matches.length || capabilityId && matches.length !== 1) fail("POLICY_CAPABILITY_INVALID", "privacy rule requires a signed seller capability in the approved catalog");
+  const assets = [...new Set(matches.map((manifest) => manifest.asset))];
+  if (assets.length !== 1) fail("POLICY_CAPABILITY_INVALID", "a class privacy rule must cover capabilities priced in one asset");
+  const first = matches[0]!;
+  const scope = capabilityId
+    ? { capabilityId: first.capabilityId, counterparty: first.sellerId, network: "sui:testnet", asset: first.asset }
+    : { capabilityClass: capabilityClass!, network: "sui:testnet", asset: assets[0]! };
+  const operationId = capabilityId ? `owner-privacy-${first.manifestHash}` : `owner-privacy-class-${createHash("sha256").update(canonicalJson(scope)).digest("hex")}`;
+  return { memory: { version: "supercuts.settlement-memory.v1", kind: "privacy_rule", scope, createdAt: now, signal: { requiresShielded: true } }, operationId, matched: matches.map((manifest) => manifest.capabilityId) };
+}
+
+export async function addBuyerPrivacyRule(home: string, selector: PrivacyRuleSelector): Promise<Record<string, unknown>> {
   const app = new Phase3App(home);
   try {
     if (app.profile.role !== "buyer" || app.profile.mock) fail("LIVE_PROFILE_REQUIRED", "privacy rules require a live buyer home");
     const mandate = loadMandate(home);
-    const matches = (await new LiveDealPorts(app, mandate).catalog()).filter(({ registration }) => registration.manifest.capabilityId === capabilityId);
-    if (matches.length !== 1) fail("POLICY_CAPABILITY_INVALID", "privacy rule requires one signed seller capability");
-    const manifest = matches[0]!.registration.manifest;
-    const memory = { version: "supercuts.settlement-memory.v1", kind: "privacy_rule", scope: { capabilityId: manifest.capabilityId, counterparty: manifest.sellerId, network: "sui:testnet", asset: manifest.asset }, createdAt: Date.now(), signal: { requiresShielded: true } };
-    const args = { "operation-id": `owner-privacy-${manifest.manifestHash}`, memory: Buffer.from(JSON.stringify(memory)).toString("base64url") };
+    const catalog = (await new LiveDealPorts(app, mandate).catalog()).map(({ registration }) => registration.manifest);
+    const rule = ownerPrivacyRule(catalog, selector);
+    const args = { "operation-id": rule.operationId, memory: Buffer.from(JSON.stringify(rule.memory)).toString("base64url") };
     const approval = app.approve(app.preview("memory.policy", args).challengeId);
     const result = (await app.execute("memory.policy", { ...args, "approval-token": approval.token })).data;
-    return { capabilityId, sellerId: manifest.sellerId, blobId: result.blobId, kind: result.kind, provenance: result.provenance };
+    const scope = rule.memory.scope as { counterparty?: string };
+    return { ...selector, ...(scope.counterparty ? { sellerId: scope.counterparty } : {}), coveredCapabilities: rule.matched, blobId: result.blobId, kind: result.kind, provenance: result.provenance };
   } finally { app.close(); }
 }
 function readReserved(home: string): bigint {

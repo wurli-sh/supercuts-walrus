@@ -55,6 +55,22 @@ export class DemoEventLog {
   }
 }
 
+/** When this event stream's run began, from its first event; undefined before the stream exists. */
+export function runStartedAt(path: string): number | undefined {
+  if (!existsSync(path)) return undefined;
+  const first = readDemoEvents(path)[0];
+  return first ? Date.parse(first.timestamp) : undefined;
+}
+
+/**
+ * A deal joins a run's evidence only if it was created during that run, so reading an
+ * earlier run's deal (deal.get on an old operation) cannot stand in for this run's deal.
+ */
+export function dealBelongsToRun(createdAt: number | undefined, startedAt: number | undefined): boolean {
+  if (startedAt === undefined) return true;
+  return createdAt !== undefined && createdAt >= startedAt;
+}
+
 export function readDemoEvents(path: string): DemoEvent[] {
   if (!existsSync(path)) fail("EVENT_STREAM_NOT_FOUND", `event stream ${path} does not exist`);
   return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line, index) => {
