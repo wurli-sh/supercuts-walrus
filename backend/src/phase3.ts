@@ -462,7 +462,13 @@ export class Phase3App {
       if (existing) { if (existing.fact_hash !== factHash) fail("MEMORY_OPERATION_CONFLICT", "memory operation ID identifies another envelope"); if (existing.status === "complete" && existing.blob_id) return { operationId, namespace: config.namespace, blobId: existing.blob_id, status: "complete", kind: memory.kind, provenance }; return fail("MEMORY_JOB_PENDING", "memory job is not complete"); }
       this.store.db.prepare("INSERT INTO memory_jobs(operation_id,kind,fact_hash,blob_id,status,created_at) VALUES(?,?,?,NULL,'pending',?)").run(operationId, memory.kind, factHash, Date.now());
       try { const blobId = await manual.remember(memory); this.store.db.prepare("UPDATE memory_jobs SET blob_id=?,status='complete' WHERE operation_id=?").run(blobId, operationId); this.registerMemoryAuthority(blobId, memory); return { operationId, namespace: config.namespace, blobId, status: "complete", kind: memory.kind, provenance }; }
-      catch (error) { this.store.db.prepare("UPDATE memory_jobs SET status='unresolved' WHERE operation_id=?").run(operationId); throw error; }
+      catch (error) {
+        // An unreachable embedding endpoint or relayer means the write never got through: clear the job so the same
+        // operation ID can simply be retried. Any other failure may have landed and stays unresolved for reconciliation.
+        if ((error as { code?: string }).code === "MEMORY_ENDPOINT_UNREACHABLE") this.store.db.prepare("DELETE FROM memory_jobs WHERE operation_id=? AND status='pending'").run(operationId);
+        else this.store.db.prepare("UPDATE memory_jobs SET status='unresolved' WHERE operation_id=?").run(operationId);
+        throw error;
+      }
     } finally { manual.destroy(); }
   }
 
