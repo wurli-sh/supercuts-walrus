@@ -14,7 +14,7 @@ Built for **Total Recall: Tatum x Walrus Memory Hackathon**.
 
 | Requirement | Where |
 | --- | --- |
-| Walrus Memory writes on Mainnet, at least 10 memories | Encrypted typed memories via the Mainnet relayer; the recorded run reused ten completed live writes, and each `deal.execute` deal writes a verified outcome ([`docs/pool-v2.md`](docs/pool-v2.md)) |
+| [Walrus Memory writes on Mainnet, at least 10 memories](https://thewalrussessions.wal.app/tatum-total-recall) | Encrypted typed memories via the Mainnet relayer; the recorded run reused ten completed live writes, and each `deal.execute` deal writes a verified outcome ([recorded evidence](docs/pool-v2.md), [Mainnet account history](https://suiscan.xyz/mainnet/account/0x256cd198efddd95661a8043f30b120e85ff3d3c47b018f5ef865f3cd116bdc7f)) |
 | Tatum RPC for on-chain data | Native HTTP/2 gRPC reads from Tatum's Sui Testnet gateway verify every payment before delivery or memory ([`backend/src/tatum.ts`](backend/src/tatum.ts)) |
 | Blog post | [dev.to post](https://dev.to/wurlish/supercuts-agent-payments-that-learn-with-walrus-memory-and-tatum-on-sui-5gb) (source: [`docs/blog.md`](docs/blog.md)) |
 | Working demo and public repo | [Demo video](https://youtu.be/c4zur-LeqPE) · [npm package](https://www.npmjs.com/package/@supercuts-walrus/sdk) · this repository |
@@ -25,11 +25,42 @@ Built for **Total Recall: Tatum x Walrus Memory Hackathon**.
 | Item | Value |
 | --- | --- |
 | Tatum ID | `6ae3708bc99b2663b4ac8c5d` |
-| Walrus Memory Sui address | `0x256cd198efddd95661a8043f30b120e85ff3d3c47b018f5ef865f3cd116bdc7f` |
+| Walrus Memory Sui address | [`0x256cd198efddd95661a8043f30b120e85ff3d3c47b018f5ef865f3cd116bdc7f`](https://suiscan.xyz/mainnet/account/0x256cd198efddd95661a8043f30b120e85ff3d3c47b018f5ef865f3cd116bdc7f) (Mainnet transaction history) |
 | Walrus Memory account ID (Sui) | `0x33697c54b71b47569b71e62a9c2f602657eb7151e3d0c2d6adb7d1014f53ae7d` |
 | `MEMWAL_AGENT_ID` (delegate public key) | `e8e77c4490a223d392412efa56d8004e52c7d63b5b23cd724bd3ccb315cdab4b` |
 
 These are public identifiers only; no private key or API key is published.
+
+## How Supercuts uses Walrus
+
+Supercuts uses Walrus blob storage for deal evidence and Walrus Memory on Mainnet for decisions that carry into later deals. These are separate paths:
+
+| Feature | What happens in a live deal | Where to inspect it |
+| --- | --- | --- |
+| Seller discovery | A seller signs its capability registration and publishes the manifest to Walrus. The buyer checks the signature and reads the published manifest before treating the listing as a candidate. | [`backend/src/phase3.ts`](backend/src/phase3.ts), [`backend/src/seller-catalog-generate.ts`](backend/src/seller-catalog-generate.ts) |
+| Private negotiation | Buyer and seller exchange signed, encrypted offers. The ordered transcript and accepted agreement are stored as ciphertext blobs; the runtime reads them back and checks their hashes before payment. The agreement binds the operation, task, capability, parties, amount, and rail. | [`backend/src/negotiation.ts`](backend/src/negotiation.ts), [`backend/src/deal-engine.ts`](backend/src/deal-engine.ts) |
+| Delivery evidence | The seller encrypts the artifact for the buyer, publishes the delivery envelope, and the buyer verifies the Walrus readback and artifact before completion. `deal.evidence` exposes the transcript, agreement, and delivery blob IDs and readback status. | [`backend/src/seller-runtime.ts`](backend/src/seller-runtime.ts), [`backend/src/deal.ts`](backend/src/deal.ts) |
+| Owner rules and recall | Walrus Memory stores typed privacy and budget rules, scoped by capability, class, or seller. Embeddings and encryption happen locally; the relayer receives ciphertext. Trusted owner rules carry the owner's memory-key signature, so a later session or machine can authenticate them. Agent notes remain advisory. | [`backend/src/memwal.ts`](backend/src/memwal.ts), [`backend/src/settlement.ts`](backend/src/settlement.ts) |
+| Learned seller outcomes | After a verified settlement and delivery, an outbox writes an encrypted outcome with amount, rail, latency, and success or a verified seller fault. Discovery recalls these outcomes for each candidate and builds a recency-weighted reliability scorecard. Planning uses the same memories for privacy, periodic spend, and owner-review decisions. | [`backend/src/memory-scorecard.ts`](backend/src/memory-scorecard.ts), [`backend/src/phase3.ts`](backend/src/phase3.ts) |
+| Durable write check | The runtime syncs `listMemories()` metadata by cursor and checks that the specific outcome blob is indexed. An uncertain write stays unresolved for reconciliation rather than being submitted again. `complete` requires the indexed outcome. | [`backend/src/memwal.ts`](backend/src/memwal.ts), [`backend/src/deal-engine.ts`](backend/src/deal-engine.ts) |
+
+The recorded run reused ten completed live Mainnet Memory writes and performed a fresh owner-rule recall. The later `deal.execute` Testnet deals each indexed a new outcome. In the confidential walkthrough, the recalled class rule changes the requested x402 rail to shielded; `deal.evidence.memoryInfluence` reports `changedRail: true`, the plan reports `MEMORY_PRIVACY_OVERRODE_RAIL`, and the evidence cites the memory blob ID. A seller change should be claimed only when that same evidence reports `changedSeller: true`.
+
+Walrus Mainnet Memory requires 1536-dimensional embeddings. The repository adapter zero-pads the local model's 768 values and must be used for both writes and recalls. Memory plaintext stays local and is not sent to the relayer or demo events.
+
+## How Supercuts uses Tatum
+
+Sui Testnet is the payment chain. Supercuts submits signed transactions through its Sui write RPC, then uses Tatum's Sui Testnet gRPC gateway as an independent read before accepting settlement evidence. The owner-only Tatum API key is never part of a seller manifest or agent prompt.
+
+| Feature | Verification performed | Where to inspect it |
+| --- | --- | --- |
+| Gateway client and health check | A native HTTP/2 gRPC client calls `LedgerService.GetServiceInfo` during `doctor`. It also supports `GetTransaction` and `GetObject`, enforces HTTPS outside loopback, and bounds request time and response size. | [`backend/src/tatum.ts`](backend/src/tatum.ts), [`backend/src/live-runtime.ts`](backend/src/live-runtime.ts) |
+| Payment finality | `GetTransaction` requests digest, checkpoint, effects, events, and balance changes. The runtime checks that Tatum's digest, successful effects, and checkpoint agree with the finalized Sui RPC result before marking a payment final. This covers x402 and shielded transfers. | [`backend/src/finality.ts`](backend/src/finality.ts), [`backend/src/live-runtime.ts`](backend/src/live-runtime.ts) |
+| Seller release gate | The seller independently verifies the payment with Sui and Tatum and checks it against its signed agreement. For x402 it checks the public transfer; for shielded work it checks the pool event and recovered note. A payment digest cannot be reused for another request. | [`backend/src/live-seller-verifier.ts`](backend/src/live-seller-verifier.ts) |
+| Recovery and exit | Signed transactions are journaled by operation ID. An ambiguous broadcast is reconciled by digest rather than blindly paid again. The separate v2 exit relayer also checks Tatum finality for the queued withdrawal. | [`backend/src/live-runtime.ts`](backend/src/live-runtime.ts), [`backend/src/v2-exit-relayer.ts`](backend/src/v2-exit-relayer.ts) |
+| Memory input | Only a verified payment and delivery can produce a trusted `verified_outcome` memory. A Tatum outage leaves settlement pending or unresolved; a broadcast digest alone is insufficient. | [`backend/src/deal-engine.ts`](backend/src/deal-engine.ts), [`backend/src/phase3.ts`](backend/src/phase3.ts) |
+
+The [recorded v2 relayed exit](docs/pool-v2.md) was confirmed by Sui and Tatum at checkpoint `401764344`. The transaction table below gives additional funded Testnet digests; the owner-only event stream and role homes are needed to replay the full verification path.
 
 ## Fast review
 
