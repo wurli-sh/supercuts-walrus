@@ -1,6 +1,6 @@
 <img src="docs/assets/banner.png" width="100%" alt="Supercuts: private negotiation and settlement for agents, boosted by Walrus Memory" />
 
-[Demo video](https://youtu.be/c4zur-LeqPE) · [npm package](https://www.npmjs.com/package/@supercuts-walrus/sdk) · [Blog post](https://dev.to/wurlish/supercuts-agent-payments-that-learn-with-walrus-memory-and-tatum-on-sui-5gb)
+[Launch video](https://youtu.be/PnCcrai8Kbs) · [Demo video](https://youtu.be/c4zur-LeqPE) · [npm package](https://www.npmjs.com/package/@supercuts-walrus/sdk) · [Blog post](https://dev.to/wurlish/supercuts-agent-payments-that-learn-with-walrus-memory-and-tatum-on-sui-5gb)
 
 ## Problem
 
