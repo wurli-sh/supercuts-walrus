@@ -1,19 +1,24 @@
-# Supercuts Phase 1 circuits
+# Supercuts circuits
 
 These circuits are the shielded settlement part of Supercuts' private agent
 negotiation and settlement layer. The authenticated agreement is handled by the
 backend; Walrus Memory informs later decisions, while the proof constrains the
 pool transition. The pool and artifacts are experimental Testnet software.
 
-The current files implement and test the frozen SHA-256 statement compressor.
-They intentionally expose exactly two public inputs and constrain every statement
-byte. Run:
+The circuits use a frozen SHA-256 statement compressor. They intentionally
+expose exactly two public inputs and constrain every statement byte. The
+current pinned pool uses the v2 circuits (statement version 2); the v1 circuits
+remain for redeeming existing v1 notes. Run:
 
 ```sh
 pnpm install --frozen-lockfile
-pnpm compile
-pnpm prove:test-only
+pnpm compile:v2
+pnpm test:v2
+pnpm prove:v2:test-only
 ```
+
+`pnpm compile` and `pnpm prove:test-only` build the v1 artifacts without
+touching v2. See [the v2 pool guide](../docs/pool-v2.md) for the deployment.
 
 For the recurring transaction path, install the pinned native prover once and
 benchmark it against SnarkJS using the same witness and proving key:
@@ -46,9 +51,11 @@ value conservation, agreement binding, and both parties' EdDSA
 authorizations. They expose only the two SHA-256 digest limbs accepted by Sui's
 Groth16 verifier.
 
-The build manifest remains `"testOnly": true`. No ceremony-reviewed proving
-key, prepared verifier key, pool object, or funded settlement run is included
-in this repository yet. Do not use these generated artifacts to custody value.
+The build manifest remains `"testOnly": true`. The proving keys come from a
+local, unreviewed setup; no ceremony-reviewed proving key exists. The pinned
+experimental Testnet pool and its funded runs (see
+[`docs/pool-v2.md`](../docs/pool-v2.md)) use these unaudited artifacts. Do not
+use them to custody value.
 
 `prove:test-only` prepares the local Powers of Tau file, creates a fresh local
 contribution for each circuit, proves the semantic fixtures, verifies them with

@@ -88,11 +88,11 @@ node backend/dist/seller-provision.js .secrets/seller-provision.json
 
 The seller provision command reads `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `SELLER_STATE_KEY` from the environment. Its config file must be owner-only. Deploy the `supercuts-sellers-testnet` service from [render.yaml](../render.yaml). Set its secret variables: the same three Supabase values, `FACILITATOR_URL`, and `FACILITATOR_SHARED_KEY`. The Anthropic key stays in the owner research environment and is not needed by the buyer-facing service. Omit or empty `SELLER_ALLOWED_BUYERS` for self-service access by any cryptographically valid buyer; set it to a comma-separated address list for a private offering. Use the same facilitator shared key as the existing facilitator deployment. The service exposes `/health`, `/v1/catalog`, encrypted negotiation and agreement APIs, protected x402 resources, and safe event metadata.
 
-Seed the saved owner privacy rule for the competitor-analysis capability before the Codex task:
-
 Walrus Mainnet Memory needs the repository's 1536-dimensional embedding adapter. Start Ollama with `embeddinggemma`, set `EMBEDDING_UPSTREAM_BASE_URL=http://127.0.0.1:11434/v1` and `EMBEDDING_UPSTREAM_MODEL=embeddinggemma`, run `pnpm --dir circuits embedding:adapter`, and point the owner-only memory config to `http://127.0.0.1:8787/v1` with model `embeddinggemma-1536` before seeding or recalling.
 
 The remote setup uses an owner-configured 0.65 recall distance limit. A live seeded rule was returned at about 0.58 with this adapter; the normal 0.35 limit excluded it. Supercuts still validates the returned memory's provenance and exact capability, seller, network, and asset scope before it affects settlement.
+
+For these five-role homes, seed the owner privacy rule for the competitor-analysis capability and check the roles:
 
 ```sh
 node backend/dist/demo.js seed-policy --state-dir .state/remote-demo-v2 \
@@ -231,14 +231,15 @@ Testnet facilitator, and exits nonzero unless all checks pass. It does not run
 a deal, request faucet funds, or queue an exit. A missing exit, unresolved
 outcome memory, or unreachable dependency must remain a failed check.
 
-Use [the voiceover](../demo/voiceover.md) and
-[recording cues](../demo/recording.md) to edit the video. Export the latest
-narration with `python3 demo/generate_voiceover.py --script-only`. Verify each
-spoken event against the recorded evidence before publishing.
+The voiceover and recording cues live in the local `demo/` kit, which is
+ignored by Git. Export the latest narration with
+`python3 demo/generate_voiceover.py --script-only`. Verify each spoken event
+against the recorded evidence before publishing.
 
 Public x402 exposes amount and payee. Shielded settlement avoids a direct
 payment naming the analysis seller and amount; the gas sender, funding,
 deposits, withdrawals, and pool activity remain visible. The pool is experimental
 Testnet software. Mainnet-backed Walrus Memory does not make the payment rail
-Mainnet. Run `scripts/warm-hosted.sh` immediately before recording; do not keep
-the free Render services awake on a schedule.
+Mainnet. `scripts/recording-new-run.sh` wakes the hosted services; if a
+recording starts late, run `scripts/warm-hosted.sh` again just before it. Do not
+keep the free Render services awake on a schedule.

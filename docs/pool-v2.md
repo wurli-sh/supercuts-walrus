@@ -69,7 +69,10 @@ reused ten completed encrypted memories from an earlier live run; each event
 marks that reuse, and the recording performs a fresh Walrus recall of the
 owner policy. The recalled policy selected the shielded rail. The confidential
 seller recovered its note and queued a 1,000,000 MIST exit for a later window.
-`supercuts-demo check --require-claude` passed on this event file.
+`supercuts-demo check --require-claude` passed on this event file. This
+recording used the earlier scripted runner; current recordings run every deal
+through `deal.execute` in Codex and use `scripts/recording-check.mjs` as the
+acceptance gate.
 The buyer profile used a 0.61 memory distance limit with the zero-padded
 `embeddinggemma-1536` adapter; the planner's longer query ranked the exact
 scoped owner rule at 0.59. This limit is specific to this demo's embedding

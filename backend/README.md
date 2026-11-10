@@ -67,7 +67,7 @@ pnpm --dir backend exec supercuts init --role buyer --home .state/live-buyer \
   --deployment-config config/phase1.testnet.json \
   --sui-key-file .secrets/sui.key --tatum-key-file .secrets/tatum.key \
   --write-grpc https://fullnode.testnet.sui.io:443 \
-  --tatum-grpc https://sui-testnet.gateway.tatum.io:443 \
+  --tatum-grpc https://sui-testnet-grpc.gateway.tatum.io:443 \
   --rapidsnark circuits/build/tools/rapidsnark-src/build_prover/src/prover
 ```
 
@@ -82,7 +82,7 @@ For the Codex buyer with three remote sellers, Claude-researched and owner-revie
 `supercuts-demo` is the operator entry point:
 
 ```sh
-# Four isolated development roles and their MCP configuration.
+# Five isolated development roles and their MCP configuration.
 supercuts-demo setup --state-dir .state/demo --mock
 supercuts-demo doctor --state-dir .state/demo
 supercuts-demo check --state-dir .state/demo --events evidence/run.jsonl
@@ -92,37 +92,27 @@ supercuts-demo replay --state-dir .state/demo --events evidence/run.jsonl
 supercuts-demo replay --events evidence/run.jsonl --serve --port 4173
 ```
 
+Its commands are `setup`, `doctor`, `seed-policy`, `check`, and `replay`.
 Omit `--mock` and provide the pinned deployment, Tatum, Sui gRPC, and optional
 owner-only Mainnet memory configuration arguments to create live profiles. The
 setup output prints only the buyer address/assets that need funding and the
-public seller `payTo` address. `live --workflow workflow.json` refuses mock
-profiles. Setup also requires `--workflow workflow.json` so the generated buyer
-mandate can be narrowed to its exact capability IDs/classes and rails. The live
-run creates a baseline plan, negotiates the public exact amount, executes the
-seller-owned x402 resource, writes ten typed Mainnet memories plus an owner
-privacy policy, restarts the buyer process, recalls citations without plaintext,
-creates the shielded plan, deposits a buyer note, signs and accepts a
-confidential agreement with the confidential seller, and settles it. The live
-workflow must set `publicOperationId` to the operation ID registered by the
-seller resource for `publicResourceUrl`. It must also set
-`buyerDepositAmount` above the confidential capability's minimum price so the
-private transfer can create a positive change note. Use a fresh operation ID
-and resource registration for each recording. The JSONL stream describes x402 amount/payee as
-public. Shielded settlement avoids a direct public payment revealing the deal
-amount or counterparty; funding, deposits, withdrawals, gas, and pool activity
-remain visible.
+public seller `payTo` address. `--workflow workflow.json` narrows the generated
+buyer mandate to exact capability IDs/classes and rails.
 
-For a Claude-agent recording, export `CLAUDE_API_KEY` or provide
-`live --claude-key-file <owner-only-file>`; a repository `.env` file is not
-loaded automatically. Validate the credential against Anthropic before starting
-a funded take.
-The recorded workflow can call Claude for bounded buyer decisions and records
-only the model, action, and token counts. Hosted seller price and agreement
-decisions are deterministic after backend validation; Claude web research runs
-before provisioning so model availability cannot interrupt a paid request. The
-backend still enforces capability, amount, rail, and agreement bindings. Validate that recording with
-`supercuts-demo check --require-claude`; an earlier funded run without these
-agent-decision events does not satisfy that gate.
+There is no scripted live runner. Deals run only through `deal.execute` in
+Codex: the confidential deal first, with the recalled owner privacy rule
+rerouting a requested x402 payment to shielded, then a public x402 deal. The
+remote demo guide gives the recording scripts and the acceptance gate
+(`scripts/recording-check.mjs`). The JSONL stream describes x402 amount/payee
+as public. Shielded settlement avoids a direct public payment revealing the
+deal amount or counterparty; funding, deposits, withdrawals, gas, and pool
+activity remain visible.
+
+Hosted seller price and agreement decisions are deterministic after backend
+validation; Claude web research runs before provisioning so model availability
+cannot interrupt a paid request. `supercuts-demo check --require-claude`
+applies only to event streams from the earlier scripted runner, which recorded
+Claude agent-decision events.
 
 The optional `--memory-config-file` is imported from a mode-0600 JSON file and
 stored only as encrypted role state. It has the `ManualMemoryConfig` fields
@@ -148,9 +138,9 @@ for both writes and recalls.
 - `PrivateWallet` reconciles only finalized, pinned pool evidence and recovers
   payment/change notes from matching openings.
 - `ExactResourceServer` adds a signed request binding and atomic payment-use
-  ledger around the standard x402 exact rail. The seller-owned resource URL is
-  supplied to the live workflow; the facilitator only validates and relays the
-  buyer-signed transaction.
+  ledger around the standard x402 exact rail. The seller owns the protected
+  resource; the facilitator only validates and relays the buyer-signed
+  transaction.
 - `SealClientDisclosureTransport` encrypts auditor-scoped disclosure packages;
   `scripts/seal-live-e2e.ts` supplies the deployed account policy approval PTB,
   verifies finalized chain evidence, and gates the designated auditor decrypt.
@@ -160,8 +150,8 @@ The selected x402 facilitator URL remains public deployment configuration. Its
 resource service as `x-supercuts-facilitator-key`, and must never appear in a
 buyer profile, manifest, event log, or dashboard. The Testnet
 Seal policy is pinned in `config/seal-policy.testnet.json`. No test-only pool is represented as production-safe. Run the
-repository-level `scripts/phase2-check.sh` and see `phase-2-report.md` for the
-live test evidence and explicit production boundary.
+repository-level `scripts/phase2-check.sh` for the live gate, and see
+[the v2 pool guide](../docs/pool-v2.md) for funded Testnet evidence.
 
 ## Protocol memory worker
 

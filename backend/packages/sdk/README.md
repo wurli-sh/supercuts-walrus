@@ -85,9 +85,11 @@ index shipped in the package, and only then installs them in `~/.supercuts/proof
 `SUPERCUTS_PROOFS_DIR`). Until then the doctor reports `shielded-proofs` as `unavailable`. Proofs use
 the bundled SnarkJS; set `SUPERCUTS_RAPIDSNARK` to a RapidSnark binary for faster proving.
 
-When the owner stores a privacy rule for a seller (`supercuts policy add --home ./buyer --capability-id <id>`), that Walrus Memory
-outranks an agent's `requestedRail: "x402"`: the deal settles through the shielded pool instead, and
-the evidence shows `memoryInfluence.changedRail` with reason `MEMORY_PRIVACY_OVERRODE_RAIL`.
+When the owner stores a privacy rule (`supercuts policy add --home ./buyer --capability-class sui.confidential-analysis`),
+that Walrus Memory outranks an agent's `requestedRail: "x402"`: the deal settles through the shielded pool instead,
+and the evidence shows `memoryInfluence.changedRail` with reason `MEMORY_PRIVACY_OVERRODE_RAIL`. A class rule
+survives a seller rotating its capability ID; a `--capability-id <id>` rule binds one signed offer and lapses
+when it rotates.
 
 **5. Run a deal.**
 

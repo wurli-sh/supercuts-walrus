@@ -12,9 +12,9 @@ not call Walrus directly. The shielded pool is experimental and runs only on Sui
 The quickest path is one guided command:
 
 ```sh
-pnpm add @supercuts-walrus/backend
-supercuts-embedding-adapter &   # with EMBEDDING_UPSTREAM_BASE_URL and EMBEDDING_UPSTREAM_MODEL set
-supercuts onboard buyer --home ./buyer
+pnpm add @supercuts-walrus/backend@0.1.10
+pnpm exec supercuts-embedding-adapter &   # with EMBEDDING_UPSTREAM_BASE_URL and EMBEDDING_UPSTREAM_MODEL set
+pnpm exec supercuts onboard buyer --home ./buyer
 ```
 
 It asks every question first: the standing policy below, which signed
