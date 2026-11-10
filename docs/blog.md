@@ -1,6 +1,6 @@
 ---
 title: "Supercuts: agent payments that learn, with Walrus Memory and Tatum on Sui"
-published: false
+published: true
 description: "Private negotiation and settlement for AI agents. Every payment starts with a Walrus Memory recall and ends with a verified memory write, checked against Sui through Tatum."
 tags: sui, ai, web3, blockchain
 cover_image: https://raw.githubusercontent.com/wurli-sh/supercuts-walrus/main/docs/assets/banner.png
@@ -20,7 +20,7 @@ A normal Sui transfer shows the amount and the payee to anyone who looks. That i
 
 - **Repo:** https://github.com/wurli-sh/supercuts-walrus
 - **npm:** `@supercuts-walrus/sdk` and `@supercuts-walrus/backend`
-- **Demo video:** _DEMO_VIDEO_URL_
+- **Demo video:** https://youtu.be/c4zur-LeqPE
 
 ---
 
@@ -66,7 +66,7 @@ A few design choices mattered a lot:
 - **Encrypted before it leaves the machine.** Memory plaintext is embedded and encrypted locally. The Walrus Memory relayer only sees ciphertext.
 - **Signed, so authority travels.** Trusted memories are wrapped in an Ed25519 envelope signed with the owner's memory key. When the same buyer recalls them on another machine, Supercuts checks the signature before treating a memory as an owner rule. Anything an agent wrote itself stays advisory: a model cannot relax the owner's privacy rule by "remembering" something convenient.
 - **Each buyer gets its own namespace.** Onboarding a fresh buyer creates a fresh Memory namespace, so one buyer's lessons never leak into another's.
-- **More than 10 Mainnet memories.** The recorded demo used ten completed live encrypted Memory writes (labelled as reused in the event stream) plus a fresh recall of the owner policy.
+- **Ten live Mainnet memories in the recording.** The 2026-11-02 recorded run used ten completed live encrypted Memory writes (labelled as reused in the event stream) plus a fresh recall of the owner policy. Every `deal.execute` deal since then writes its own verified outcome memory.
 
 ### 2. Walrus blobs for the deal trail
 
@@ -160,6 +160,8 @@ For any deal, `deal.evidence` returns `memoryInfluence`: what the same mandate w
 | Relayed pool exit | [`GthWzx5k…`](https://suiscan.xyz/testnet/tx/GthWzx5kXsZ8DDkGiWZQJKaraDw3PAhHyXv5F9TJ9oGu) |
 | Recorded public x402 payment | [`GrK5gR9S…`](https://suiscan.xyz/testnet/tx/GrK5gR9SBzGehv63f8xbau58YyiyssZ1pn2AbBT114kE) |
 | Recorded confidential payment | [`3merQzwR…`](https://suiscan.xyz/testnet/tx/3merQzwRfYuQ2y4gr9Qe2VJTFS4TYHJXiwvQbEtbESwW) |
+| `deal.execute` shielded deal | [`HxyeTY9T…`](https://suiscan.xyz/testnet/tx/HxyeTY9ThQoAtz4a1FLcgJhj1vtsSGSB3zyz6A9fyoeq) |
+| `deal.execute` public x402 deal | [`CAWTGRYS…`](https://suiscan.xyz/testnet/tx/CAWTGRYSr5aTzMmToxZbZQmeX4DN2KiZz7ANoZxNsGeM) |
 
 ---
 
@@ -167,7 +169,7 @@ For any deal, `deal.evidence` returns `memoryInfluence`: what the same mandate w
 
 ```sh
 printf 'allowBuilds:\n  blake-hash: true\n' > pnpm-workspace.yaml   # pnpm 10+
-pnpm add @supercuts-walrus/sdk @supercuts-walrus/backend
+pnpm add @supercuts-walrus/sdk@0.1.10 @supercuts-walrus/backend@0.1.10
 pnpm exec supercuts onboard buyer --home ./buyer
 pnpm exec supercuts proofs install   # once per machine, only for shielded payments
 ```
